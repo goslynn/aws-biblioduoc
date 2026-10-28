@@ -22,22 +22,26 @@ src/main/java/cl/duoc/biblioteca/
 ├── BibliotecaApplication.java
 ├── catalogo/
 │   ├── Libro.java                  record inmutable; "disponible" es calculado
-│   ├── CatalogoLibros.java         carga libros.json UNA vez; busqueda sin tildes
+│   ├── CatalogoLibros.java         lee la tabla libro (JdbcClient); busqueda sin tildes en SQL
 │   └── LibroController.java        GET /api/libros, /generos, /{id}
 ├── solicitudes/
 │   ├── Sede.java  EstadoSolicitud.java
 │   ├── ItemSolicitado.java  NuevaSolicitud.java    DTO de ENTRADA, con validaciones
 │   ├── LineaSolicitud.java  Solicitud.java         DTO de SALIDA
-│   ├── SolicitudesEnMemoria.java   ConcurrentHashMap + AtomicLong
+│   ├── RepositorioSolicitudes.java solicitud + linea_solicitud en PostgreSQL (JdbcClient)
 │   └── SolicitudController.java    POST y GET de solicitudes
 ├── web/
 │   ├── SaludController.java        GET /health, la sonda del Web Adapter
 │   └── ManejadorDeErrores.java     convierte los fallos de validacion en 400 utiles
 └── config/
-    └── SecurityConfig.java         segunda validacion del JWT + CORS
+    └── SecurityConfig.java         segunda validacion del JWT (JWKS embebido) + CORS
 src/main/resources/
 ├── application.properties
-└── libros.json                     los 20 libros del catalogo
+└── db/migration/                   las aplica Flyway al arrancar, como usuario maestro
+    ├── V1__esquema.sql             tablas, CHECKs, secuencia y el rol biblioteca_app
+    └── V2__catalogo_inicial.sql    SEED: los 20 libros del catalogo
+src/test/java/cl/duoc/biblioteca/
+└── PostgresDePrueba.java           PostgreSQL 16 en Docker (Testcontainers) para los tests
 ```
 
 ---
@@ -50,40 +54,63 @@ cd back
 ./mvnw test
 ```
 
+**Hace falta Docker**: los tests levantan un PostgreSQL 16 real con
+Testcontainers y le aplican las mismas migraciones que en AWS. Ademas
+reproducen la separacion de usuarios: Flyway entra como superusuario y la
+aplicacion como `biblioteca_app`, asi que si una consulta necesitara un permiso
+que ese rol no tiene, el test falla aqui y no en el despliegue.
+
 Los tests usan `MockMvc` y **simulan** la autenticacion con el post-processor
 `jwt()` de `spring-security-test`: se inyecta un token ya validado con las
 authorities que interesen. No hay red, no hay Cognito, y lo que se prueba son
 las **reglas** de `SecurityConfig` (401 sin token, 403 con token sin scope, 200
 con scope), no la criptografia, que es responsabilidad de la libreria.
 
-### Arrancar en local
+### Configuracion que recibe
 
-Con la seguridad activa hacen falta tres variables, que en AWS inyecta
-`aws/backend.yaml` desde los Outputs de CloudFormation:
+Nada de esto esta escrito en el repositorio: en AWS lo inyecta
+`aws/backend.yaml` como variables de entorno, desde los Outputs de
+CloudFormation y los secretos de Secrets Manager.
 
-```sh
-SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=https://cognito-idp.us-east-1.amazonaws.com/<POOL_ID> \
-BIBLIOTECA_SCOPE=biblioteca-api/acceso \
-BIBLIOTECA_ORIGEN=https://biblioteca-web-<CUENTA>.s3.us-east-1.amazonaws.com \
-java -jar target/biblioteca-backend-0.0.1-SNAPSHOT.jar
-```
+| Variable | Que es |
+|---|---|
+| `BIBLIOTECA_ISSUER` | Emisor exigido en el claim `iss` (Cognito) |
+| `BIBLIOTECA_JWKS` | Claves publicas de Cognito en JSON; las baja `build-backend.sh` |
+| `BIBLIOTECA_SCOPE` | Scope exigido (`biblioteca-api/acceso`) |
+| `BIBLIOTECA_ORIGEN` | Origen del frontend, para el CORS |
+| `SPRING_DATASOURCE_URL` | JDBC a RDS con `sslmode=verify-full` |
+| `SPRING_DATASOURCE_USERNAME` / `_PASSWORD` | Rol `biblioteca_app` |
+| `SPRING_FLYWAY_USER` / `_PASSWORD` | Usuario maestro, solo para las migraciones |
+| `BIBLIOTECA_APP_PASSWORD` | La de `biblioteca_app`, para que V1 cree el rol |
 
 Con eso, `GET /health` responde 200 y todo `/api/**` responde 401 sin un token
-valido de ese pool. En el repositorio **no hay ni un identificador de AWS
-escrito a mano**: por eso hay que darlos aqui.
+valido de ese pool.
 
 ---
 
 ## 3. Decisiones que conviene entender
 
-**El catalogo es estatico.** Se carga una vez desde `libros.json` y la lista
-queda inmutable. Sin base de datos: busqueda inmediata, cero infraestructura y
-un arranque en frio mas corto.
+**PostgreSQL con JDBC, sin JPA.** `JdbcClient` sobre records inmutables:
+Hibernate anadiria segundos al arranque en frio de la Lambda sin aportar nada a
+cuatro consultas. Todos los filtros van como parametros ligados, nunca
+concatenados: la inyeccion SQL no tiene por donde entrar.
 
-**Las solicitudes estan en memoria, y se dice.** `ConcurrentHashMap` dentro de
-la funcion: **se pierden en cada arranque en frio** y no se comparten entre
-instancias concurrentes. Se mitiga con `ReservedConcurrentExecutions: 1`. Es una
-limitacion declarada del alcance pedido, no un defecto escondido.
+**El seed es una migracion.** `V2__catalogo_inicial.sql` contiene los 20 libros
+que antes vivian en `libros.json` (convertido una vez con `jq` y borrado: una
+sola fuente de verdad). Lo aplica Flyway al arrancar, desde dentro de la VPC,
+porque la base es privada y no hay bastion. Las migraciones aplicadas **no se
+editan**: un cambio al catalogo es una `V3__...sql`.
+
+**Dos usuarios de base de datos.** Flyway usa el maestro, solo al arrancar. La
+aplicacion atiende las peticiones como `biblioteca_app`, que puede leer el
+catalogo y registrar solicitudes, y nada mas: ni DDL, ni `UPDATE`, ni
+`DELETE`. Una inyeccion o una credencial filtrada de la aplicacion no alcanzan
+para borrar tablas ni reescribir solicitudes.
+
+**El JWKS llega embebido.** La Lambda corre en una VPC sin salida a Internet
+(asi la base queda fuera del alcance publico) y no puede descargar las claves
+de Cognito. Las baja el pipeline y entran en `BIBLIOTECA_JWKS`. Si Cognito las
+rotara, todo token daria 401 hasta volver a correr `build-backend.sh`.
 
 **El solicitante sale del token.** `Principal.getName()`, que con Spring
 Security es el claim `sub` (una persona) o el `client_id` (un cliente M2M).

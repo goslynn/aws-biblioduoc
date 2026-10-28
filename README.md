@@ -7,11 +7,13 @@ indicando dias, motivo y sede de retiro.
 
 ```
 Angular en S3  ──▶  API Gateway (REST + Cognito)  ──▶  Spring Boot en Lambda
-      │                        │                              │
-   Amplify Auth          authorizer + scope            2.ª validacion del JWT
-   (code + PKCE)          + CORS + stage              catalogo y solicitudes
-      │                                                  en memoria
-      └──────────────▶  Amazon Cognito  ◀───── JWKS ─────────┘
+      │                        │                     ┌── VPC privada, sin salida a Internet ──┐
+   Amplify Auth          authorizer + scope          │  Lambda: 2.ª validacion del JWT        │
+   (code + PKCE)          + CORS + stage             │     │ TLS verify-full, 5432            │
+      │                                              │     ▼                                  │
+      │                                              │  RDS PostgreSQL 16 (sin IP publica)    │
+      │                                              └────────────────────────────────────────┘
+      └──────────────▶  Amazon Cognito  ── JWKS (lo baja el pipeline al desplegar) ──▶ Lambda
 ```
 
 Todo se crea con **CloudFormation** (una plantilla por servicio) desde la **AWS
@@ -25,22 +27,22 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 |---|---|
 | `back/` | Backend Spring Boot 4.1 (Java 21). El mismo jar corre con `java -jar` y dentro de Lambda |
 | `front/` | Frontend Angular 22 con AWS Amplify, publicado como sitio estatico en S3 |
-| `aws/` | Las cinco plantillas de CloudFormation, los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
+| `aws/` | Las siete plantillas de CloudFormation, los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
 | `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa. Tiene su propio [README](bruno/README.md) |
 
 ---
 
 ## 2. Que hace la aplicacion
 
-**Catalogo.** 20 libros cargados desde un JSON del classpath. Se busca por
-titulo, autor o ISBN (sin distinguir mayusculas ni tildes) y se filtra por
-genero y disponibilidad. Es **estatico**: no hay base de datos, y el filtrado
-lo resuelve el backend en memoria.
+**Catalogo.** 20 libros en la tabla `libro` de PostgreSQL, sembrados por la
+migracion Flyway `V2__catalogo_inicial.sql`. Se busca por titulo, autor o ISBN
+(sin distinguir mayusculas ni tildes, con la extension `unaccent`) y se filtra
+por genero y disponibilidad. La API solo lo lee.
 
 **Solicitudes.** Se eligen uno o varios libros en el catalogo y se completa un
 formulario con dias de prestamo (1-30), motivo (10-300 caracteres) y sede. El
 backend valida, resuelve los titulos contra el catalogo y guarda la solicitud
-**en memoria**.
+en **PostgreSQL**.
 
 | Metodo | Ruta | Respuestas |
 |---|---|---|
@@ -62,18 +64,29 @@ a maquina). Si viniera del cuerpo, cualquiera podria pedir libros a nombre de
 otro. Es tambien la prueba, dentro del codigo, de que el token llego intacto
 hasta Spring.
 
-### Persistencia: no hay, y se declara
+### Persistencia: PostgreSQL privado
 
-Las solicitudes viven en un `ConcurrentHashMap` dentro de la funcion Lambda.
-Eso significa que:
+Las solicitudes y el catalogo viven en **RDS PostgreSQL 16**. Sobreviven a los
+arranques en frio y se comparten entre todas las instancias de la Lambda.
 
-* **se pierden en cada arranque en frio**, cuando AWS recicla el entorno de
-  ejecucion tras unos minutos sin trafico;
-* **no se comparten entre instancias concurrentes**.
+La base **no esta expuesta**: no tiene IP publica, vive en subredes sin ruta a
+Internet (ni Internet Gateway ni NAT) y su security group solo acepta el 5432
+desde el security group de la Lambda. Por encima de eso:
 
-Se mitiga con `ReservedConcurrentExecutions: 1`, que fuerza una sola instancia
-a la vez. No lo resuelve: la solucion es persistencia, y esta fuera del alcance. 
-Es una limitacion **declarada**, no un defecto escondido.
+| Capa | Medida |
+|---|---|
+| Transporte | `rds.force_ssl=1`, y la aplicacion verifica certificado y nombre (`sslmode=verify-full`) |
+| Credenciales | Aleatorias, generadas por Secrets Manager desde CloudFormation; nunca pasan por el repo |
+| Privilegios | La aplicacion usa el rol `biblioteca_app` (solo `SELECT`/`INSERT`); el maestro solo lo usa Flyway al arrancar |
+| Reposo | Almacenamiento y backups cifrados |
+
+El esquema y el **seed** del catalogo los aplica **Flyway** al arrancar la
+Lambda, desde dentro de la VPC: no hay bastion ni ninguna otra via hacia la
+base, a proposito. Las dos concesiones que exige este diseno estan en §7.
+
+Para **consultarla desde tu equipo** (DataGrip, psql) hay una VPN WireGuard
+opcional y temporal: `./aws/scripts/vpn-up.sh` la levanta y configura el
+cliente; `./aws/scripts/vpn-down.sh` la borra. Detalles en `aws/README.md` §4.
 
 ### Como se consigue una cuenta
 
@@ -108,7 +121,10 @@ awsacademy start                # arranca el laboratorio y refresca credenciales
 ```
 
 Al terminar imprime la URL del sitio, la de la API, la cuenta de demostracion y
-los comandos para probar. Para desmontarlo:
+los comandos para probar. La primera vez tarda unos 10 minutos mas por la
+creacion de la instancia RDS. Requisitos locales: `aws`, `jq`, `curl`, `zip`,
+`python3`, `npm` y **Docker** (los tests del backend levantan un PostgreSQL con
+Testcontainers; `SKIP_TESTS=true` los salta). Para desmontarlo:
 
 ```sh
 ./aws/scripts/teardown.sh
@@ -282,6 +298,8 @@ Se declaran aqui en lugar de esconderlas.
 | **REST API** | **REST API. Se conserva** | No por los scopes por metodo, que el HTTP API tambien admite: por el authorizer `COGNITO_USER_POOLS`, por los `GatewayResponse` que hacen visible un 401 en el navegador, y por el paso explicito de desplegar al stage |
 | Consola web de AWS | **AWS CLI v2 + CloudFormation** | Reproducible, versionado e idempotente |
 | **Postman** | **Bruno**, versionado en el repositorio | Asserts automaticos, vive en git y corre en terminal |
+| Sin persistencia (o una base accesible por red) | **RDS privado, Lambda en VPC sin NAT** | Para no pagar un NAT, la Lambda no sale a Internet. Dos concesiones, declaradas: (1) el **JWKS de Cognito se fija al desplegar** (lo baja `build-backend.sh`): si Cognito rotara sus claves habria que volver a correr el pipeline; (2) las **contrasenas quedan resueltas en las variables de entorno** de la Lambda, legibles para quien tenga `lambda:GetFunctionConfiguration` en la cuenta. Leerlas en ejecucion exigiria un VPC endpoint de Secrets Manager, que se paga por hora |
+| Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql. Mientras existe, la VPC tiene un Internet Gateway, pero solo para una subred publica propia con el servidor VPN; las subredes de la Lambda y de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
 | `ng serve` en `localhost:4200` | **Sitio publicado en S3** | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |
 
 ---

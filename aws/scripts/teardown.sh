@@ -7,11 +7,16 @@
 #    Se borra al reves de como se creo, porque un stack no se puede eliminar
 #    mientras otro depende de sus recursos:
 #
+#      0. vpn        (opcional; vive en la red y abre la base) -> vpn-down.sh,
+#                       que ademas baja la interfaz local
 #      1. api        (depende de la Lambda y del pool)
-#      2. backend    (depende del bucket de artefactos)
-#      3. cognito
-#      4. web        <- hay que VACIAR el bucket primero
-#      5. artifacts  <- hay que vaciarlo, y ademas borrar TODAS las versiones
+#      2. backend    (depende del bucket, de la red y de la base)
+#      3. database   <- se borra la instancia SIN snapshot: es un laboratorio
+#      4. network    <- puede tardar hasta ~20 min: AWS libera con calma las
+#                       interfaces de red que la Lambda creo en sus subredes
+#      5. cognito
+#      6. web        <- hay que VACIAR el bucket primero
+#      7. artifacts  <- hay que vaciarlo, y ademas borrar TODAS las versiones
 #
 #  >>> POR QUE HAY QUE VACIAR LOS BUCKETS A MANO <<<
 #    CloudFormation se niega a borrar un bucket que tenga objetos dentro, y el
@@ -36,13 +41,16 @@ cat <<EOF
 
   Se van a ELIMINAR estos stacks de la cuenta ${ACCOUNT_ID} (${AWS_REGION}):
 
+      ${STACK_VPN}         (si existe) + la interfaz WireGuard de este equipo
       ${STACK_API}
       ${STACK_BACKEND}
+      ${STACK_DATABASE}   + la base PostgreSQL entera, sin snapshot
+      ${STACK_NETWORK}
       ${STACK_COGNITO}
       ${STACK_WEB}        + todo el contenido del bucket del sitio
       ${STACK_ARTIFACTS}  + todas las versiones de los artefactos
 
-  Se pierden tambien los usuarios de Cognito y las solicitudes en memoria.
+  Se pierden tambien los usuarios de Cognito y todas las solicitudes.
   Es irreversible.
 
 EOF
@@ -106,8 +114,14 @@ borra_stack() {
 vacia_bucket "$(output_de "$STACK_WEB" SiteBucketName)"
 vacia_bucket "$(output_de "$STACK_ARTIFACTS" ArtifactsBucketName)"
 
+# La VPN primero: su regla vive en el security group de la base y su subred en
+# la VPC. vpn-down.sh baja tambien la interfaz local, si esta levantada.
+"${ROOT}/aws/scripts/vpn-down.sh"
 borra_stack "$STACK_API"
 borra_stack "$STACK_BACKEND"
+borra_stack "$STACK_DATABASE"
+info "la red puede tardar hasta ~20 min: AWS esta liberando las interfaces de la Lambda"
+borra_stack "$STACK_NETWORK"
 borra_stack "$STACK_COGNITO"
 borra_stack "$STACK_WEB"
 borra_stack "$STACK_ARTIFACTS"

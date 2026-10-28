@@ -5,7 +5,9 @@
 #
 #  QUE HACE, EN CUATRO PASOS
 #    1. COMPILA    ./mvnw package  ->  back/target/biblioteca-backend-*.jar
-#    2. EMPAQUETA  el fat jar + un run.sh dentro de un ZIP
+#                  (los tests levantan un PostgreSQL en Docker: hace falta
+#                  Docker, o SKIP_TESTS=true)
+#    2. EMPAQUETA  el fat jar + un run.sh + la CA de RDS dentro de un ZIP
 #    3. PUBLICA    sube el ZIP al bucket de artefactos y anota su VersionId
 #    4. DESPLIEGA  actualiza el stack de la Lambda apuntando a ese VersionId
 #
@@ -23,7 +25,16 @@
 #    PROJECT_NAME (biblioteca)  AWS_REGION (us-east-1)  SKIP_TESTS (false)
 #    LAB_ROLE_ARN (se deduce)   EnableBypassDemoUrl (false)
 #
-#  DEPENDE DE que ya existan los stacks de artefactos, web y Cognito.
+#  DESCARGA DOS COSAS PUBLICAS (lecturas de configuracion, no pruebas)
+#    * El JWKS de Cognito: las claves publicas con que se firman los tokens.
+#      La Lambda vive en una VPC sin salida a Internet y no puede bajarlas
+#      ella misma, asi que se le entregan como parametro del stack.
+#    * El bundle de certificados de la CA de RDS para la region: con el, la
+#      aplicacion verifica que habla con SU base (sslmode=verify-full).
+#    Si Cognito rotara sus claves, basta con volver a correr este script.
+#
+#  DEPENDE DE que ya existan los stacks de artefactos, web, Cognito, red y
+#  base de datos.
 #  Este script NO prueba la API: eso es trabajo de Bruno y del navegador.
 # ==============================================================================
 set -euo pipefail
@@ -34,7 +45,7 @@ SKIP_TESTS="${SKIP_TESTS:-false}"
 OBJECT_KEY="backend/${PROJECT_NAME}-lambda.zip"
 ENABLE_BYPASS="${EnableBypassDemoUrl:-false}"
 
-requiere aws zip
+requiere aws zip curl jq
 [ -x "${ROOT}/back/mvnw" ] || die "no encuentro back/mvnw"
 
 ACCOUNT_ID="$(cuenta_aws)"
@@ -45,10 +56,25 @@ ARTIFACTS_BUCKET="$(output_obligatorio "$STACK_ARTIFACTS" ArtifactsBucketName)"
 ISSUER_URL="$(output_obligatorio "$STACK_COGNITO" IssuerUrl)"
 SCOPE_COMPLETO="$(output_obligatorio "$STACK_COGNITO" ScopeCompleto)"
 SITE_ORIGIN="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
+SUBNET_IDS="$(output_obligatorio "$STACK_NETWORK" PrivateSubnetIds)"
+LAMBDA_SG="$(output_obligatorio "$STACK_NETWORK" LambdaSecurityGroupId)"
+DB_ENDPOINT="$(output_obligatorio "$STACK_DATABASE" DbEndpoint)"
+DB_PORT="$(output_obligatorio "$STACK_DATABASE" DbPort)"
+DB_NAME="$(output_obligatorio "$STACK_DATABASE" DbName)"
+MASTER_SECRET_ARN="$(output_obligatorio "$STACK_DATABASE" MasterSecretArn)"
+APP_SECRET_ARN="$(output_obligatorio "$STACK_DATABASE" AppSecretArn)"
 info "bucket  ${ARTIFACTS_BUCKET}"
 info "issuer  ${ISSUER_URL}"
 info "scope   ${SCOPE_COMPLETO}"
 info "origen  ${SITE_ORIGIN}"
+info "base    ${DB_ENDPOINT}:${DB_PORT}/${DB_NAME} (privada)"
+
+# El JWKS, compactado a una linea: va como valor de un parametro y de una
+# variable de entorno. jq ademas comprueba que sea JSON con claves de verdad.
+log "Descargando las claves publicas de Cognito (JWKS)"
+JWKS="$(curl -fsS "${ISSUER_URL}/.well-known/jwks.json" | jq -ce 'select((.keys | length) > 0)')" \
+  || die "no pude descargar el JWKS de ${ISSUER_URL}"
+info "$(jq -r '.keys | map(.kid) | "claves: " + join(", ")' <<<"$JWKS")"
 
 # --- 1. Compilar --------------------------------------------------------------
 log "Compilando el backend con Maven"
@@ -66,13 +92,21 @@ info "jar $(basename "$JAR") ($(du -h "$JAR" | cut -f1))"
 
 # --- 2. Empaquetar ------------------------------------------------------------
 # Contenido del ZIP, todo en la raiz (Lambda lo descomprime en /var/task):
-#     app.jar  -> el fat jar, sin modificar
-#     run.sh   -> el "Handler" de la funcion, que ejecuta el Web Adapter
+#     app.jar     -> el fat jar, sin modificar
+#     run.sh      -> el "Handler" de la funcion, que ejecuta el Web Adapter
+#     rds-ca.pem  -> la CA de RDS, para verificar el certificado de la base
 log "Armando el ZIP de la Lambda"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 cp "$JAR" "${TMP}/app.jar"
+
+# La CA de RDS de la region: la que firma el certificado de la instancia. La
+# URL de jdbc (backend.yaml) la busca en /var/task/rds-ca.pem.
+curl -fsS -o "${TMP}/rds-ca.pem" \
+  "https://truststore.pki.rds.amazonaws.com/${AWS_REGION}/${AWS_REGION}-bundle.pem" \
+  || die "no pude descargar el bundle de la CA de RDS"
+grep -q 'BEGIN CERTIFICATE' "${TMP}/rds-ca.pem" || die "el bundle de la CA de RDS no contiene certificados"
 
 cat > "${TMP}/run.sh" <<'RUNSH'
 #!/bin/bash
@@ -88,7 +122,7 @@ RUNSH
 chmod +x "${TMP}/run.sh"
 
 ZIP="${TMP}/lambda.zip"
-( cd "$TMP" && zip -q -X "$ZIP" app.jar run.sh )
+( cd "$TMP" && zip -q -X "$ZIP" app.jar run.sh rds-ca.pem )
 info "zip $(du -h "$ZIP" | cut -f1)"
 
 # --- 3. Publicar en S3 --------------------------------------------------------
@@ -117,8 +151,16 @@ despliega_stack backend.yaml "$STACK_BACKEND" \
   "ArtifactsObjectKey=${OBJECT_KEY}" \
   "ArtifactsObjectVersion=${VERSION_ID}" \
   "IssuerUrl=${ISSUER_URL}" \
+  "JwksJson=${JWKS}" \
   "RequiredScope=${SCOPE_COMPLETO}" \
   "WebOrigin=${SITE_ORIGIN}" \
+  "PrivateSubnetIds=${SUBNET_IDS}" \
+  "LambdaSecurityGroupId=${LAMBDA_SG}" \
+  "DbEndpoint=${DB_ENDPOINT}" \
+  "DbPort=${DB_PORT}" \
+  "DbName=${DB_NAME}" \
+  "MasterSecretArn=${MASTER_SECRET_ARN}" \
+  "AppSecretArn=${APP_SECRET_ARN}" \
   "EnableBypassDemoUrl=${ENABLE_BYPASS}" \
   || { por_que_fallo "$STACK_BACKEND"; die "fallo el despliegue del backend"; }
 

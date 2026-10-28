@@ -24,8 +24,12 @@ STAGE_NAME="${STAGE_NAME:-test}"
 STACK_ARTIFACTS="${PROJECT_NAME}-artifacts"
 STACK_WEB="${PROJECT_NAME}-web"
 STACK_COGNITO="${PROJECT_NAME}-cognito"
+STACK_NETWORK="${PROJECT_NAME}-network"
+STACK_DATABASE="${PROJECT_NAME}-database"
 STACK_BACKEND="${PROJECT_NAME}-backend"
 STACK_API="${PROJECT_NAME}-api"
+# Opcional: no lo crea bootstrap.sh, sino vpn-up.sh.
+STACK_VPN="${PROJECT_NAME}-vpn"
 
 # Raiz del repositorio, calculada desde la ubicacion de ESTE archivo, para que
 # los scripts funcionen igual invocados desde cualquier directorio.

@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ==============================================================================
+#  biblioteca / database.yaml   --   PostgreSQL privado en RDS
+# ==============================================================================
+#
+#  QUE HACE
+#    * MasterSecret     -> usuario y contrasena MAESTROS, generados por Secrets
+#                          Manager. Solo los usa Flyway, al arrancar, para crear
+#                          el esquema y el rol de la aplicacion.
+#    * AppSecret        -> contrasena del rol biblioteca_app, el que usa la
+#                          aplicacion para atender peticiones (SELECT/INSERT y
+#                          nada mas; ver back/.../db/migration/V1__esquema.sql).
+#    * DbSubnetGroup    -> las dos subredes privadas de network.yaml.
+#    * DbParameterGroup -> obliga a TLS y endurece la autenticacion.
+#    * DbInstance       -> la base: PostgreSQL 16, db.t3.micro, cifrada, SIN IP
+#                          publica.
+#
+#  >>> COMO QUEDA PROTEGIDA, CAPA POR CAPA <<<
+#    1. Red: PubliclyAccessible false y subredes sin ruta a Internet. El
+#       endpoint resuelve a una IP privada que solo existe dentro de la VPC.
+#    2. Security group: solo acepta el 5432 desde el grupo de la Lambda.
+#    3. Transporte: rds.force_ssl=1 rechaza cualquier conexion sin TLS, y la
+#       aplicacion ademas verifica el certificado y el nombre (verify-full).
+#    4. Credenciales: aleatorias, de 32 caracteres, generadas aqui mismo.
+#       Nunca pasan por el repositorio ni por la terminal de nadie.
+#    5. Privilegios: la aplicacion no usa el maestro, sino biblioteca_app, que
+#       no puede ni borrar ni modificar nada.
+#    6. Reposo: almacenamiento y backups cifrados con la clave de RDS de la
+#       cuenta.
+#
+#  FLUJO QUE HABILITA
+#    1. backend.yaml resuelve los dos secretos AL DESPLEGAR (referencias
+#       dinamicas {{resolve:secretsmanager:...}}) y se los pasa a la Lambda.
+#    2. En el arranque en frio, Flyway entra con el maestro y aplica las
+#       migraciones pendientes: la primera vez, esquema + rol + seed.
+#    3. Desde ahi, cada peticion usa el pool de conexiones de biblioteca_app.
+#
+#  TRAMPAS
+#    * Las contrasenas no llevan signos de puntuacion (ExcludePunctuation): RDS
+#      prohibe varios ("/", "@", comillas) y V1 mete la de biblioteca_app entre
+#      comillas simples en un CREATE ROLE. 32 caracteres alfanumericos siguen
+#      siendo ~190 bits: imposibles de adivinar por fuerza bruta.
+#    * No se usa ManageMasterUserPassword (que RDS gestione el secreto solo):
+#      depende de permisos de KMS y de roles vinculados que el Learner Lab
+#      puede negar. Un secreto declarado aqui funciona igual y se ve entero.
+#    * Los secretos NO llevan Name fijo. Al borrar el stack, Secrets Manager
+#      no elimina el secreto en el acto: lo deja 30 dias "pendiente de
+#      borrado", y con un nombre fijo el siguiente bootstrap chocaria con el.
+#      Con el nombre que genera CloudFormation, cada despliegue es limpio.
+#    * Si se cambia a mano la contrasena de AppSecret, el rol de la base NO se
+#      entera: V1 ya se ejecuto. Habria que cambiarla tambien con ALTER ROLE.
+#    * Crear la instancia tarda ~10 minutos. Al cerrar la sesion del lab, AWS
+#      Academy la detiene; al volver a abrirla tarda unos minutos en estar
+#      disponible, y mientras tanto la API responde 500 (timeout de conexion).
+#    * DeletionPolicy: Delete, a proposito: es un laboratorio y teardown.sh
+#      debe dejar la cuenta limpia. En produccion seria Snapshot.
+#
+#  DEPENDE DE
+#    * network.yaml -> PrivateSubnetIds, DatabaseSecurityGroupId
+#
+#  ENTREGA (Outputs)
+#    DbEndpoint, DbPort, DbName, MasterSecretArn, AppSecretArn -> backend.yaml
+#    (Ningun Output contiene una contrasena: los ARN de los secretos no
+#    permiten leerlos sin permiso de Secrets Manager.)
+#
+#  DESPLIEGUE MANUAL
+#    aws cloudformation deploy --template-file aws/database.yaml \
+#      --stack-name biblioteca-database --region us-east-1 \
+#      --parameter-overrides \
+#        PrivateSubnetIds=<Output PrivateSubnetIds de network> \
+#        DatabaseSecurityGroupId=<Output DatabaseSecurityGroupId de network>
+# ==============================================================================
+
+Description: >-
+  biblioteca - PostgreSQL 16 en RDS, privado (sin IP publica), con TLS
+  obligatorio, cifrado y credenciales generadas en Secrets Manager. Depende de
+  network.yaml.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Default: biblioteca
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: Prefijo de nombres. Debe coincidir con el de los demas stacks.
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Output "PrivateSubnetIds" de network.yaml (dos subredes, dos AZ).
+
+  DatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Output "DatabaseSecurityGroupId" de network.yaml.
+
+  DbName:
+    Type: String
+    Default: biblioteca
+    AllowedPattern: "^[a-z][a-z0-9_]*$"
+    Description: Nombre de la base de datos que se crea dentro de la instancia.
+
+  DbPort:
+    Type: Number
+    Default: 5432
+    Description: Puerto de PostgreSQL. Debe coincidir con DatabasePort de network.yaml.
+
+  DbEngineVersion:
+    Type: String
+    Default: "16"
+    AllowedPattern: "^16(\\.[0-9]+)?$"
+    Description: >-
+      Version de PostgreSQL. Solo la mayor ("16") deja que RDS elija la menor
+      vigente, que es lo que se quiere con AutoMinorVersionUpgrade. cfn-lint
+      avisa (W3691) de que "16" esta deprecada porque su catalogo solo conoce
+      versiones menores; si RDS la rechazara, pasar una concreta de
+        aws rds describe-db-engine-versions --engine postgres \
+          --query "DBEngineVersions[?starts_with(EngineVersion,'16.')].EngineVersion"
+      Tiene que seguir siendo 16: la familia del parameter group es postgres16.
+
+  DbInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t4g.micro, db.t4g.small]
+    Description: >-
+      Tamano de la instancia. El Learner Lab solo permite clases pequenas, y
+      para un catalogo de 20 libros sobra la mas chica.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  #  Credenciales del usuario MAESTRO. Secrets Manager genera la contrasena;
+  #  CloudFormation la lee con una referencia dinamica y nunca la muestra.
+  # ---------------------------------------------------------------------------
+  MasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Usuario maestro de RDS. Solo lo usa Flyway para las migraciones.
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "biblioteca_admin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  Credenciales del rol de la APLICACION. RDS no sabe nada de este secreto:
+  #  el rol lo crea la migracion V1 con esta contrasena (placeholder de
+  #  Flyway). Por eso el nombre de usuario esta fijo aqui y en V1.
+  # ---------------------------------------------------------------------------
+  AppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Rol biblioteca_app (minimo privilegio). Lo usa la aplicacion.
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "biblioteca_app"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  Donde puede vivir la instancia: solo en las subredes privadas.
+  # ---------------------------------------------------------------------------
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ProjectName} - subredes privadas, sin ruta a Internet"
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  Configuracion del motor.
+  # ---------------------------------------------------------------------------
+  DbParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub "${ProjectName} - TLS obligatorio y auditoria de conexiones"
+      Family: postgres16
+      Parameters:
+        # Rechaza toda conexion sin TLS. En PostgreSQL 15+ ya viene asi por
+        # defecto en RDS, pero se fija para que no dependa de ese defecto.
+        rds.force_ssl: "1"
+        # Hash de contrasenas moderno (el antiguo md5 se puede reutilizar si
+        # se filtra el hash).
+        password_encryption: scram-sha-256
+        # Cada conexion y desconexion queda en el log de RDS: si alguien
+        # llegara a conectarse, se veria.
+        log_connections: "1"
+        log_disconnections: "1"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  La instancia.
+  # ---------------------------------------------------------------------------
+  DbInstance:
+    Type: AWS::RDS::DBInstance
+    # Ver TRAMPAS: en un laboratorio, borrar el stack debe borrar la base.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      Engine: postgres
+      # Debe coincidir con Family del parameter group y con la imagen de los
+      # tests (postgres:16-alpine). Ver el parametro.
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      DBName: !Ref DbName
+      Port: !Ref DbPort
+
+      AllocatedStorage: "20"
+      StorageType: gp2
+      # Cifrado en reposo con la clave administrada de RDS (aws/rds). Cubre
+      # tambien los backups y los snapshots.
+      StorageEncrypted: true
+
+      MasterUsername: !Sub "{{resolve:secretsmanager:${MasterSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${MasterSecret}:SecretString:password}}"
+
+      # --- La red: lo mas importante de este recurso -------------------------
+      # Sin IP publica: el nombre del endpoint resuelve a una IP de la VPC.
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroupId
+
+      DBParameterGroupName: !Ref DbParameterGroup
+
+      # Parches menores de seguridad automaticos, en la ventana de
+      # mantenimiento.
+      AutoMinorVersionUpgrade: true
+      # Un dia de backups automaticos: suficiente para un laboratorio y
+      # permite restaurar a un punto en el tiempo si algo sale mal.
+      BackupRetentionPeriod: 1
+      DeleteAutomatedBackups: true
+      # Una sola AZ: Multi-AZ duplica el coste y el Learner Lab no lo necesita.
+      MultiAZ: false
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+
+  DbEndpoint:
+    Description: Nombre DNS de la instancia. Solo resuelve a algo alcanzable desde la VPC.
+    Value: !GetAtt DbInstance.Endpoint.Address
+
+  DbPort:
+    Description: Puerto de PostgreSQL.
+    Value: !GetAtt DbInstance.Endpoint.Port
+
+  DbName:
+    Description: Base de datos de la aplicacion.
+    Value: !Ref DbName
+
+  MasterSecretArn:
+    Description: Secreto del usuario maestro (backend.yaml lo resuelve para Flyway).
+    Value: !Ref MasterSecret
+
+  AppSecretArn:
+    Description: Secreto del rol biblioteca_app (backend.yaml lo resuelve para el datasource).
+    Value: !Ref AppSecret

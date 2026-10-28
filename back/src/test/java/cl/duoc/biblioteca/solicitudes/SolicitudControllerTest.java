@@ -10,6 +10,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
+
+import cl.duoc.biblioteca.PostgresDePrueba;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.JwtRequestPostProcessor;
@@ -18,6 +21,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 /** Las reglas de negocio del formulario, que son las que producen 400, 404 y 409. */
 @SpringBootTest
+@Import(PostgresDePrueba.class)
 @AutoConfigureMockMvc
 class SolicitudControllerTest {
 
@@ -55,7 +59,7 @@ class SolicitudControllerTest {
     }
 
     @Test
-    @DisplayName("lo creado se puede recuperar despues: el estado en memoria persiste en el proceso")
+    @DisplayName("lo creado se puede recuperar despues: queda guardado en PostgreSQL")
     void listaYRecupera() throws Exception {
         String cuerpo = mvc.perform(post("/api/solicitudes")
                         .contentType(MediaType.APPLICATION_JSON).content(VALIDA).with(comoAlumno()))
@@ -109,7 +113,7 @@ class SolicitudControllerTest {
     @Test
     @DisplayName("pedir un libro sin ejemplares responde 409")
     void sinEjemplares() throws Exception {
-        // L-005 (Building Microservices) tiene ejemplares: 0 en libros.json
+        // L-005 (Building Microservices) tiene ejemplares: 0 en el seed (V2__catalogo_inicial.sql)
         mvc.perform(post("/api/solicitudes").contentType(MediaType.APPLICATION_JSON)
                         .content(VALIDA.replace("L-001", "L-005")).with(comoAlumno()))
                 .andExpect(status().isConflict());

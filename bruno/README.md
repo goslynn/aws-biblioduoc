@@ -140,7 +140,7 @@ bruno/
 │   ├── list.yml            GET /api/libros      (q, genero, soloDisponibles)
 │   └── get.yml             GET /api/libros/:id  (200 · 404)
 └── solicitudes/
-    ├── folder.yml          reglas de negocio y limitacion de la persistencia
+    ├── folder.yml          reglas de negocio y persistencia
     ├── create.yml          POST /api/solicitudes  (4 variantes de cuerpo)
     ├── list.yml            GET /api/solicitudes   (mias, estado)
     └── get.yml             GET /api/solicitudes/:id
@@ -171,7 +171,7 @@ Detalles que conviene conocer al tocarla:
 |---|---|---|
 | Todo responde 401 en el entorno `aws` | Los tokens caducaron (60 min) | `./aws/pipeline/bruno-env.sh` |
 | 401 donde esperabas 200, con tokens recien generados | El token no trae el custom scope: el authorizer responde igual que ante un token invalido | Comprueba el claim `scope`; el caso vive en el entorno `aws-usuario-sin-scope` |
-| `solicitudes/get` da 404 | La Lambda se reciclo y el estado en memoria se perdio | Ejecuta `create` otra vez; es esperado |
-| `solicitudes/list` devuelve `[]` | Lo mismo | Esperado: no hay base de datos |
+| `solicitudes/get` da 404 | El id no existe en la base (por ejemplo, tras un `teardown.sh`) | Ejecuta `create` otra vez |
+| Todo responde 500 tras reabrir el lab | RDS todavia esta arrancando | Espera a que la instancia este `available` y repite |
 | Error de certificados de OpenSSL | NixOS | `SSL_CERT_DIR=/etc/ssl/certs bru run …` |
 | Falla `responde lo que corresponde a esta credencial` | Es la señal util: el codigo real no es el que esa credencial deberia obtener | Mira el codigo devuelto y compara con la tabla de la §3 |

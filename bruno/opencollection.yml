@@ -20,8 +20,8 @@ request:
 docs: |
   # biblioteca-api
 
-  Catalogo de libros (estatico, sin base de datos) y solicitudes de prestamo
-  (en memoria). Todo pasa por **API Gateway REST**, que valida el JWT con un
+  Catalogo de libros (solo lectura) y solicitudes de prestamo, guardados en
+  PostgreSQL. Todo pasa por **API Gateway REST**, que valida el JWT con un
   authorizer de **Cognito** y exige el scope `biblioteca-api/acceso` en cada
   metodo. Detras hay un **Spring Boot sobre Lambda** que vuelve a validar el
   mismo token.

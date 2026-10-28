@@ -70,9 +70,9 @@ docs: |
 
   ## Por que puede venir vacia
 
-  Porque **no hay base de datos**. Si la Lambda se reciclo entre tu `create` y
-  este `list`, la lista sale vacia y no hay ningun error: el estado vive en
-  memoria. Vuelve a ejecutar `create` y despues este.
+  Solo si todavia no se ha creado ninguna solicitud (o, con `mias=true`,
+  ninguna del portador del token). Las solicitudes estan en PostgreSQL: no se
+  pierden cuando la Lambda se recicla. Ejecuta `create` y despues este.
 
 examples:
   - name: 200 con una solicitud
@@ -97,8 +97,8 @@ examples:
           ]
   - name: 200 lista vacia
     description: >-
-      No es un error: la Lambda se reciclo y el estado en memoria se perdio, o
-      todavia no se ha creado ninguna solicitud.
+      No es un error: todavia no se ha creado ninguna solicitud (o ninguna del
+      portador del token, con mias=true).
     response:
       status: 200
       statusText: OK

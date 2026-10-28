@@ -32,10 +32,10 @@ import jakarta.validation.Valid;
 @RequestMapping({ "/api/solicitudes", "/v1/api/solicitudes" })
 public class SolicitudController {
 
-    private final SolicitudesEnMemoria solicitudes;
+    private final RepositorioSolicitudes solicitudes;
     private final CatalogoLibros catalogo;
 
-    public SolicitudController(SolicitudesEnMemoria solicitudes, CatalogoLibros catalogo) {
+    public SolicitudController(RepositorioSolicitudes solicitudes, CatalogoLibros catalogo) {
         this.solicitudes = solicitudes;
         this.catalogo = catalogo;
     }
@@ -88,7 +88,7 @@ public class SolicitudController {
     /**
      * GET /api/solicitudes?estado=&mias=
      *
-     * Sin parametros devuelve todas las solicitudes que hay en memoria (la
+     * Sin parametros devuelve todas las solicitudes guardadas (la
      * bandeja del equipo de biblioteca). Con {@code mias=true} devuelve solo
      * las del portador del token, que es lo que consume la vista
      * "mis solicitudes" del frontend.

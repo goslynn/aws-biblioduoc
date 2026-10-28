@@ -5,9 +5,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 /**
  * Un libro del catalogo.
  *
- * Es un {@code record} inmutable: el catalogo es ESTATICO (se carga una vez
- * desde src/main/resources/libros.json y no cambia en toda la vida del
- * proceso), asi que nada aqui necesita setters ni base de datos.
+ * Es un {@code record} inmutable: es una fila de la tabla {@code libro} tal
+ * cual. JdbcClient lo construye por nombre de columna, asi que no hace falta
+ * ni JPA ni setters.
  *
  * @param id         identificador estable, formato "L-001"
  * @param titulo     titulo del libro

@@ -27,6 +27,9 @@ documento.
 awsacademy start                   # credenciales frescas; caducan cada ~4 h
 ./aws/scripts/bootstrap.sh         # crea TODO en orden; idempotente
 ./aws/scripts/teardown.sh          # borra todo (pide escribir BORRAR; --yes lo salta)
+
+./aws/scripts/vpn-up.sh            # opcional: VPN WireGuard hasta la base + cliente local (sudo)
+./aws/scripts/vpn-down.sh          # la baja y borra el stack (cuesta por hora)
 ```
 
 Pipelines parciales, cuando ya hay stacks desplegados:
@@ -53,7 +56,7 @@ es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
 
 ```sh
 cd back
-./mvnw package                                          # compila y corre los 15 tests
+./mvnw package                                          # compila y corre los 15 tests (necesita Docker)
 ./mvnw test
 ./mvnw test -Dtest=LibroControllerTest                  # una clase
 ./mvnw test -Dtest=LibroControllerTest#nombreDelMetodo  # un test
@@ -106,11 +109,14 @@ Gateway rechaza antes de invocarla.
 Angular (S3, endpoint REST)  ──▶  API Gateway REST (authorizer Cognito + scope)
                                           │ AWS_PROXY, payload 1.0
                                           ▼
-                              Lambda java21 + Lambda Web Adapter
-                              Spring Boot revalida el MISMO token
+                              Lambda java21 + Lambda Web Adapter   ┐ VPC privada:
+                              Spring Boot revalida el MISMO token  │ sin IGW ni NAT
+                                          │ TLS verify-full        │
+                                          ▼                        │
+                              RDS PostgreSQL 16, sin IP publica    ┘
 ```
 
-Cinco stacks, uno por plantilla, sin `Export`/`Fn::ImportValue`: se encadenan
+Siete stacks, uno por plantilla, sin `Export`/`Fn::ImportValue`: se encadenan
 con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
 
 | Plantilla | Stack | Depende de |
@@ -118,8 +124,11 @@ con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
 | `aws/artifacts.yaml` | `biblioteca-artifacts` | — |
 | `aws/web.yaml` | `biblioteca-web` | — |
 | `aws/cognito.yaml` | `biblioteca-cognito` | — (recibe la URL del sitio *calculada*) |
-| `aws/backend.yaml` | `biblioteca-backend` | artifacts, cognito, web + ZIP subido |
+| `aws/network.yaml` | `biblioteca-network` | — |
+| `aws/database.yaml` | `biblioteca-database` | network |
+| `aws/backend.yaml` | `biblioteca-backend` | artifacts, cognito, web, network, database + ZIP subido |
 | `aws/api.yaml` | `biblioteca-api` | cognito, backend, web |
+| `aws/vpn.yaml` (opcional) | `biblioteca-vpn` | network, database; lo crea `vpn-up.sh`, no el bootstrap |
 
 El ciclo aparente (Cognito necesita la URL del frontend; el frontend necesita
 Cognito) se rompe **calculando** `https://<proyecto>-web-<AccountId>.s3.<region>.amazonaws.com`
@@ -183,9 +192,22 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 * **Dos prefijos por controlador**: `@RequestMapping({"/api/x", "/v1/api/x"})`.
   En API Gateway `/v1/{proxy+}` es un unico recurso y el enrutado fino lo hace
   Spring. Un `/v2` seria otra clase y convivirian.
-* **Toda desviacion se declara**, no se esconde: README §7 (canon de la guia) y
-  las limitaciones del alcance (solicitudes en un `ConcurrentHashMap`, que se
-  pierden en cada arranque en frio).
+* **Toda desviacion se declara**, no se esconde: README §7 (canon de la guia,
+  JWKS fijado al desplegar, contrasenas resueltas en variables de entorno, VPN
+  opcional con IGW).
+* **La base no se expone.** Nada de `PubliclyAccessible: true`, NAT ni
+  bastion, y la red de la aplicacion no tiene IGW: la unica via permanente a
+  RDS es el SG de la Lambda. Por eso el seed y el esquema son migraciones
+  Flyway (`back/src/main/resources/db/migration`) que aplica la propia app al
+  arrancar. La unica excepcion es la **VPN opcional** (`aws/vpn.yaml`, fuera
+  del bootstrap): subred publica e IGW propios, solo UDP desde la IP del
+  equipo, y se borra al terminar con `vpn-down.sh`. No anadas nada mas a su
+  subred ni rutas a Internet a las privadas. Las migraciones aplicadas no se
+  editan: se anade una `V3__...sql`.
+* **Dos usuarios de BD**: Flyway entra como maestro (`MasterSecret`); la app
+  como `biblioteca_app` (`AppSecret`), solo `SELECT`/`INSERT`. Si una consulta
+  nueva necesita mas permisos, se conceden en una migracion, no se cambia de
+  usuario.
 * Si cambias comportamiento medido, **vuelve a medirlo** y actualiza la tabla
   del `README.md` §4 y el `ESPERADO_*` de los entornos de Bruno.
 
@@ -209,9 +231,20 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 * **`admin-initiate-auth` no emite custom scopes.** El token bueno solo sale del
   App Client M2M (`client_credentials`) o del flujo del navegador. Esa
   limitacion es justo lo que da gratis los casos 401/403 de la matriz.
-* **`ReservedConcurrentExecutions: 1`** mitiga (no resuelve) la perdida de
-  estado en memoria. Si la cuenta no permite reservar, desplegar con
-  `ReservedConcurrency=-1`.
+* **La Lambda no tiene salida a Internet.** Spring no puede descargar el JWKS:
+  lo baja `build-backend.sh` y entra por `BIBLIOTECA_JWKS`. No uses
+  `spring.security.oauth2.resourceserver.jwt.issuer-uri` (intentaria el
+  descubrimiento OIDC y no levantaria); el emisor va en `BIBLIOTECA_ISSUER`.
+  Tampoco puede llamar a ningun servicio de AWS en ejecucion: los secretos se
+  resuelven al desplegar.
+* **`src/test/resources/application.properties` reemplaza al principal**, no
+  se suma: cualquier propiedad sin valor por defecto (p. ej. el placeholder
+  `appPassword` de Flyway) hay que repetirla ahi.
+* **Flyway sustituye placeholders tambien en los comentarios SQL**: no
+  escribas `${...}` en un comentario de una migracion.
+* **`ReservedConcurrency` (5 por defecto)** acota las conexiones a la
+  `db.t3.micro` (5 instancias × pool de 2). Si la cuenta no permite reservar,
+  desplegar con `ReservedConcurrency=-1`.
 
 La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 

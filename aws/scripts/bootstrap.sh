@@ -6,9 +6,12 @@
 #  QUE HACE, Y EN QUE ORDEN (el orden no es decorativo)
 #
 #    0. Comprueba herramientas y credenciales, y CALCULA la URL del sitio.
-#    1. artifacts + web + cognito        -> en paralelo: no dependen de nadie
+#    1. artifacts + web + cognito + network -> en paralelo: no dependen de nadie
+#    1b. database                        -> PostgreSQL privado (~10 min), dentro
+#                                           de la red de 1
 #    2. pipeline/build-backend.sh        -> compila, sube el ZIP y crea la Lambda
-#                                           (necesita 1: bucket, issuer, origen)
+#                                           (necesita 1 y 1b: bucket, issuer,
+#                                           origen, subredes, base)
 #    3. api                              -> necesita el pool y la funcion
 #    4. pipeline/api-deploy.sh           -> publica la API en el stage
 #    5. usuario de demostracion          -> para el login y para el caso
@@ -47,7 +50,7 @@ SKIP_WEB="${SKIP_WEB:-false}"
 
 # ------------------------------------------------------------------ paso 0 ----
 log "Comprobando el entorno"
-requiere aws zip curl python3
+requiere aws zip curl jq python3
 [ "$SKIP_WEB" = "true" ] || requiere npm
 
 ACCOUNT_ID="$(cuenta_aws)"
@@ -67,7 +70,7 @@ mkdir -p "$LOCAL_DIR"
 # ------------------------------------------------------------------ paso 1 ----
 # Los tres stacks independientes van en paralelo. Cada uno escribe su salida en
 # un archivo para que, si uno falla, se pueda mostrar SU log y no una mezcla.
-log "Desplegando los stacks independientes (artefactos, sitio, Cognito)"
+log "Desplegando los stacks independientes (artefactos, sitio, Cognito, red)"
 TMP_LOGS="$(mktemp -d)"
 trap 'rm -rf "$TMP_LOGS"' EXIT
 
@@ -85,6 +88,10 @@ despliega_stack cognito.yaml "$STACK_COGNITO" \
   "LogoutUrls=${SITE_URL}" > "${TMP_LOGS}/cognito" 2>&1 &
 PID_COGNITO=$!
 
+despliega_stack network.yaml "$STACK_NETWORK" \
+  "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/network" 2>&1 &
+PID_NETWORK=$!
+
 FALLO=0
 espera() {
   local pid="$1" nombre="$2" stack="$3"
@@ -100,7 +107,21 @@ espera() {
 espera "$PID_ARTIFACTS" artifacts "$STACK_ARTIFACTS"
 espera "$PID_WEB"       web       "$STACK_WEB"
 espera "$PID_COGNITO"   cognito   "$STACK_COGNITO"
+espera "$PID_NETWORK"   network   "$STACK_NETWORK"
 [ "$FALLO" -eq 0 ] || die "no se pudieron crear los stacks base"
+
+# ----------------------------------------------------------------- paso 1b ----
+# La base va despues de la red porque vive en sus subredes. Es el paso mas
+# lento de todo el bootstrap: RDS tarda unos 10 minutos en crear la instancia.
+# Si ya existe y no cambio nada, es instantaneo.
+log "Base de datos PostgreSQL (privada)"
+info "si es la primera vez, RDS tarda ~10 minutos en crear la instancia"
+despliega_stack database.yaml "$STACK_DATABASE" \
+  "ProjectName=${PROJECT_NAME}" \
+  "PrivateSubnetIds=$(output_obligatorio "$STACK_NETWORK" PrivateSubnetIds)" \
+  "DatabaseSecurityGroupId=$(output_obligatorio "$STACK_NETWORK" DatabaseSecurityGroupId)" \
+  || { por_que_fallo "$STACK_DATABASE"; die "fallo el despliegue de la base de datos"; }
+
 
 # ------------------------------------------------------------------ paso 2 ----
 log "Backend: compilar, empaquetar, publicar y desplegar"

@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ==============================================================================
+#  biblioteca / network.yaml   --   La red privada de la Lambda y de la base
+# ==============================================================================
+#
+#  QUE HACE
+#    * Vpc                     -> una red propia, aislada de la VPC por defecto.
+#    * PrivateSubnetA / B      -> dos subredes en dos zonas distintas: RDS exige
+#                                 al menos dos AZ en su DB subnet group.
+#    * PrivateRouteTable       -> la tabla de rutas de ambas, con UNA sola ruta:
+#                                 la local (10.20.0.0/16). Nada mas.
+#    * LambdaSecurityGroup     -> el de la funcion: no acepta nada entrante y
+#                                 solo puede SALIR hacia la base, puerto 5432.
+#    * DatabaseSecurityGroup   -> el de RDS: solo acepta el 5432 si viene del
+#                                 grupo de la Lambda. Ninguna IP, ningun rango.
+#
+#  >>> LO QUE NO HAY, Y ES LO IMPORTANTE <<<
+#    Ni Internet Gateway, ni NAT Gateway, ni ruta a 0.0.0.0/0. Desde dentro de
+#    esta VPC no se sale a Internet y desde Internet no se entra. La base queda
+#    alcanzable SOLO desde la Lambda.
+#
+#    ¿Y como valida Spring los tokens sin poder descargar las claves de
+#    Cognito? No las descarga: el pipeline las baja al desplegar y se las pasa
+#    a la Lambda en una variable (ver backend.yaml, parametro JwksJson). Ese
+#    truco es lo que ahorra el NAT, que ademas cuesta dinero por hora.
+#
+#    ¿Y los logs? Lambda los envia a CloudWatch por el plano de servicio de
+#    AWS, no por la red de la funcion: no necesitan ninguna ruta aqui.
+#
+#    La UNICA excepcion es opcional y temporal: vpn.yaml anade, mientras
+#    existe, una subred publica propia con un servidor WireGuard para consultar
+#    la base desde tu equipo. Las subredes de este stack siguen sin salida.
+#
+#  FLUJO QUE HABILITA
+#    1. API Gateway invoca la Lambda (por el servicio Lambda, no por la VPC).
+#    2. La Lambda abre una conexion TLS desde su interfaz en PrivateSubnetA/B
+#       hacia RDS:5432. LambdaSecurityGroup permite esa salida y
+#       DatabaseSecurityGroup permite esa entrada. Nada mas pasa.
+#
+#  TRAMPAS
+#    * Cuando un security group declara SecurityGroupEgress, CloudFormation
+#      BORRA la regla por defecto "todo permitido hacia fuera". Si no declara
+#      ninguna, la regla queda, aunque luego se anadan reglas sueltas. Por eso
+#      los dos grupos llevan una regla de salida ficticia hacia 127.0.0.1/32:
+#      es el patron documentado por AWS para decir "ninguna salida".
+#    * Las reglas que se apuntan mutuamente (Lambda -> DB y DB <- Lambda) van
+#      como recursos sueltos (SecurityGroupEgress / SecurityGroupIngress). Si
+#      fueran propiedades de cada grupo, cada uno necesitaria al otro creado
+#      antes: dependencia circular.
+#    * Al borrar el stack, las interfaces de red que Lambda creo en estas
+#      subredes tardan en liberarse (hasta ~20 min). teardown.sh lo avisa.
+#
+#  DEPENDE DE
+#    Nada.
+#
+#  ENTREGA (Outputs)
+#    PrivateSubnetIds, LambdaSecurityGroupId -> backend.yaml (VpcConfig)
+#    PrivateSubnetIds, DatabaseSecurityGroupId -> database.yaml
+#    VpcId, VpcCidr                            -> vpn.yaml (opcional)
+#
+#  DESPLIEGUE MANUAL
+#    aws cloudformation deploy --template-file aws/network.yaml \
+#      --stack-name biblioteca-network --region us-east-1
+# ==============================================================================
+
+Description: >-
+  biblioteca - VPC privada sin salida a Internet (sin IGW ni NAT) con dos
+  subredes y los security groups que solo dejan hablar a la Lambda con RDS.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Default: biblioteca
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: Prefijo de nombres. Debe coincidir con el de los demas stacks.
+
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+    Description: Rango de la VPC. Cualquier rango privado que no se solape con otra red tuya.
+
+  SubnetACidr:
+    Type: String
+    Default: 10.20.1.0/24
+    Description: Rango de la subred privada A (primera AZ de la region).
+
+  SubnetBCidr:
+    Type: String
+    Default: 10.20.2.0/24
+    Description: Rango de la subred privada B (segunda AZ de la region).
+
+  DatabasePort:
+    Type: Number
+    Default: 5432
+    Description: Puerto de PostgreSQL. Debe coincidir con DbPort de database.yaml.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  #  La VPC. Los dos flags DNS son obligatorios para RDS: sin ellos el nombre
+  #  del endpoint (xxx.rds.amazonaws.com) no se resuelve desde dentro.
+  # ---------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  Dos subredes privadas, una por AZ. !GetAZs devuelve las zonas de la
+  #  region en orden, asi que no se escribe ninguna a mano.
+  # ---------------------------------------------------------------------------
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      # Nada que se lance aqui recibe IP publica. Es el comportamiento por
+      # defecto en una VPC propia, pero se deja escrito porque es la intencion.
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-privada-a"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-privada-b"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  Tabla de rutas propia y SIN rutas anadidas: solo tiene la ruta local que
+  #  AWS pone siempre. Se declara (en vez de usar la principal de la VPC) para
+  #  que quede escrito, y revisable, que no hay salida.
+  # ---------------------------------------------------------------------------
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-privada"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PrivateSubnetARouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------------------------------------------------------------------
+  #  Security group de la Lambda.
+  #    Entrada: ninguna (a la Lambda no se le habla por red, se la invoca).
+  #    Salida:  solo hacia DatabaseSecurityGroup:5432 (regla suelta, abajo).
+  # ---------------------------------------------------------------------------
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - Lambda: solo puede salir hacia la base de datos"
+      VpcId: !Ref Vpc
+      # Regla ficticia: su unico efecto es que CloudFormation quite el "todo
+      # permitido" por defecto. Ver TRAMPAS en la cabecera.
+      SecurityGroupEgress:
+        - Description: Sin salida (anula la regla por defecto)
+          IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-lambda"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ---------------------------------------------------------------------------
+  #  Security group de RDS.
+  #    Entrada: solo 5432 desde LambdaSecurityGroup (regla suelta, abajo).
+  #    Salida:  ninguna. Las respuestas a la Lambda salen igual, porque los
+  #             security groups recuerdan las conexiones (son "stateful").
+  # ---------------------------------------------------------------------------
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - RDS: solo acepta conexiones de la Lambda"
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - Description: Sin salida (anula la regla por defecto)
+          IpProtocol: "-1"
+          CidrIp: 127.0.0.1/32
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-database"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # La unica salida de la Lambda: Postgres, y solo hacia el grupo de la base.
+  # Se referencia el GRUPO, no una IP: si RDS cambia de IP (failover,
+  # reinicio), la regla sigue valiendo.
+  LambdaToDatabaseEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      Description: PostgreSQL hacia RDS
+      IpProtocol: tcp
+      FromPort: !Ref DatabasePort
+      ToPort: !Ref DatabasePort
+      DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
+
+  # La unica entrada de la base: Postgres, y solo desde el grupo de la Lambda.
+  DatabaseFromLambdaIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroup
+      Description: PostgreSQL desde la Lambda
+      IpProtocol: tcp
+      FromPort: !Ref DatabasePort
+      ToPort: !Ref DatabasePort
+      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+Outputs:
+
+  VpcId:
+    Description: VPC privada del proyecto.
+    Value: !Ref Vpc
+
+  VpcCidr:
+    Description: Rango de la VPC. Lo usa vpn.yaml para limitar a donde se reenvia el trafico del tunel.
+    Value: !GetAtt Vpc.CidrBlock
+
+  PrivateSubnetIds:
+    Description: Las dos subredes privadas, separadas por coma. Las usan database.yaml y backend.yaml.
+    Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
+
+  LambdaSecurityGroupId:
+    Description: Security group de la Lambda (VpcConfig de backend.yaml).
+    Value: !Ref LambdaSecurityGroup
+
+  DatabaseSecurityGroupId:
+    Description: Security group de RDS (database.yaml).
+    Value: !Ref DatabaseSecurityGroup

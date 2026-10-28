@@ -64,8 +64,8 @@ docs: |
   # Listar y buscar en el catalogo
 
   `GET /api/libros`. Sin parametros devuelve los 20 titulos ordenados por
-  titulo; con ellos, el resultado de la busqueda. El filtrado lo hace el
-  backend en memoria.
+  titulo; con ellos, el resultado de la busqueda. El filtrado lo hace
+  PostgreSQL (con `unaccent` para ignorar las tildes).
 
   ## Parametros
 

@@ -1,96 +1,84 @@
 package cl.duoc.biblioteca.catalogo;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.text.Normalizer;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
 
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 
-import tools.jackson.core.type.TypeReference;
-import tools.jackson.databind.ObjectMapper;
-
 /**
- * El catalogo completo, en memoria.
+ * El catalogo de libros, leido de la tabla {@code libro} de PostgreSQL.
  *
- * POR QUE NO HAY BASE DE DATOS
- *   El catalogo de esta plataforma es estatico: se publica con la aplicacion y
- *   solo cambia cuando se despliega una version nueva. Cargarlo desde un JSON
- *   del classpath da busqueda instantanea, cero infraestructura que mantener y
- *   un arranque en frio mas corto en Lambda. La evolucion natural (una tabla
- *   real) esta descrita en el README.
+ * DE DONDE SALEN LOS DATOS
+ *   De la migracion db/migration/V2__catalogo_inicial.sql (el seed), que Flyway
+ *   aplica al arrancar. La aplicacion se conecta con el rol biblioteca_app, que
+ *   sobre esta tabla solo tiene SELECT: el catalogo no se puede modificar desde
+ *   la API ni aunque hubiera un fallo en este codigo.
  *
- * La lista se lee UNA vez, al construir el bean, y queda inmutable: no hay
- * estado compartido que pueda corromperse entre invocaciones concurrentes de
- * la Lambda.
+ * La interfaz publica es la misma que cuando el catalogo vivia en un JSON, asi
+ * que LibroController no se entero del cambio.
  */
 @Component
 public class CatalogoLibros {
 
-    private final List<Libro> libros;
+    private static final String COLUMNAS =
+            "SELECT id, titulo, autor, genero, anio, isbn, ejemplares, ubicacion, sinopsis FROM libro ";
 
-    public CatalogoLibros(ObjectMapper jackson) throws IOException {
-        try (InputStream json = new ClassPathResource("libros.json").getInputStream()) {
-            this.libros = List.copyOf(jackson.readValue(json, new TypeReference<List<Libro>>() {}));
-        }
+    private final JdbcClient jdbc;
+
+    public CatalogoLibros(JdbcClient jdbc) {
+        this.jdbc = jdbc;
     }
 
     /** Todos los libros, ordenados por titulo. */
     public List<Libro> todos() {
-        return libros.stream()
-                .sorted(Comparator.comparing(Libro::titulo))
-                .toList();
+        return jdbc.sql(COLUMNAS + "ORDER BY titulo").query(Libro.class).list();
     }
 
     /**
      * Busqueda del catalogo. Los tres filtros se combinan con Y logico y todos
      * son opcionales: sin ninguno, devuelve el catalogo entero.
      *
+     * Cada filtro va como parametro ligado (:texto, :genero), nunca concatenado
+     * en el SQL: es lo que hace imposible la inyeccion. Un filtro vacio se
+     * desactiva con "parametro = ''" en vez de armar el SQL a trozos.
+     *
      * @param texto           busca en titulo, autor e ISBN, sin distinguir
-     *                        mayusculas ni tildes ("garcia" encuentra "Garcia")
+     *                        mayusculas ni tildes (extension unaccent, ver V1)
      * @param genero          coincidencia exacta de genero, sin distinguir mayusculas
      * @param soloDisponibles si es true, descarta los libros sin ejemplares
      */
     public List<Libro> buscar(String texto, String genero, boolean soloDisponibles) {
-        String aguja = normalizar(texto);
-        String generoBuscado = normalizar(genero);
-
-        return libros.stream()
-                .filter(libro -> aguja.isEmpty()
-                        || normalizar(libro.titulo()).contains(aguja)
-                        || normalizar(libro.autor()).contains(aguja)
-                        || normalizar(libro.isbn()).contains(aguja))
-                .filter(libro -> generoBuscado.isEmpty()
-                        || normalizar(libro.genero()).equals(generoBuscado))
-                .filter(libro -> !soloDisponibles || libro.disponible())
-                .sorted(Comparator.comparing(Libro::titulo))
-                .toList();
+        return jdbc.sql(COLUMNAS + """
+                WHERE (:texto = '' OR unaccent(lower(titulo)) LIKE '%' || unaccent(lower(:texto)) || '%'
+                                   OR unaccent(lower(autor))  LIKE '%' || unaccent(lower(:texto)) || '%'
+                                   OR lower(isbn)             LIKE '%' || lower(:texto) || '%')
+                  AND (:genero = '' OR lower(genero) = lower(:genero))
+                  AND (NOT :soloDisponibles OR ejemplares > 0)
+                ORDER BY titulo
+                """)
+                .param("texto", limpiar(texto))
+                .param("genero", limpiar(genero))
+                .param("soloDisponibles", soloDisponibles)
+                .query(Libro.class)
+                .list();
     }
 
     /** Los generos presentes en el catalogo, para poblar el filtro del frontend. */
     public List<String> generos() {
-        return libros.stream().map(Libro::genero).distinct().sorted().toList();
+        return jdbc.sql("SELECT DISTINCT genero FROM libro ORDER BY genero").query(String.class).list();
     }
 
     /** Vacio si el id no existe: quien llama decide si eso es un 404. */
     public Optional<Libro> porId(String id) {
-        return libros.stream().filter(libro -> libro.id().equalsIgnoreCase(id)).findFirst();
+        return jdbc.sql(COLUMNAS + "WHERE upper(id) = upper(:id)")
+                .param("id", id)
+                .query(Libro.class)
+                .optional();
     }
 
-    /**
-     * Pasa un texto a minusculas y le quita las tildes, para que la busqueda no
-     * dependa de como se escriba el acento. "Gabriel Garcia Marquez" y
-     * "garcía márquez" terminan siendo comparables.
-     */
-    private static String normalizar(String texto) {
-        if (texto == null || texto.isBlank()) {
-            return "";
-        }
-        String sinTildes = Normalizer.normalize(texto.trim(), Normalizer.Form.NFD)
-                .replaceAll("\\p{InCombiningDiacriticalMarks}+", "");
-        return sinTildes.toLowerCase();
+    /** null y espacios cuentan como "sin filtro". */
+    private static String limpiar(String texto) {
+        return texto == null ? "" : texto.trim();
     }
 }

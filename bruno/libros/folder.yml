@@ -10,10 +10,10 @@ request:
 docs: |
   # libros
 
-  El catalogo de la biblioteca. Es **estatico**: se carga al arrancar la
-  aplicacion desde `back/src/main/resources/libros.json` y no cambia hasta el
-  siguiente despliegue. No hay base de datos detras, y por eso la busqueda es
-  inmediata y no hay endpoints de escritura aqui.
+  El catalogo de la biblioteca, en la tabla `libro` de PostgreSQL. Lo siembra
+  la migracion Flyway `V2__catalogo_inicial.sql` y la API solo lo **lee**: el
+  rol con el que se conecta la aplicacion no tiene permiso de escritura sobre
+  esa tabla, y por eso no hay endpoints de escritura aqui.
 
   ## Modelo
 

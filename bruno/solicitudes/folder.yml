@@ -48,11 +48,10 @@ docs: |
   Por eso, con el entorno `aws` veras `"solicitante"` con el id del cliente M2M,
   y desde el navegador veras el `sub` del usuario que inicio sesion.
 
-  ## Persistencia: no hay
+  ## Persistencia
 
-  Las solicitudes viven en un `ConcurrentHashMap` dentro de la Lambda. Se
-  **pierden en cada arranque en frio** y no se comparten entre instancias
-  concurrentes. Se mitiga con `ReservedConcurrentExecutions: 1`, que no lo
-  resuelve: es una limitacion declarada del alcance, no un defecto oculto.
-  Si `list` te devuelve una lista vacia despues de un rato sin usar la API,
-  es exactamente esto.
+  Las solicitudes se guardan en PostgreSQL (RDS privado): sobreviven a los
+  arranques en frio y todas las instancias de la Lambda ven las mismas. Una
+  solicitud creada con `create` se puede leer despues con `get` y `list`,
+  aunque pasen horas. Solo desaparecen si se destruye el stack de la base
+  (`teardown.sh`).

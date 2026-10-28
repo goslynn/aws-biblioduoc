@@ -2,6 +2,7 @@ package cl.duoc.biblioteca.config;
 
 import jakarta.servlet.DispatcherType;
 
+import java.text.ParseException;
 import java.util.List;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -24,6 +25,13 @@ import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
+import com.nimbusds.jose.proc.JWSVerificationKeySelector;
+import com.nimbusds.jose.proc.SecurityContext;
+import com.nimbusds.jwt.proc.DefaultJWTProcessor;
+
 /**
  * LA SEGUNDA CAPA DE SEGURIDAD (Defense in Depth).
  *
@@ -39,8 +47,8 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
  * ella, cualquiera que descubra la URL directa se salta el authorizer entero.
  *
  * QUE VALIDA, EN ORDEN
- *   1. Firma, emisor y expiracion   -> JwtDecoder, contra el JWKS de Cognito
- *      (que descarga solo, sin credenciales, del issuer-uri).
+ *   1. Firma, emisor y expiracion   -> JwtDecoder, contra las claves publicas
+ *      (JWKS) de Cognito que el pipeline entrega en BIBLIOTECA_JWKS.
  *   2. token_use == "access"        -> validador propio de aqui abajo.
  *   3. El scope exigido             -> hasAuthority("SCOPE_<scope>").
  *
@@ -59,9 +67,16 @@ public class SecurityConfig {
     @Value("${biblioteca.origen}")
     private String origenWeb;
 
-    /** Emisor de los tokens; el mismo que usa el JwtDecoder. */
-    @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}")
-    private String issuerUri;
+    /** Inyectado por BIBLIOTECA_ISSUER: el emisor que se exige en el claim "iss". */
+    @Value("${biblioteca.issuer}")
+    private String issuer;
+
+    /**
+     * Inyectado por BIBLIOTECA_JWKS: las claves PUBLICAS de Cognito, en JSON.
+     * Las descarga aws/pipeline/build-backend.sh al desplegar. Ver jwtDecoder().
+     */
+    @Value("${biblioteca.jwks}")
+    private String jwks;
 
     @Bean
     SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -156,18 +171,31 @@ public class SecurityConfig {
      * eso la validacion de audiencia estandar no aplica.)
      */
     @Bean
-    JwtDecoder jwtDecoder() {
-        // Se apunta al JWKS directamente en vez de usar withIssuerLocation():
-        // esa variante descarga el documento de descubrimiento OIDC AL ARRANCAR
-        // el contexto, lo que anade una llamada de red al arranque en frio de
-        // la Lambda y hace que la aplicacion no levante si Cognito tarda. Con
-        // el JWKS explicito la descarga es perezosa: ocurre en la primera
-        // peticion con token, y se cachea. La ruta es fija en Cognito.
-        NimbusJwtDecoder decoder = NimbusJwtDecoder
-                .withJwkSetUri(issuerUri + "/.well-known/jwks.json")
-                .build();
+    JwtDecoder jwtDecoder() throws ParseException {
+        // LAS CLAVES LLEGAN EMBEBIDAS, NO SE DESCARGAN.
+        //   La Lambda corre en una VPC privada SIN salida a Internet (es lo que
+        //   deja a la base de datos fuera de su alcance publico), asi que no
+        //   puede pedirle el JWKS a Cognito. El pipeline lo descarga al
+        //   desplegar y lo entrega en BIBLIOTECA_JWKS. Son claves publicas:
+        //   no hay ningun secreto en esa variable.
+        //
+        //   Cognito no rota sus claves de firma por su cuenta. Si algun dia lo
+        //   hiciera, todo token nuevo daria 401 ("kid" desconocido) hasta
+        //   volver a correr aws/pipeline/build-backend.sh.
+        //
+        //   Se fija ademas RS256, el unico algoritmo que usa Cognito: un token
+        //   firmado con cualquier otro se rechaza aunque la clave encaje.
+        DefaultJWTProcessor<SecurityContext> procesador = new DefaultJWTProcessor<>();
+        procesador.setJWSKeySelector(new JWSVerificationKeySelector<>(
+                JWSAlgorithm.RS256, new ImmutableJWKSet<>(JWKSet.parse(jwks))));
+        // Nimbus trae su propia verificacion de claims; la desactivamos para
+        // que la haga Spring con los validadores de aqui abajo, como antes.
+        procesador.setJWTClaimsSetVerifier((claims, contexto) -> { });
+        NimbusJwtDecoder decoder = new NimbusJwtDecoder(procesador);
 
-        OAuth2TokenValidator<Jwt> porDefecto = JwtValidators.createDefaultWithIssuer(issuerUri);
+        // Emisor y expiracion se siguen comprobando exactamente igual: no
+        // necesitan red, solo comparan claims del token ya verificado.
+        OAuth2TokenValidator<Jwt> porDefecto = JwtValidators.createDefaultWithIssuer(issuer);
         OAuth2TokenValidator<Jwt> soloAccessToken = jwt -> {
             if ("access".equals(jwt.getClaimAsString("token_use"))) {
                 return OAuth2TokenValidatorResult.success();

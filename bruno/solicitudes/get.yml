@@ -54,8 +54,8 @@ docs: |
 
   | Codigo | Cuando | Como reproducirlo aqui |
   |---|---|---|
-  | 200 | la solicitud existe en memoria | ejecutar `create` antes |
-  | 404 | el id no existe, o la Lambda se reciclo | `id = SOL-9999` |
+  | 200 | la solicitud existe | ejecutar `create` antes |
+  | 404 | el id no existe | `id = SOL-9999` |
   | 401 | token invalido o id token | entornos `aws-token-invalido` / `aws-id-token` |
   | 401 | token valido sin el scope: el authorizer no distingue | entorno `aws-usuario-sin-scope` |
 
@@ -84,7 +84,7 @@ examples:
             "fechaDevolucion": "2026-10-05"
           }
   - name: 404 no existe
-    description: O nunca existio, o la Lambda se reciclo y el mapa en memoria se vacio.
+    description: Esa solicitud nunca se creo.
     response:
       status: 404
       statusText: Not Found

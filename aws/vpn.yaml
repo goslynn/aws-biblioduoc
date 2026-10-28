@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# ==============================================================================
+#  biblioteca / vpn.yaml   --   Tunel WireGuard OPCIONAL hasta la base privada
+# ==============================================================================
+#
+#  PARA QUE EXISTE
+#    La base no tiene IP publica y su security group solo acepta a la Lambda:
+#    desde tu equipo no hay camino. Este stack abre UNO, temporal, para
+#    consultarla con DataGrip, psql o cualquier cliente. No forma parte de la
+#    aplicacion: bootstrap.sh no lo crea. Lo crea y lo borra
+#    aws/scripts/vpn-up.sh / vpn-down.sh, que ademas configuran tu equipo.
+#
+#  QUE HACE
+#    * PublicSubnet + InternetGateway + PublicRouteTable -> una subred publica
+#      NUEVA y SOLO para el servidor VPN. Las subredes privadas de network.yaml
+#      no se tocan: siguen sin ruta a Internet.
+#    * VpnSecurityGroup -> entrada: SOLO el puerto UDP de WireGuard y SOLO desde
+#      tu IP publica (la detecta vpn-up.sh). Ni SSH ni ningun otro puerto.
+#    * DatabaseFromVpnIngress -> una regla mas en el security group de RDS: el
+#      5432 tambien desde el servidor VPN. Desaparece al borrar este stack.
+#    * VpnInstance -> Ubuntu en t3.micro, sin par de llaves SSH y sin perfil
+#      IAM: no hay forma de "entrar" en la maquina; solo atravesarla.
+#
+#  FLUJO QUE HABILITA
+#    1. Tu equipo levanta una interfaz WireGuard: todo lo que va al rango de
+#       la VPC (10.20.0.0/16) viaja cifrado hasta la IP publica del servidor.
+#    2. El servidor solo acepta paquetes firmados con TU llave privada
+#       (registrada aqui por su parte publica, ClientPublicKey). Cualquier otro
+#       paquete se descarta sin respuesta: para un escaner, el puerto parece
+#       cerrado.
+#    3. El servidor reenvia el trafico a la VPC con SU propia IP (NAT): por eso
+#       RDS lo ve venir del VpnSecurityGroup y la regla de arriba lo acepta.
+#    4. El nombre DNS de una RDS privada resuelve a su IP privada tambien desde
+#       fuera, asi que el cliente usa el endpoint real y puede verificar el
+#       certificado (sslmode=verify-full), igual que la Lambda.
+#
+#  LA LLAVE PRIVADA DEL SERVIDOR NUNCA SALE DEL SERVIDOR
+#    Se genera en el primer arranque. Solo la PUBLICA se anuncia en la consola
+#    serie de la instancia (linea WIREGUARD_CLAVE_PUBLICA=...), de donde la lee
+#    vpn-up.sh con "aws ec2 get-console-output". La tuya se genera en tu equipo
+#    (aws/.local/vpn/, fuera de git) y aqui solo llega su parte publica.
+#
+#  TRAMPAS
+#    * El UserData solo corre en el PRIMER arranque. Si cambia ClientPublicKey,
+#      CloudFormation reinicia la instancia pero el servidor seguiria con la
+#      llave vieja. vpn-up.sh lo detecta y recrea el stack.
+#    * La IP publica cambia cada vez que la instancia se detiene (al cerrar la
+#      sesion del lab, por ejemplo). Por eso no hay Output con la IP: vpn-up.sh
+#      la lee en vivo. Volver a correrlo actualiza la configuracion local.
+#    * Tu IP publica tambien cambia al moverte de red. vpn-up.sh la vuelve a
+#      detectar y actualiza ClientCidr.
+#    * Cuesta por hora (instancia + IPv4 publica) mientras exista. Borrala con
+#      vpn-down.sh cuando termines.
+#
+#  DEPENDE DE
+#    network (VpcId, VpcCidr, DatabaseSecurityGroupId) y database (puerto).
+#
+#  ENTREGA (Outputs)
+#    InstanceId -> vpn-up.sh (IP publica en vivo y llave publica del servidor)
+#    VpnPort    -> vpn-up.sh (Endpoint de la configuracion del cliente)
+#
+#  DESPLIEGUE MANUAL (lo normal es usar ./aws/scripts/vpn-up.sh)
+#    aws cloudformation deploy --template-file aws/vpn.yaml \
+#      --stack-name biblioteca-vpn --region us-east-1 \
+#      --parameter-overrides VpcId=... VpcCidr=... DatabaseSecurityGroupId=... \
+#        ClientPublicKey=... ClientCidr=<tu-ip>/32
+# ==============================================================================
+
+Description: >-
+  biblioteca - Servidor WireGuard temporal en una subred publica propia, para
+  llegar desde un equipo autorizado a la RDS privada. Solo UDP desde una IP.
+
+Parameters:
+
+  ProjectName:
+    Type: String
+    Default: biblioteca
+    AllowedPattern: "^[a-z0-9-]+$"
+    Description: Prefijo de nombres. Debe coincidir con el de los demas stacks.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC del proyecto (Output VpcId de network.yaml).
+
+  VpcCidr:
+    Type: String
+    Description: Rango de la VPC (Output VpcCidr de network.yaml). Es lo unico a lo que el servidor reenvia trafico del tunel.
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.20.100.0/24
+    Description: Rango de la subred publica del servidor VPN. Dentro de VpcCidr y sin solaparse con las privadas.
+
+  DatabaseSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group de RDS (Output DatabaseSecurityGroupId de network.yaml).
+
+  DbPort:
+    Type: Number
+    Default: 5432
+    Description: Puerto de PostgreSQL (Output DbPort de database.yaml).
+
+  VpnPort:
+    Type: Number
+    Default: 51820
+    MinValue: 1024
+    MaxValue: 65535
+    Description: Puerto UDP de WireGuard.
+
+  ClientPublicKey:
+    Type: String
+    AllowedPattern: "^[A-Za-z0-9+/]{43}=$"
+    Description: >-
+      Llave PUBLICA WireGuard de tu equipo (la genera vpn-up.sh). Es publica:
+      no da acceso por si sola, solo identifica a quien tenga la privada.
+
+  ClientCidr:
+    Type: String
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$"
+    Description: Desde donde se acepta el UDP de WireGuard. vpn-up.sh pone tu IP publica actual con /32.
+
+  TunnelServerAddress:
+    Type: String
+    Default: 10.99.0.1
+    Description: IP del servidor dentro del tunel. Fuera de VpcCidr.
+
+  TunnelClientAddress:
+    Type: String
+    Default: 10.99.0.2
+    Description: IP de tu equipo dentro del tunel. Fuera de VpcCidr.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.nano, t3.micro, t3.small]
+    Description: WireGuard apenas consume CPU; el lab solo admite clases pequenas.
+
+  ImageId:
+    # Se resuelve al desplegar desde el parametro publico que mantiene
+    # Canonical: siempre la ultima Ubuntu 24.04, sin escribir ningun AMI a mano.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: AMI del servidor (Ubuntu 24.04, que trae WireGuard en el kernel y en apt).
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  #  La puerta a Internet. Solo la usa la subred publica de abajo: las tablas
+  #  de rutas de las subredes privadas no la mencionan.
+  # ---------------------------------------------------------------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn-igw"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VpcId
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      # No se asigna IP publica a todo lo que caiga aqui: solo la instancia la
+      # pide, de forma explicita, en su interfaz.
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn-publica"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Tabla de rutas PROPIA de la subred publica: local + 0.0.0.0/0 -> IGW.
+  # La tabla de las privadas (network.yaml) sigue solo con la ruta local.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn-publica"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    # La ruta no se puede crear hasta que el IGW este enganchado a la VPC.
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------------------------------------------------------------------------
+  #  Security group del servidor.
+  #    Entrada: SOLO UDP de WireGuard, SOLO desde ClientCidr.
+  #    Salida:  80/443 para instalar WireGuard con apt en el primer arranque,
+  #             y el puerto de la base hacia el security group de RDS.
+  #  Las respuestas del tunel salen igual: los security groups son stateful.
+  # ---------------------------------------------------------------------------
+  VpnSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - VPN: solo WireGuard desde la IP autorizada"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: WireGuard desde el equipo autorizado
+          IpProtocol: udp
+          FromPort: !Ref VpnPort
+          ToPort: !Ref VpnPort
+          CidrIp: !Ref ClientCidr
+      SecurityGroupEgress:
+        - Description: Paquetes de Ubuntu (HTTP)
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: Paquetes de Ubuntu (HTTPS)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: PostgreSQL hacia RDS
+          IpProtocol: tcp
+          FromPort: !Ref DbPort
+          ToPort: !Ref DbPort
+          DestinationSecurityGroupId: !Ref DatabaseSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # La regla que abre la base al tunel. Vive en ESTE stack aunque modifica un
+  # grupo de network.yaml: asi, borrar la VPN la quita sin tocar nada mas.
+  DatabaseFromVpnIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      Description: PostgreSQL desde el servidor VPN (temporal)
+      IpProtocol: tcp
+      FromPort: !Ref DbPort
+      ToPort: !Ref DbPort
+      SourceSecurityGroupId: !Ref VpnSecurityGroup
+
+  # ---------------------------------------------------------------------------
+  #  El servidor. Sin KeyName (no hay SSH) y sin IamInstanceProfile (no puede
+  #  llamar a ningun servicio de AWS): lo unico que hace es WireGuard.
+  # ---------------------------------------------------------------------------
+  VpnInstance:
+    Type: AWS::EC2::Instance
+    # Sin ruta a Internet, el apt del primer arranque fallaria.
+    DependsOn: PublicDefaultRoute
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnet
+          AssociatePublicIpAddress: true
+          GroupSet: [!Ref VpnSecurityGroup]
+      # IMDSv2 obligatorio: cierra el robo de metadatos por peticiones falsas.
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpn"
+        - Key: Project
+          Value: !Ref ProjectName
+      # Configuracion del servidor, en el primer arranque. CloudFormation
+      # sustituye las referencias entre llaves; las variables de bash van sin
+      # llaves para que no las confunda con las suyas.
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -q
+          apt-get install -y -q wireguard-tools iptables
+
+          # La llave privada del servidor: se genera aqui y no sale de aqui.
+          install -d -m 700 /etc/wireguard
+          umask 077
+          test -f /etc/wireguard/servidor.key || wg genkey > /etc/wireguard/servidor.key
+
+          # Interfaz por la que se sale a la VPC (ens5 en las t3).
+          SALIDA=$(ip -o -4 route show to default | awk '{print $5}')
+
+          # FORWARD: del tunel solo se reenvia hacia la VPC; lo demas se tira.
+          # NAT: los paquetes llegan a RDS con la IP del servidor, que es lo que
+          # permite la regla del security group de la base.
+          cat > /etc/wireguard/wg0.conf <<EOF
+          [Interface]
+          Address = ${TunnelServerAddress}/24
+          ListenPort = ${VpnPort}
+          PrivateKey = $(cat /etc/wireguard/servidor.key)
+          PostUp = sysctl -qw net.ipv4.ip_forward=1
+          PostUp = iptables -A FORWARD -i %i -d ${VpcCidr} -j ACCEPT
+          PostUp = iptables -A FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          PostUp = iptables -A FORWARD -i %i -j DROP
+          PostUp = iptables -t nat -A POSTROUTING -o $SALIDA -j MASQUERADE
+          PostDown = iptables -D FORWARD -i %i -d ${VpcCidr} -j ACCEPT
+          PostDown = iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+          PostDown = iptables -D FORWARD -i %i -j DROP
+          PostDown = iptables -t nat -D POSTROUTING -o $SALIDA -j MASQUERADE
+
+          [Peer]
+          PublicKey = ${ClientPublicKey}
+          AllowedIPs = ${TunnelClientAddress}/32
+          EOF
+          systemctl enable --now wg-quick@wg0
+
+          # Anuncia la llave PUBLICA en la consola serie, en este arranque y en
+          # todos los siguientes (cloud-init corre per-boot en cada inicio).
+          install -d /var/lib/cloud/scripts/per-boot
+          cat > /var/lib/cloud/scripts/per-boot/anunciar-wireguard.sh <<'EOF'
+          #!/bin/sh
+          echo "WIREGUARD_CLAVE_PUBLICA=$(wg pubkey < /etc/wireguard/servidor.key)" > /dev/console
+          EOF
+          chmod 755 /var/lib/cloud/scripts/per-boot/anunciar-wireguard.sh
+          /var/lib/cloud/scripts/per-boot/anunciar-wireguard.sh
+
+Outputs:
+
+  InstanceId:
+    Description: Servidor VPN. vpn-up.sh lee de aqui su IP publica en vivo y su llave publica.
+    Value: !Ref VpnInstance
+
+  VpnPort:
+    Description: Puerto UDP de WireGuard.
+    Value: !Ref VpnPort
