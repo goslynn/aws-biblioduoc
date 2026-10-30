@@ -1,0 +1,51 @@
+info:
+  name: unsubscribe
+  type: http
+  seq: 5
+
+http:
+  method: DELETE
+  url: "{{BASE_URL}}/api/libros/:id/avisame"
+  params:
+    - name: id
+      value: "L-005"
+      type: path
+      description: Libro del que darse de baja.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const lectura = Number(bru.getEnvVar("ESPERADO_LECTURA"));
+        const esperado = lectura === 200 ? 204 : lectura;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Dejar de esperar un libro
+
+  `DELETE /api/libros/{id}/avisame`. Cancela la suscripcion del portador del
+  token. Es idempotente: si no estaba suscrito, tambien responde 204.
+
+  ## Parametros
+
+  | Nombre | Tipo | Obligatorio | Descripcion |
+  |---|---|---|---|
+  | `id` | path | si | Libro, formato `L-001` |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 204 | baja hecha (o no estaba suscrito) | entorno `aws` |
+  | 404 | el libro no existe | `id = L-999` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+examples:
+  - name: 204 baja hecha
+    response:
+      status: 204
+      statusText: No Content

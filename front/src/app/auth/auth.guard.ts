@@ -24,3 +24,19 @@ export const authGuard: CanActivateFn = async () => {
   const estado = await sesion.refrescar();
   return estado.autenticado ? true : router.createUrlTree(['/inicio']);
 };
+
+/**
+ * Las vistas de gestion: hace falta sesion Y ser del grupo de empleados. Igual
+ * que authGuard, es comodidad: un estudiante que se lo salte veria la vista,
+ * pero cada llamada a /api/gestion le responderia 403 desde Spring.
+ */
+export const empleadoGuard: CanActivateFn = async () => {
+  const sesion = inject(SesionService);
+  const router = inject(Router);
+
+  const estado = await sesion.refrescar();
+  if (!estado.autenticado) {
+    return router.createUrlTree(['/inicio']);
+  }
+  return estado.empleado ? true : router.createUrlTree(['/catalogo']);
+};

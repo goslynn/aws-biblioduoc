@@ -1,101 +1,100 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 # ==============================================================================
-#  biblioteca / backend.yaml   --   El Spring Boot corriendo dentro de Lambda
+#  biblioteca / backend.yaml   --   Spring Boot + RabbitMQ en una EC2, tras un NLB
 # ==============================================================================
 #
 #  QUE HACE
-#    * LambdaLogGroup  -> los logs, declarados a mano y con caducidad.
-#    * BackendFunction -> la funcion que ejecuta el fat jar de Spring Boot TAL
-#                         CUAL, dentro de la VPC privada de network.yaml para
-#                         poder hablar con RDS.
-#    * BypassUrl       -> (condicional) una Function URL SIN autenticacion, que
-#                         solo se enciende para demostrar Defense in Depth.
+#    * RabbitSecret     -> usuario y contrasena del broker, generados.
+#    * SmtpSecret       -> la contrasena del proveedor SMTP (parametro NoEcho).
+#    * AppConfig        -> parametro de SSM con la configuracion NO secreta de
+#                          la aplicacion, en formato "VARIABLE=valor".
+#    * AppLogGroup      -> los logs de los dos contenedores, con caducidad.
+#    * AppInstance      -> Amazon Linux 2023 con Docker y DOS contenedores:
+#                            rabbitmq  (rabbitmq:4.1-management-alpine)
+#                            app       (el fat jar de Spring Boot, en Corretto 21)
+#    * Nlb + TargetGroup + Listener -> un Network Load Balancer INTERNO en las
+#                          subredes privadas: es el destino del VPC Link de
+#                          api.yaml. API Gateway no puede hablar con una IP de
+#                          EC2; necesita un NLB delante.
 #
-#  >>> COMO CORRE SPRING BOOT EN LAMBDA SIN CAMBIAR NADA <<<
-#    Con el AWS Lambda Web Adapter, un layer publico que mantiene AWS:
+#  >>> POR QUE EC2 Y NO LAMBDA <<<
+#    RabbitMQ necesita consumidores que vivan SIEMPRE con una conexion
+#    abierta (@RabbitListener) y tareas periodicas (el relay de la bandeja de
+#    salida, los recordatorios). Una Lambda se congela entre peticiones, y
+#    solo se dispara desde colas de Amazon MQ, que el Learner Lab NO permite
+#    (mq:* con explicitDeny, medido). El broker tiene que ser autogestionado,
+#    asi que va en EC2; y para no partir el backend en dos, la API va con el.
 #
-#      AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap
-#            +-- el layer se pone DELANTE del arranque normal de Lambda y toma
-#                el control del Runtime API.
-#      Handler: run.sh          (un script, no una clase Java)
-#            +-- run.sh hace:  exec java -jar /var/task/app.jar
-#                => arranca el Tomcat embebido en el puerto 8080.
-#
-#      Cuando llega una invocacion, el adapter la traduce a un request HTTP
-#      contra localhost:8080 y devuelve la respuesta HTTP como respuesta de
-#      Lambda. Para los controladores es indistinguible de correr en local.
-#
-#    Ventaja concreta: el MISMO artefacto vale para "java -jar" en tu maquina,
-#    para esta Lambda y para una EC2 el dia de manana.
+#  >>> COMO ARRANCA, Y POR QUE CADA ARRANQUE LEE TODO DE NUEVO <<<
+#    El UserData (solo en el PRIMER arranque) instala Docker y deja dos
+#    servicios de systemd: biblioteca-rabbitmq y biblioteca-app. Cada vez que
+#    un servicio arranca —primer boot, reinicio, la sesion del lab que vuelve,
+#    o un despliegue de build-backend.sh— su script:
+#      1. lee la configuracion de AppConfig (SSM),
+#      2. lee las contrasenas de Secrets Manager (BD, RabbitMQ, SMTP),
+#      3. las escribe en un archivo de entorno en /run (tmpfs, permisos 600),
+#      4. y lanza el contenedor con ese archivo.
+#    Asi, cambiar un parametro de este stack y reiniciar el servicio basta:
+#    no hace falta recrear la instancia. Y ninguna contrasena queda escrita en
+#    el UserData, ni en la plantilla, ni en el disco.
 #
 #  >>> LA SEGUNDA VALIDACION DEL TOKEN SE CONFIGURA AQUI <<<
-#    Las variables BIBLIOTECA_ISSUER, BIBLIOTECA_JWKS y BIBLIOTECA_SCOPE son las
-#    que hacen que Spring Security valide el JWT por su cuenta, ademas de la
-#    validacion que ya hizo API Gateway. Por eso NO hay ningun identificador de
-#    Cognito escrito en el repositorio: entran como parametros del stack.
-#
-#  >>> LA FUNCION VIVE EN UNA VPC SIN SALIDA A INTERNET <<<
-#    VpcConfig la conecta a las subredes privadas de network.yaml, que es lo
-#    unico que le permite llegar a RDS. Esas subredes no tienen NAT, asi que la
-#    funcion NO puede salir a Internet. Dos consecuencias, resueltas aqui:
-#
-#      * Spring no puede descargar las claves de Cognito (JWKS). Las descarga
-#        build-backend.sh al desplegar y entran en el parametro JwksJson.
-#      * La funcion no puede leer Secrets Manager en tiempo de ejecucion. Las
-#        contrasenas se resuelven AL DESPLEGAR, con referencias dinamicas
-#        {{resolve:secretsmanager:...}}, y llegan como variables de entorno.
-#
-#    Lo que NO necesita la VPC: la invocacion desde API Gateway (llega por el
-#    servicio Lambda) y los logs (salen por el servicio, no por la red).
+#    BIBLIOTECA_ISSUER, BIBLIOTECA_JWKS, BIBLIOTECA_SCOPE y
+#    BIBLIOTECA_SCOPE_GESTION hacen que Spring Security valide el JWT por su
+#    cuenta, ademas de API Gateway, y decida el rol EMPLEADO. Ningun
+#    identificador de Cognito esta escrito en el repositorio.
 #
 #  >>> DOS USUARIOS DE BASE DE DATOS <<<
 #    SPRING_FLYWAY_*      -> el MAESTRO, solo para las migraciones al arrancar.
-#    SPRING_DATASOURCE_*  -> biblioteca_app, el que atiende las peticiones, con
-#                            SELECT/INSERT y nada mas.
+#    SPRING_DATASOURCE_*  -> biblioteca_app, el que atiende las peticiones,
+#                            con los permisos minimos de V1 y V3.
 #
 #  TRAMPAS
-#    * El LogGroup se declara explicitamente y la funcion lleva DependsOn. Si
-#      se deja que Lambda lo cree sola, queda sin caducidad, fuera del stack, y
-#      el siguiente despliegue choca con "log group already exists".
-#    * El readiness check apunta a /health porque, con Spring Security activo,
-#      cualquier ruta de /api le responderia 401 al adapter y el arranque se
-#      daria por fallido.
-#    * S3ObjectVersion no admite cadena vacia: o hay VersionId valido o se
-#      omite la propiedad entera (AWS::NoValue).
-#    * La version del layer (":28") se fija a proposito. "la ultima" cambia con
-#      el tiempo y rompe despliegues que antes funcionaban.
-#    * Las contrasenas quedan RESUELTAS en las variables de entorno. Lambda las
-#      cifra en reposo, pero quien tenga lambda:GetFunctionConfiguration en la
-#      cuenta las puede leer. Es una desviacion declarada (README.md §7): leer
-#      el secreto en tiempo de ejecucion exigiria un VPC endpoint de Secrets
-#      Manager, que se paga por hora.
-#    * Si Cognito rotara sus claves de firma, todo token nuevo daria 401 hasta
-#      volver a correr build-backend.sh (que vuelve a descargar el JWKS).
-#    * Lambda crea interfaces de red en las subredes al desplegar. Necesita que
-#      LabRole tenga ec2:CreateNetworkInterface; si no, el despliegue falla con
-#      un error de permisos explicito.
+#    * HttpPutResponseHopLimit: 2. Con IMDSv2 y el limite por defecto (1), un
+#      CONTENEDOR no alcanza el servicio de metadatos (el bridge de Docker es
+#      un salto mas) y el SDK de la app se queda sin credenciales: el PUT de
+#      activar avisos responderia 500 al llamar a Cognito.
+#    * CreationPolicy: CloudFormation espera la senal de cfn-signal, que el
+#      UserData manda cuando /health responde. Si en 15 min no llega, el stack
+#      falla en vez de quedar "creado" con una aplicacion que no arranco. Para
+#      ver por que: aws ec2 get-console-output --instance-id <id> --latest
+#    * El NLB vive en dos AZ y la instancia en una: sin cross-zone, el nodo
+#      del NLB en la otra AZ no tendria destino y la mitad de las peticiones
+#      fallarian.
+#    * Cambiar el UserData DETIENE y vuelve a arrancar la instancia, pero no
+#      lo vuelve a ejecutar (cloud-init lo corre una vez). Por eso aqui solo
+#      hay lo que no cambia; la configuracion vive en AppConfig.
+#    * La IP publica cambia cada vez que el lab detiene la instancia. No
+#      importa: nada entra por ella, y el NLB apunta al id de la instancia.
+#    * El volumen rabbitmq-datos guarda el estado del broker (colas,
+#      mensajes, usuario). RABBITMQ_DEFAULT_PASS solo se aplica al CREAR ese
+#      volumen: si rotas RabbitSecret, borra el volumen o cambia la contrasena
+#      desde el panel.
 #
 #  DEPENDE DE
-#    * artifacts.yaml -> ArtifactsBucketName, y el ZIP ya SUBIDO
-#    * cognito.yaml   -> IssuerUrl, ScopeCompleto (+ su JWKS, que baja el pipeline)
+#    * artifacts.yaml -> ArtifactsBucketName, y el jar ya SUBIDO
+#    * cognito.yaml   -> IssuerUrl, ScopeCompleto, ScopeGestion, UserPoolId (+ JWKS)
 #    * web.yaml       -> SiteOrigin (cabecera CORS de las respuestas reales)
-#    * network.yaml   -> PrivateSubnetIds, LambdaSecurityGroupId
+#    * network.yaml   -> PublicSubnetId, AppSecurityGroupId, PrivateSubnetIds
 #    * database.yaml  -> DbEndpoint, DbPort, DbName, MasterSecretArn, AppSecretArn
 #
 #  ENTREGA (Outputs)
-#    FunctionArn, FunctionName -> api.yaml
-#    BypassUrl (condicional)   -> la demo de Defense in Depth
-#    LogGroupName              -> aws logs tail
+#    NlbArn, NlbDnsName  -> api.yaml (VPC Link e integraciones)
+#    InstanceId          -> build-backend.sh (reinicio por SSM tras desplegar)
+#    TargetGroupArn      -> build-backend.sh (espera a que el NLB lo de por sano)
+#    AppPrivateIp        -> vpn-up.sh (panel de RabbitMQ por el tunel)
+#    RabbitSecretArn     -> vpn-up.sh (credenciales del panel)
+#    LogGroupName        -> aws logs tail
 #
 #  DESPLIEGUE
-#    ./aws/pipeline/build-backend.sh     (compila, sube el ZIP y despliega)
+#    ./aws/pipeline/build-backend.sh     (compila, sube el jar y despliega)
 # ==============================================================================
 
 Description: >-
-  biblioteca - Funcion Lambda (java21) que ejecuta el jar de Spring Boot
-  mediante el AWS Lambda Web Adapter, dentro de una VPC privada con acceso a
-  RDS. Depende de artifacts, cognito, web, network y database.
+  biblioteca - EC2 con Spring Boot y RabbitMQ en Docker, detras de un NLB
+  interno para el VPC Link de API Gateway. Depende de artifacts, cognito, web,
+  network y database.
 
 Parameters:
 
@@ -105,14 +104,34 @@ Parameters:
     AllowedPattern: "^[a-z0-9-]+$"
     Description: Prefijo de nombres. Debe coincidir con el de los demas stacks.
 
-  LabRoleArn:
+  InstanceProfileName:
     Type: String
-    AllowedPattern: "^arn:aws:iam::[0-9]{12}:role/.+$"
-    ConstraintDescription: Debe ser el ARN de un rol IAM existente.
+    Default: LabInstanceProfile
     Description: >-
-      Rol de ejecucion de la Lambda. En AWS Academy NO se pueden crear roles
-      IAM, asi que se reutiliza el rol preexistente LabRole. Se obtiene con:
-        echo "arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):role/LabRole"
+      Perfil de instancia de la EC2. En AWS Academy NO se pueden crear roles
+      IAM, asi que se usa el preexistente LabInstanceProfile (rol LabRole). Le
+      da a la instancia —y al SDK de la app— credenciales temporales, sin
+      Access Keys: leer el jar en S3, los secretos, SSM y Cognito.
+
+  InstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.small, t3.medium, t3.large]
+    Description: >-
+      Dos JVM-equivalentes en una maquina (Spring Boot y RabbitMQ sobre Erlang).
+      t3.small (2 GiB) arranca justo; t3.medium (4 GiB) deja holgura.
+
+  ImageId:
+    # Se resuelve al desplegar desde el parametro publico que mantiene AWS:
+    # siempre la ultima Amazon Linux 2023, sin escribir ningun AMI a mano.
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI de la instancia (Amazon Linux 2023, que trae AWS CLI y el agente de SSM).
+
+  AppPort:
+    Type: Number
+    Default: 8080
+    Description: Puerto de Spring Boot. Debe coincidir con AppPort de network.yaml.
 
   ArtifactsBucketName:
     Type: String
@@ -120,16 +139,8 @@ Parameters:
 
   ArtifactsObjectKey:
     Type: String
-    Default: backend/biblioteca-lambda.zip
-    Description: Ruta del ZIP dentro del bucket de artefactos.
-
-  ArtifactsObjectVersion:
-    Type: String
-    Default: ""
-    Description: >-
-      VersionId del objeto en S3. El pipeline lo rellena en cada despliegue:
-      es lo que le demuestra a CloudFormation que el codigo cambio de verdad.
-      Vacio significa "usar la version vigente".
+    Default: backend/biblioteca-backend.jar
+    Description: Ruta del fat jar dentro del bucket de artefactos.
 
   IssuerUrl:
     Type: String
@@ -138,42 +149,55 @@ Parameters:
       Output "IssuerUrl" de cognito.yaml. Spring exige que el claim "iss" de
       cada token sea exactamente este valor.
 
+  UserPoolId:
+    Type: String
+    Description: >-
+      Output "UserPoolId" de cognito.yaml. La app lee de ahi el email
+      verificado de quien activa los avisos (cognito-idp:ListUsers).
+
   JwksJson:
     Type: String
     AllowedPattern: "^\\{.*\"keys\".*\\}$"
     ConstraintDescription: Debe ser el JSON del JWKS de Cognito, con su array "keys".
     Description: >-
       Las claves PUBLICAS con que Cognito firma los tokens, tal como las sirve
-      <IssuerUrl>/.well-known/jwks.json. Las descarga build-backend.sh porque
-      la funcion no tiene salida a Internet. No es un secreto (por eso no
-      lleva NoEcho): cualquiera puede descargarlas.
+      <IssuerUrl>/.well-known/jwks.json. Las descarga build-backend.sh. No es
+      un secreto (por eso no lleva NoEcho): cualquiera puede descargarlas.
 
   RequiredScope:
     Type: String
     Default: biblioteca-api/acceso
     Description: >-
-      Output "ScopeCompleto" de cognito.yaml. Spring exige este scope en el
-      claim "scope" del token. Debe ser IDENTICO al AuthorizationScopes de
-      api.yaml: si difieren, API Gateway deja pasar y Spring responde 403.
+      Output "ScopeCompleto" de cognito.yaml: el scope de los estudiantes.
+      Debe ser IDENTICO al de api.yaml.
+
+  ManagementScope:
+    Type: String
+    Default: biblioteca-api/gestion
+    Description: >-
+      Output "ScopeGestion" de cognito.yaml: el del cliente M2M backoffice.
+      Quien lo trae es EMPLEADO para Spring.
 
   WebOrigin:
     Type: String
     Description: >-
       Origen del frontend (Output "SiteOrigin" de web.yaml). Spring lo usa para
       poner la cabecera Access-Control-Allow-Origin en las respuestas REALES:
-      con integracion AWS_PROXY, API Gateway devuelve lo que diga la Lambda y
-      no puede anadir cabeceras por su cuenta. Ver el reparto del CORS en
-      api.yaml.
+      con integracion HTTP_PROXY, API Gateway devuelve lo que diga la EC2.
+
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Output "PublicSubnetId" de network.yaml. Ahi vive la EC2.
 
   PrivateSubnetIds:
     Type: List<AWS::EC2::Subnet::Id>
-    Description: Output "PrivateSubnetIds" de network.yaml.
+    Description: Output "PrivateSubnetIds" de network.yaml. Ahi vive el NLB interno.
 
-  LambdaSecurityGroupId:
+  AppSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: >-
-      Output "LambdaSecurityGroupId" de network.yaml. Sin entrada, y con salida
-      solo hacia la base de datos.
+      Output "AppSecurityGroupId" de network.yaml. Entra solo el NLB; sale
+      HTTPS, SMTP y Postgres.
 
   DbEndpoint:
     Type: String
@@ -192,235 +216,391 @@ Parameters:
   MasterSecretArn:
     Type: String
     AllowedPattern: "^arn:aws:secretsmanager:.+$"
-    Description: >-
-      Output "MasterSecretArn" de database.yaml. Usuario maestro, que solo usa
-      Flyway para aplicar las migraciones.
+    Description: Output "MasterSecretArn" de database.yaml. Solo lo usa Flyway.
 
   AppSecretArn:
     Type: String
     AllowedPattern: "^arn:aws:secretsmanager:.+$"
-    Description: >-
-      Output "AppSecretArn" de database.yaml. Rol biblioteca_app, con el que
-      la aplicacion atiende las peticiones.
+    Description: Output "AppSecretArn" de database.yaml. Rol biblioteca_app.
 
-  LambdaMemoryMb:
-    Type: Number
-    Default: 1536
-    MinValue: 512
-    MaxValue: 3008
-    Description: >-
-      En Lambda la CPU es proporcional a la memoria. La JVM arranca lenta con
-      poca CPU, asi que MAS memoria BAJA el arranque en frio (y suele salir mas
-      barato, porque se paga por milisegundo).
-
-  ReservedConcurrency:
-    Type: Number
-    Default: 5
-    MinValue: -1
-    Description: >-
-      Instancias simultaneas como maximo. Con el estado en PostgreSQL ya no hay
-      que limitarse a una, pero se acota igual para proteger a la base: cada
-      instancia abre hasta 2 conexiones (pool de Hikari) y una db.t3.micro
-      admite pocas. 5 x 2 queda muy por debajo del limite. Poner -1 desactiva
-      la reserva (util si la cuenta del laboratorio no permite reservar
-      concurrencia).
-
-  EnableBypassDemoUrl:
+  SmtpHost:
     Type: String
-    Default: "false"
-    AllowedValues: ["true", "false"]
+    MinLength: 1
     Description: >-
-      Expone la Lambda con una Function URL SIN autenticacion para demostrar el
-      bypass del authorizer (Defense in Depth). ENCIENDELA para la demo y
-      APAGALA en cuanto termines: mientras este en "true" hay una puerta a la
-      aplicacion que no pasa por API Gateway.
+      Servidor SMTP del proveedor de correo (smtp.gmail.com,
+      smtp-relay.brevo.com...). Siempre por el 587 con STARTTLS: es lo que
+      configura la aplicacion y lo unico que abre network.yaml. El 25 esta
+      bloqueado en EC2, y sin TLS la contrasena viajaria en claro.
 
-Conditions:
+  SmtpUser:
+    Type: String
+    MinLength: 1
+    Description: Usuario SMTP (en Gmail, la direccion; en Brevo, el login del relay).
 
-  # S3ObjectVersion no acepta cadena vacia: hay que quitar la propiedad entera.
-  TieneVersion: !Not [!Equals [!Ref ArtifactsObjectVersion, ""]]
+  SmtpPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 1
+    Description: >-
+      Contrasena SMTP (en Gmail, una contrasena de aplicacion). NoEcho: no se
+      muestra en la consola ni en describe-stacks. Va a SmtpSecret.
 
-  # -1 es la forma de decir "sin reserva de concurrencia".
-  ReservaConcurrencia: !Not [!Equals [!Ref ReservedConcurrency, -1]]
+  SmtpFrom:
+    Type: String
+    MinLength: 3
+    Description: Remitente de los correos. Muchos proveedores exigen que sea una direccion verificada.
 
-  ConBypass: !Equals [!Ref EnableBypassDemoUrl, "true"]
+  ReminderLead:
+    Type: String
+    Default: PT24H
+    AllowedPattern: "^PT[0-9HMS]+$"
+    Description: >-
+      Con cuanta antelacion al vencimiento se recuerda (duracion ISO-8601).
+      Para una demo, PT23H58M hace que un prestamo de 1 dia avise a los 2 min.
 
 Resources:
 
-  # ---------------------------------------------------------------------------
-  #  Los logs. Declarados aqui para que (a) caduquen, (b) se borren junto con
-  #  el stack y (c) no los cree Lambda por su cuenta en la primera invocacion.
-  # ---------------------------------------------------------------------------
-  LambdaLogGroup:
-    Type: AWS::Logs::LogGroup
+  # ===========================================================================
+  #  SECRETOS Y CONFIGURACION
+  # ===========================================================================
+
+  # Credenciales del broker. Solo las conocen los dos contenedores (y quien
+  # abra el panel por la VPN, leyendolas de aqui).
+  RabbitSecret:
+    Type: AWS::SecretsManager::Secret
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${ProjectName}-api"
-      RetentionInDays: 7
+      Description: Usuario de RabbitMQ (broker de la EC2 de la aplicacion).
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "biblioteca"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
 
-  # ---------------------------------------------------------------------------
-  #  La funcion: el backend completo.
-  # ---------------------------------------------------------------------------
-  BackendFunction:
-    Type: AWS::Lambda::Function
-    # El log group tiene que existir ANTES que la funcion.
-    DependsOn: LambdaLogGroup
+  # La contrasena SMTP, tal cual (texto plano, no JSON: puede traer comillas).
+  SmtpSecret:
+    Type: AWS::SecretsManager::Secret
     Properties:
-      FunctionName: !Sub "${ProjectName}-api"
-      Description: API de la Biblioteca Duoc (Spring Boot sobre Lambda Web Adapter).
-
-      Runtime: java21              # coincide con <java.version>21</java.version> del pom
-      Architectures:
-        - x86_64                   # debe coincidir con el layer X86 de mas abajo
-
-      # NO es una clase Java: es el nombre del script dentro del ZIP. Solo
-      # tiene sentido porque el Web Adapter intercepta el arranque.
-      Handler: run.sh
-
-      # AWS Academy: el rol se recibe, no se crea.
-      Role: !Ref LabRoleArn
-
-      MemorySize: !Ref LambdaMemoryMb
-
-      # 30 s cubre el arranque en frio de Spring (~5-10 s). API Gateway corta a
-      # los 30 s de todas formas, asi que subirlo mas no cambiaria nada.
-      Timeout: 30
-
-      ReservedConcurrentExecutions: !If
-        - ReservaConcurrencia
-        - !Ref ReservedConcurrency
-        - !Ref "AWS::NoValue"
-
-      # -----------------------------------------------------------------------
-      #  LA RED. Interfaces en las subredes privadas, con el security group
-      #  que solo deja salir hacia RDS. Ver la cabecera.
-      # -----------------------------------------------------------------------
-      VpcConfig:
-        SubnetIds: !Ref PrivateSubnetIds
-        SecurityGroupIds:
-          - !Ref LambdaSecurityGroupId
-
-      Code:
-        S3Bucket: !Ref ArtifactsBucketName
-        S3Key: !Ref ArtifactsObjectKey
-        S3ObjectVersion: !If [TieneVersion, !Ref ArtifactsObjectVersion, !Ref "AWS::NoValue"]
-
-      # -----------------------------------------------------------------------
-      #  EL LAYER. La cuenta 753240598075 es de AWS y publica el Web Adapter.
-      #  Version fijada a proposito; la vigente se consulta en
-      #  https://github.com/awslabs/aws-lambda-web-adapter
-      # -----------------------------------------------------------------------
-      Layers:
-        - !Sub "arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86:28"
-
-      Environment:
-        Variables:
-          # Activa el adapter. Sin esta variable el layer no hace nada y Lambda
-          # intentaria cargar "run.sh" como si fuera una clase Java.
-          AWS_LAMBDA_EXEC_WRAPPER: /opt/bootstrap
-
-          # Puerto donde el adapter busca la aplicacion. Es el mismo
-          # server.port de application.properties, asi que no hay nada que
-          # cambiar al pasar de local a Lambda.
-          PORT: "8080"
-
-          # El adapter espera un 2xx en esta ruta antes de dar por arrancada la
-          # app. Tiene que ser una ruta PUBLICA: con Spring Security activo,
-          # /api/libros le responderia 401 y el arranque se daria por fallido.
-          AWS_LWA_READINESS_CHECK_PATH: /health
-
-          # Deja que Spring termine de levantarse durante la primera invocacion
-          # en lugar de dentro de la fase de init, que tiene un limite de 10 s.
-          AWS_LWA_ASYNC_INIT: "true"
-
-          # Arranque en frio mas corto: se le pide a la JVM que no pierda
-          # tiempo optimizando a fondo (C2). Para un proceso de vida corta,
-          # compilar rapido y regular gana a compilar lento y bien.
-          JAVA_TOOL_OPTIONS: "-XX:+TieredCompilation -XX:TieredStopAtLevel=1"
-
-          # --- Segunda validacion del JWT (Spring Security) ------------------
-          # Spring Boot mapea cada BIBLIOTECA_X a la propiedad "biblioteca.x"
-          # que lee SecurityConfig. No se usa la propiedad estandar issuer-uri
-          # porque con ella Spring intentaria descargar el descubrimiento OIDC
-          # de Cognito, y desde esta VPC no hay salida a Internet.
-          BIBLIOTECA_ISSUER: !Ref IssuerUrl
-          BIBLIOTECA_JWKS: !Ref JwksJson
-          BIBLIOTECA_SCOPE: !Ref RequiredScope
-
-          # --- Base de datos -----------------------------------------------
-          # verify-full: TLS, y ademas comprueba que el certificado lo firme
-          # la CA de RDS (rds-ca.pem, que el pipeline mete en el ZIP) y que
-          # sea para ESTE nombre de host. Sin eso, TLS cifra pero no
-          # garantiza con quien se habla.
-          SPRING_DATASOURCE_URL: !Sub "jdbc:postgresql://${DbEndpoint}:${DbPort}/${DbName}?sslmode=verify-full&sslrootcert=/var/task/rds-ca.pem"
-          # El rol de la aplicacion: SELECT/INSERT, sin DDL ni borrados.
-          SPRING_DATASOURCE_USERNAME: !Sub "{{resolve:secretsmanager:${AppSecretArn}:SecretString:username}}"
-          SPRING_DATASOURCE_PASSWORD: !Sub "{{resolve:secretsmanager:${AppSecretArn}:SecretString:password}}"
-          # La misma contrasena, para que la migracion V1 cree el rol con ella.
-          BIBLIOTECA_APP_PASSWORD: !Sub "{{resolve:secretsmanager:${AppSecretArn}:SecretString:password}}"
-          # El maestro, SOLO para Flyway al arrancar.
-          SPRING_FLYWAY_USER: !Sub "{{resolve:secretsmanager:${MasterSecretArn}:SecretString:username}}"
-          SPRING_FLYWAY_PASSWORD: !Sub "{{resolve:secretsmanager:${MasterSecretArn}:SecretString:password}}"
-
-          # Origen permitido por el CORS de Spring (propiedad "biblioteca.origen").
-          BIBLIOTECA_ORIGEN: !Ref WebOrigin
-
+      Description: Contrasena del proveedor SMTP de los avisos por correo.
+      SecretString: !Ref SmtpPassword
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
   # ---------------------------------------------------------------------------
-  #  LA PUERTA TRASERA DE LA DEMO (condicional).
+  #  La configuracion NO secreta de la app, una variable por linea. La leen
+  #  los scripts de arranque de la EC2 en CADA arranque (ver la cabecera).
+  #  Las lineas SECRETO_* son ARN de secretos, no secretos: el script las
+  #  resuelve y no las pasa al contenedor.
   #
-  #  El canon demuestra Defense in Depth atacando la IP publica de la EC2 y
-  #  saltandose el authorizer. En serverless no hay IP que atacar, asi que la
-  #  puerta se fabrica a proposito, se usa y se apaga:
-  #
-  #    1. EnableBypassDemoUrl=true, ANTES de SecurityConfig:
-  #         curl <BypassUrl>/api/libros            -> 200   (puerta abierta)
-  #    2. Se aplica SecurityConfig y se redespliega:
-  #         curl <BypassUrl>/api/libros            -> 401   (lo rechaza SPRING)
-  #    3. La misma peticion por API Gateway con token valido -> 200
-  #    4. EnableBypassDemoUrl=false y redesplegar  -> la puerta desaparece
-  #
-  #  Ojo con la leccion completa: proteger con Spring Security NO equivale a
-  #  cerrar la red. Cerrarla de verdad es, precisamente, el paso 4.
+  #  Cabe de sobra en los 4 KB de un parametro estandar: lo mas largo es el
+  #  JWKS (~1 KB).
   # ---------------------------------------------------------------------------
-  BypassUrl:
-    Type: AWS::Lambda::Url
-    Condition: ConBypass
+  AppConfig:
+    Type: AWS::SSM::Parameter
     Properties:
-      TargetFunctionArn: !GetAtt BackendFunction.Arn
-      AuthType: NONE          # sin IAM: cualquiera con la URL puede invocarla
+      Name: !Sub "/${ProjectName}/backend/app.env"
+      Type: String
+      Description: Configuracion no secreta del backend (formato VARIABLE=valor).
+      Value: !Sub |
+        AWS_REGION=${AWS::Region}
+        BIBLIOTECA_ISSUER=${IssuerUrl}
+        BIBLIOTECA_JWKS=${JwksJson}
+        BIBLIOTECA_SCOPE=${RequiredScope}
+        BIBLIOTECA_SCOPE_GESTION=${ManagementScope}
+        BIBLIOTECA_USER_POOL_ID=${UserPoolId}
+        BIBLIOTECA_ORIGEN=${WebOrigin}
+        BIBLIOTECA_RECORDATORIO_ANTELACION=${ReminderLead}
+        SPRING_DATASOURCE_URL=jdbc:postgresql://${DbEndpoint}:${DbPort}/${DbName}?sslmode=verify-full&sslrootcert=/opt/biblioteca/rds-ca.pem
+        RABBITMQ_HOST=rabbitmq
+        SMTP_HOST=${SmtpHost}
+        SMTP_PORT=587
+        SMTP_USER=${SmtpUser}
+        SMTP_FROM=${SmtpFrom}
+        SECRETO_APP=${AppSecretArn}
+        SECRETO_MASTER=${MasterSecretArn}
+        SECRETO_RABBIT=${RabbitSecret}
+        SECRETO_SMTP=${SmtpSecret}
+        ARTEFACTO_BUCKET=${ArtifactsBucketName}
+        ARTEFACTO_KEY=${ArtifactsObjectKey}
+      Tags:
+        Project: !Ref ProjectName
 
-  # Una Function URL con AuthType NONE ademas necesita permiso explicito para
-  # el publico general; sin esto la URL existe pero responde 403.
-  BypassUrlPermission:
-    Type: AWS::Lambda::Permission
-    Condition: ConBypass
+  # Los logs de los dos contenedores (driver awslogs de Docker), con caducidad.
+  AppLogGroup:
+    Type: AWS::Logs::LogGroup
     Properties:
-      FunctionName: !Ref BackendFunction
-      Action: lambda:InvokeFunctionUrl
-      Principal: "*"
-      FunctionUrlAuthType: NONE
+      LogGroupName: !Sub "/${ProjectName}/backend"
+      RetentionInDays: 7
+
+  # ===========================================================================
+  #  LA INSTANCIA
+  # ===========================================================================
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    # Sin DependsOn: el UserData referencia AppConfig y AppLogGroup, y eso ya
+    # obliga a crearlos antes del primer arranque.
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      # AWS Academy: el perfil se recibe, no se crea.
+      IamInstanceProfile: !Ref InstanceProfileName
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !Ref PublicSubnetId
+          # IP publica SOLO para salir (SMTP, Docker Hub...). El security
+          # group no acepta nada desde Internet.
+          AssociatePublicIpAddress: true
+          GroupSet: [!Ref AppSecurityGroupId]
+      # IMDSv2 obligatorio, con 2 saltos para que los contenedores lleguen.
+      # Ver TRAMPAS en la cabecera.
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 2
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-backend"
+        - Key: Project
+          Value: !Ref ProjectName
+      # -----------------------------------------------------------------------
+      #  PRIMER ARRANQUE. CloudFormation sustituye lo que va entre ${}; las
+      #  variables de bash van SIN llaves ($VAR) para que no las confunda con
+      #  las suyas. Todo lo que cambia entre despliegues se lee de AppConfig.
+      # -----------------------------------------------------------------------
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee -a /var/log/biblioteca-arranque.log | logger -t biblioteca -s 2>/dev/console) 2>&1
+
+          dnf install -y -q docker jq aws-cfn-bootstrap
+          systemctl enable --now docker
+          docker network inspect biblioteca >/dev/null 2>&1 || docker network create biblioteca
+          install -d -m 755 /opt/biblioteca /etc/biblioteca
+          install -d -m 700 /run/biblioteca
+
+          # --- funciones comunes de los dos scripts de arranque ---------------
+          cat > /opt/biblioteca/comun.sh <<'EOF'
+          REGION=${AWS::Region}
+          GRUPO_LOGS=${AppLogGroup}
+          PARAMETRO=${AppConfig}
+          # Configuracion no secreta, en formato VARIABLE=valor (AppConfig).
+          CONFIG="$(aws ssm get-parameter --name "$PARAMETRO" --region "$REGION" --query Parameter.Value --output text)"
+          valor() { grep "^$1=" <<<"$CONFIG" | cut -d= -f2-; }
+          secreto() { aws secretsmanager get-secret-value --secret-id "$1" --region "$REGION" --query SecretString --output text; }
+          logs() { echo --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=$GRUPO_LOGS --log-opt awslogs-stream=$1; }
+          install -d -m 700 /run/biblioteca
+          umask 077
+          EOF
+
+          # --- RabbitMQ ---------------------------------------------------------
+          #  5672 (AMQP) NO se publica en la maquina: la app llega por la red
+          #  de Docker. 15672 (panel) si, pero el security group solo lo abre
+          #  a la VPN. --hostname fijo: RabbitMQ guarda sus datos bajo el
+          #  nombre del nodo, y con uno aleatorio los perderia al reiniciar.
+          # Plugins: el panel, y shovel para poder MOVER mensajes de una DLQ de
+          # vuelta a su cola desde el panel ("Move messages") tras arreglar la
+          # causa.
+          echo '[rabbitmq_management,rabbitmq_shovel,rabbitmq_shovel_management].' > /opt/biblioteca/enabled_plugins
+          chmod 644 /opt/biblioteca/enabled_plugins
+
+          cat > /opt/biblioteca/arrancar-rabbitmq.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          source /opt/biblioteca/comun.sh
+          R="$(secreto "$(valor SECRETO_RABBIT)")"
+          printf 'RABBITMQ_DEFAULT_USER=%s\nRABBITMQ_DEFAULT_PASS=%s\n' \
+            "$(jq -r .username <<<"$R")" "$(jq -r .password <<<"$R")" > /run/biblioteca/rabbitmq.env
+          exec docker run --rm --name rabbitmq --hostname rabbitmq --network biblioteca \
+            --env-file /run/biblioteca/rabbitmq.env \
+            -v rabbitmq-datos:/var/lib/rabbitmq -p 15672:15672 $(logs rabbitmq) \
+            -v /opt/biblioteca/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro \
+            public.ecr.aws/docker/library/rabbitmq:4.1-management-alpine
+          EOF
+
+          # --- La aplicacion -----------------------------------------------------
+          #  Baja el jar (la version que deje build-backend.sh en
+          #  /etc/biblioteca/version, o la vigente) y la CA de RDS, arma el
+          #  archivo de entorno con la configuracion y los secretos, y arranca.
+          cat > /opt/biblioteca/arrancar-app.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          source /opt/biblioteca/comun.sh
+          VERSION="$(cat /etc/biblioteca/version 2>/dev/null || true)"
+          if [ -n "$VERSION" ]; then
+            aws s3api get-object --bucket "$(valor ARTEFACTO_BUCKET)" --key "$(valor ARTEFACTO_KEY)" \
+              --version-id "$VERSION" --region "$REGION" /opt/biblioteca/app.jar >/dev/null
+          else
+            aws s3 cp "s3://$(valor ARTEFACTO_BUCKET)/$(valor ARTEFACTO_KEY)" /opt/biblioteca/app.jar --region "$REGION" --only-show-errors
+          fi
+          curl -fsS -o /opt/biblioteca/rds-ca.pem "https://truststore.pki.rds.amazonaws.com/$REGION/$REGION-bundle.pem"
+          chmod 644 /opt/biblioteca/app.jar /opt/biblioteca/rds-ca.pem
+
+          APP="$(secreto "$(valor SECRETO_APP)")"
+          MAESTRO="$(secreto "$(valor SECRETO_MASTER)")"
+          RABBIT="$(secreto "$(valor SECRETO_RABBIT)")"
+          SMTP="$(secreto "$(valor SECRETO_SMTP)")"
+          {
+            grep -v -e '^SECRETO_' -e '^ARTEFACTO_' <<<"$CONFIG"
+            echo "SPRING_DATASOURCE_USERNAME=$(jq -r .username <<<"$APP")"
+            echo "SPRING_DATASOURCE_PASSWORD=$(jq -r .password <<<"$APP")"
+            echo "BIBLIOTECA_APP_PASSWORD=$(jq -r .password <<<"$APP")"
+            echo "SPRING_FLYWAY_USER=$(jq -r .username <<<"$MAESTRO")"
+            echo "SPRING_FLYWAY_PASSWORD=$(jq -r .password <<<"$MAESTRO")"
+            echo "RABBITMQ_USER=$(jq -r .username <<<"$RABBIT")"
+            echo "RABBITMQ_PASSWORD=$(jq -r .password <<<"$RABBIT")"
+            echo "SMTP_PASSWORD=$SMTP"
+          } > /run/biblioteca/app.env
+
+          exec docker run --rm --name app --network biblioteca \
+            --env-file /run/biblioteca/app.env -p ${AppPort}:8080 \
+            -v /opt/biblioteca:/opt/biblioteca:ro $(logs app) \
+            public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless \
+            java -XX:MaxRAMPercentage=50 -jar /opt/biblioteca/app.jar
+          EOF
+          chmod 755 /opt/biblioteca/*.sh
+
+          # --- Servicios: arrancan solos en cada boot y se reinician si caen ---
+          cat > /etc/systemd/system/biblioteca-rabbitmq.service <<'EOF'
+          [Unit]
+          Description=RabbitMQ de la biblioteca
+          After=docker.service network-online.target
+          Requires=docker.service
+          [Service]
+          ExecStartPre=-/usr/bin/docker rm -f rabbitmq
+          ExecStart=/opt/biblioteca/arrancar-rabbitmq.sh
+          ExecStop=/usr/bin/docker stop rabbitmq
+          Restart=always
+          RestartSec=10
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat > /etc/systemd/system/biblioteca-app.service <<'EOF'
+          [Unit]
+          Description=Backend Spring Boot de la biblioteca
+          After=docker.service network-online.target biblioteca-rabbitmq.service
+          Requires=docker.service
+          Wants=biblioteca-rabbitmq.service
+          [Service]
+          ExecStartPre=-/usr/bin/docker rm -f app
+          ExecStart=/opt/biblioteca/arrancar-app.sh
+          ExecStop=/usr/bin/docker stop app
+          Restart=always
+          RestartSec=10
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable --now biblioteca-rabbitmq biblioteca-app
+
+          # --- Senal para CloudFormation: lista cuando /health responde --------
+          OK=1
+          for i in $(seq 1 80); do
+            if curl -fs http://127.0.0.1:${AppPort}/health >/dev/null; then OK=0; break; fi
+            sleep 10
+          done
+          /opt/aws/bin/cfn-signal -e $OK --stack ${AWS::StackName} --resource AppInstance --region ${AWS::Region}
+
+  # ===========================================================================
+  #  EL BALANCEADOR: lo que permite a API Gateway llegar a la EC2
+  # ===========================================================================
+
+  # Interno: solo tiene IPs privadas. El unico que le habla es el VPC Link.
+  Nlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-nlb"
+      Type: network
+      Scheme: internal
+      Subnets: !Ref PrivateSubnetIds
+      LoadBalancerAttributes:
+        # Ver TRAMPAS: la instancia esta en una sola AZ.
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # El NLB solo manda trafico a la instancia mientras /health responde 2xx.
+  # TCP hacia el puerto de la app; el health check, en cambio, es HTTP.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-app"
+      VpcId: !GetAtt AppInstance.VpcId
+      Protocol: TCP
+      Port: !Ref AppPort
+      TargetType: instance
+      Targets:
+        - Id: !Ref AppInstance
+          Port: !Ref AppPort
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckPort: !Ref AppPort
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        # Al reiniciar la app, no esperar 5 min a que se vacien conexiones.
+        - Key: deregistration_delay.timeout_seconds
+          Value: "15"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref Nlb
+      Protocol: TCP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
 
 Outputs:
 
-  FunctionName:
-    Description: Nombre de la funcion. Lo usan api.yaml (permiso) y el pipeline.
-    Value: !Ref BackendFunction
+  NlbArn:
+    Description: ARN del NLB interno. Destino del VPC Link de api.yaml.
+    Value: !Ref Nlb
 
-  FunctionArn:
-    Description: ARN de la funcion. Es el destino de la integracion AWS_PROXY de api.yaml.
-    Value: !GetAtt BackendFunction.Arn
+  NlbDnsName:
+    Description: Nombre DNS del NLB. Va en las URI de las integraciones de api.yaml.
+    Value: !GetAtt Nlb.DNSName
+
+  InstanceId:
+    Description: La EC2. build-backend.sh la reinicia por SSM tras subir un jar nuevo.
+    Value: !Ref AppInstance
+
+  TargetGroupArn:
+    Description: Target group del NLB. build-backend.sh espera a que la instancia este sana.
+    Value: !Ref TargetGroup
+
+  AppPrivateIp:
+    Description: IP privada de la EC2. Panel de RabbitMQ por la VPN en http://<esta IP>:15672
+    Value: !GetAtt AppInstance.PrivateIp
+
+  RabbitSecretArn:
+    Description: Credenciales del broker (y del panel). Las lee vpn-up.sh.
+    Value: !Ref RabbitSecret
 
   LogGroupName:
     Description: "Seguir los logs: aws logs tail <este valor> --follow"
-    Value: !Ref LambdaLogGroup
-
-  BypassUrl:
-    Condition: ConBypass
-    Description: >-
-      PUERTA TRASERA ACTIVA: esta URL llega a la aplicacion SIN pasar por API
-      Gateway ni por su authorizer. Es solo para la demostracion de Defense in
-      Depth. Vuelve a desplegar con EnableBypassDemoUrl=false al terminar.
-    Value: !GetAtt BypassUrl.FunctionUrl
+    Value: !Ref AppLogGroup

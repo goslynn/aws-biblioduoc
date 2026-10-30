@@ -1,63 +1,69 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 # ==============================================================================
-#  biblioteca / network.yaml   --   La red privada de la Lambda y de la base
+#  biblioteca / network.yaml   --   La red de la aplicacion y de la base
 # ==============================================================================
 #
 #  QUE HACE
 #    * Vpc                     -> una red propia, aislada de la VPC por defecto.
 #    * PrivateSubnetA / B      -> dos subredes en dos zonas distintas: RDS exige
-#                                 al menos dos AZ en su DB subnet group.
+#                                 al menos dos AZ en su DB subnet group. Aqui
+#                                 viven la base y el NLB interno.
 #    * PrivateRouteTable       -> la tabla de rutas de ambas, con UNA sola ruta:
 #                                 la local (10.20.0.0/16). Nada mas.
-#    * LambdaSecurityGroup     -> el de la funcion: no acepta nada entrante y
-#                                 solo puede SALIR hacia la base, puerto 5432.
+#    * PublicSubnet            -> UNA subred con salida a Internet, para la EC2
+#      + InternetGateway          de la aplicacion (backend.yaml) y, si se
+#      + PublicRouteTable         levanta, el servidor VPN opcional (vpn.yaml).
+#    * AppSecurityGroup        -> el de la EC2: entra solo el 8080 desde la VPC
+#                                 (el NLB) y sale solo a lo que la app necesita.
 #    * DatabaseSecurityGroup   -> el de RDS: solo acepta el 5432 si viene del
-#                                 grupo de la Lambda. Ninguna IP, ningun rango.
+#                                 grupo de la aplicacion. Ninguna IP, ningun rango.
 #
-#  >>> LO QUE NO HAY, Y ES LO IMPORTANTE <<<
-#    Ni Internet Gateway, ni NAT Gateway, ni ruta a 0.0.0.0/0. Desde dentro de
-#    esta VPC no se sale a Internet y desde Internet no se entra. La base queda
-#    alcanzable SOLO desde la Lambda.
+#  >>> POR QUE AHORA HAY UNA SUBRED PUBLICA <<<
+#    El backend era una Lambda en las subredes privadas, sin ninguna salida.
+#    Ahora es un proceso en EC2 (junto a RabbitMQ) que necesita SALIR:
+#      * al proveedor SMTP (587): el lab bloquea SES, el correo es externo;
+#      * a Docker Hub, S3, Secrets Manager, SSM y Cognito (443).
+#    Un NAT Gateway cuesta por hora aunque el lab este apagado. La alternativa
+#    elegida: la EC2 en una subred publica, con IP publica SOLO para salir. Su
+#    security group no acepta NADA desde Internet. Es una desviacion declarada
+#    (README.md §7).
 #
-#    ¿Y como valida Spring los tokens sin poder descargar las claves de
-#    Cognito? No las descarga: el pipeline las baja al desplegar y se las pasa
-#    a la Lambda en una variable (ver backend.yaml, parametro JwksJson). Ese
-#    truco es lo que ahorra el NAT, que ademas cuesta dinero por hora.
-#
-#    ¿Y los logs? Lambda los envia a CloudWatch por el plano de servicio de
-#    AWS, no por la red de la funcion: no necesitan ninguna ruta aqui.
-#
-#    La UNICA excepcion es opcional y temporal: vpn.yaml anade, mientras
-#    existe, una subred publica propia con un servidor WireGuard para consultar
-#    la base desde tu equipo. Las subredes de este stack siguen sin salida.
+#  >>> LO QUE SIGUE SIN HABER <<<
+#    Las subredes PRIVADAS siguen sin ruta a 0.0.0.0/0 y sin NAT. La base vive
+#    ahi, sin IP publica, y solo se le llega desde AppSecurityGroup (y, mientras
+#    exista, desde la VPN opcional).
 #
 #  FLUJO QUE HABILITA
-#    1. API Gateway invoca la Lambda (por el servicio Lambda, no por la VPC).
-#    2. La Lambda abre una conexion TLS desde su interfaz en PrivateSubnetA/B
-#       hacia RDS:5432. LambdaSecurityGroup permite esa salida y
-#       DatabaseSecurityGroup permite esa entrada. Nada mas pasa.
+#    1. API Gateway -> VPC Link -> NLB interno (subredes privadas) -> EC2:8080.
+#       AppSecurityGroup acepta el 8080 desde el rango de la VPC: es de donde
+#       vienen el trafico y los health checks del NLB.
+#    2. La EC2 abre una conexion TLS hacia RDS:5432. AppSecurityGroup permite
+#       esa salida y DatabaseSecurityGroup esa entrada.
+#    3. La EC2 sale a Internet por el IGW (solo 443 y SMTP 587).
 #
 #  TRAMPAS
 #    * Cuando un security group declara SecurityGroupEgress, CloudFormation
 #      BORRA la regla por defecto "todo permitido hacia fuera". Si no declara
-#      ninguna, la regla queda, aunque luego se anadan reglas sueltas. Por eso
-#      los dos grupos llevan una regla de salida ficticia hacia 127.0.0.1/32:
-#      es el patron documentado por AWS para decir "ninguna salida".
-#    * Las reglas que se apuntan mutuamente (Lambda -> DB y DB <- Lambda) van
-#      como recursos sueltos (SecurityGroupEgress / SecurityGroupIngress). Si
-#      fueran propiedades de cada grupo, cada uno necesitaria al otro creado
-#      antes: dependencia circular.
-#    * Al borrar el stack, las interfaces de red que Lambda creo en estas
-#      subredes tardan en liberarse (hasta ~20 min). teardown.sh lo avisa.
+#      ninguna, la regla queda. Por eso DatabaseSecurityGroup lleva una regla
+#      ficticia hacia 127.0.0.1/32: es el patron documentado por AWS para decir
+#      "ninguna salida".
+#    * Las reglas que se apuntan mutuamente (App -> DB y DB <- App) van como
+#      recursos sueltos (SecurityGroupEgress / SecurityGroupIngress). Si fueran
+#      propiedades de cada grupo, cada uno necesitaria al otro creado antes:
+#      dependencia circular.
+#    * Una VPC admite UN solo Internet Gateway. Por eso vive aqui y vpn.yaml
+#      usa esta misma subred publica en vez de crear la suya.
 #
 #  DEPENDE DE
 #    Nada.
 #
 #  ENTREGA (Outputs)
-#    PrivateSubnetIds, LambdaSecurityGroupId -> backend.yaml (VpcConfig)
-#    PrivateSubnetIds, DatabaseSecurityGroupId -> database.yaml
-#    VpcId, VpcCidr                            -> vpn.yaml (opcional)
+#    PublicSubnetId, AppSecurityGroupId        -> backend.yaml (la EC2)
+#    PrivateSubnetIds                          -> backend.yaml (NLB), database.yaml
+#    VpcCidr                                   -> vpn.yaml
+#    DatabaseSecurityGroupId                   -> database.yaml, vpn.yaml
+#    VpcId, PublicSubnetId, AppSecurityGroupId -> vpn.yaml (opcional)
 #
 #  DESPLIEGUE MANUAL
 #    aws cloudformation deploy --template-file aws/network.yaml \
@@ -65,8 +71,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 # ==============================================================================
 
 Description: >-
-  biblioteca - VPC privada sin salida a Internet (sin IGW ni NAT) con dos
-  subredes y los security groups que solo dejan hablar a la Lambda con RDS.
+  biblioteca - VPC con dos subredes privadas sin salida (RDS y NLB interno) y
+  una subred publica para la EC2 de la aplicacion, con security groups que
+  solo dejan hablar a la aplicacion con RDS.
 
 Parameters:
 
@@ -91,10 +98,20 @@ Parameters:
     Default: 10.20.2.0/24
     Description: Rango de la subred privada B (segunda AZ de la region).
 
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.20.100.0/24
+    Description: Rango de la subred publica (EC2 de la aplicacion y VPN opcional).
+
   DatabasePort:
     Type: Number
     Default: 5432
     Description: Puerto de PostgreSQL. Debe coincidir con DbPort de database.yaml.
+
+  AppPort:
+    Type: Number
+    Default: 8080
+    Description: Puerto de Spring Boot en la EC2. Debe coincidir con AppPort de backend.yaml.
 
 Resources:
 
@@ -174,37 +191,114 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable
 
   # ---------------------------------------------------------------------------
-  #  Security group de la Lambda.
-  #    Entrada: ninguna (a la Lambda no se le habla por red, se la invoca).
-  #    Salida:  solo hacia DatabaseSecurityGroup:5432 (regla suelta, abajo).
+  #  La puerta a Internet. Solo la usa la subred publica de abajo: la tabla de
+  #  las privadas no la menciona.
   # ---------------------------------------------------------------------------
-  LambdaSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
     Properties:
-      GroupDescription: !Sub "${ProjectName} - Lambda: solo puede salir hacia la base de datos"
-      VpcId: !Ref Vpc
-      # Regla ficticia: su unico efecto es que CloudFormation quite el "todo
-      # permitido" por defecto. Ver TRAMPAS en la cabecera.
-      SecurityGroupEgress:
-        - Description: Sin salida (anula la regla por defecto)
-          IpProtocol: "-1"
-          CidrIp: 127.0.0.1/32
       Tags:
         - Key: Name
-          Value: !Sub "${ProjectName}-lambda"
+          Value: !Sub "${ProjectName}-igw"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      # No se asigna IP publica a todo lo que caiga aqui: cada instancia la
+      # pide, de forma explicita, en su interfaz.
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-publica"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Tabla de rutas PROPIA de la subred publica: local + 0.0.0.0/0 -> IGW.
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-publica"
+        - Key: Project
+          Value: !Ref ProjectName
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    # La ruta no se puede crear hasta que el IGW este enganchado a la VPC.
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------------------------------------------------------------------------
+  #  Security group de la EC2 de la aplicacion (Spring Boot + RabbitMQ).
+  #    Entrada: SOLO el puerto de la app desde el rango de la VPC, que es de
+  #             donde llegan el NLB y sus health checks. Nada desde Internet:
+  #             la IP publica de la instancia no responde a nada.
+  #             (vpn.yaml anade, mientras existe, el panel de RabbitMQ.)
+  #    Salida:  443 (imagenes, S3, Secrets Manager, SSM, Cognito),
+  #             587 (SMTP) y 5432 hacia la base (regla suelta, abajo).
+  #             RabbitMQ no necesita reglas: app y broker hablan dentro de la
+  #             misma maquina, por la red de Docker.
+  # ---------------------------------------------------------------------------
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "${ProjectName} - EC2 de la app: entra solo el NLB, sale HTTPS, SMTP y Postgres"
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - Description: Spring Boot desde el NLB interno (trafico y health checks)
+          IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          CidrIp: !Ref VpcCidr
+      SecurityGroupEgress:
+        - Description: HTTPS (imagenes, jar en S3, secretos, SSM, Cognito)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - Description: SMTP con STARTTLS
+          IpProtocol: tcp
+          FromPort: 587
+          ToPort: 587
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-app"
         - Key: Project
           Value: !Ref ProjectName
 
   # ---------------------------------------------------------------------------
   #  Security group de RDS.
-  #    Entrada: solo 5432 desde LambdaSecurityGroup (regla suelta, abajo).
-  #    Salida:  ninguna. Las respuestas a la Lambda salen igual, porque los
-  #             security groups recuerdan las conexiones (son "stateful").
+  #    Entrada: solo 5432 desde AppSecurityGroup (regla suelta, abajo).
+  #    Salida:  ninguna. Las respuestas salen igual, porque los security
+  #             groups recuerdan las conexiones (son "stateful").
   # ---------------------------------------------------------------------------
   DatabaseSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub "${ProjectName} - RDS: solo acepta conexiones de la Lambda"
+      GroupDescription: !Sub "${ProjectName} - RDS: solo acepta conexiones de la aplicacion"
       VpcId: !Ref Vpc
       SecurityGroupEgress:
         - Description: Sin salida (anula la regla por defecto)
@@ -216,34 +310,34 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
-  # La unica salida de la Lambda: Postgres, y solo hacia el grupo de la base.
-  # Se referencia el GRUPO, no una IP: si RDS cambia de IP (failover,
-  # reinicio), la regla sigue valiendo.
-  LambdaToDatabaseEgress:
+  # La salida de la app hacia Postgres, solo hacia el grupo de la base. Se
+  # referencia el GRUPO, no una IP: si RDS cambia de IP (failover, reinicio),
+  # la regla sigue valiendo.
+  AppToDatabaseEgress:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
-      GroupId: !Ref LambdaSecurityGroup
+      GroupId: !Ref AppSecurityGroup
       Description: PostgreSQL hacia RDS
       IpProtocol: tcp
       FromPort: !Ref DatabasePort
       ToPort: !Ref DatabasePort
       DestinationSecurityGroupId: !Ref DatabaseSecurityGroup
 
-  # La unica entrada de la base: Postgres, y solo desde el grupo de la Lambda.
-  DatabaseFromLambdaIngress:
+  # La unica entrada permanente de la base: Postgres, y solo desde la app.
+  DatabaseFromAppIngress:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref DatabaseSecurityGroup
-      Description: PostgreSQL desde la Lambda
+      Description: PostgreSQL desde la EC2 de la aplicacion
       IpProtocol: tcp
       FromPort: !Ref DatabasePort
       ToPort: !Ref DatabasePort
-      SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      SourceSecurityGroupId: !Ref AppSecurityGroup
 
 Outputs:
 
   VpcId:
-    Description: VPC privada del proyecto.
+    Description: VPC del proyecto.
     Value: !Ref Vpc
 
   VpcCidr:
@@ -251,12 +345,16 @@ Outputs:
     Value: !GetAtt Vpc.CidrBlock
 
   PrivateSubnetIds:
-    Description: Las dos subredes privadas, separadas por coma. Las usan database.yaml y backend.yaml.
+    Description: Las dos subredes privadas, separadas por coma. Las usan database.yaml y el NLB de backend.yaml.
     Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
 
-  LambdaSecurityGroupId:
-    Description: Security group de la Lambda (VpcConfig de backend.yaml).
-    Value: !Ref LambdaSecurityGroup
+  PublicSubnetId:
+    Description: La subred publica. La usan la EC2 de backend.yaml y el servidor de vpn.yaml.
+    Value: !Ref PublicSubnet
+
+  AppSecurityGroupId:
+    Description: Security group de la EC2 de la aplicacion (backend.yaml).
+    Value: !Ref AppSecurityGroup
 
   DatabaseSecurityGroupId:
     Description: Security group de RDS (database.yaml).

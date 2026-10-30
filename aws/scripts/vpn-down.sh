@@ -51,4 +51,4 @@ fi
 rm -f "${VPN_DIR}/${INTERFAZ}.conf" "${VPN_DIR}/conexion.txt" "${VPN_DIR}"/servidor-*.pub
 info "configuracion del tunel y datos de conexion eliminados (las llaves se conservan)"
 
-log "VPN cerrada: la base vuelve a ser alcanzable solo desde la Lambda"
+log "VPN cerrada: la base vuelve a ser alcanzable solo desde la EC2 de la aplicacion"

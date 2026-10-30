@@ -6,16 +6,17 @@ AWSTemplateFormatVersion: "2010-09-09"
 #
 #  QUE HACE
 #    * ArtifactsBucket -> bucket S3 PRIVADO y versionado donde el pipeline deja
-#                         el ZIP de la Lambda (app.jar + run.sh) antes de
-#                         publicar una version nueva del backend.
+#                         el fat jar del backend antes de publicar una version
+#                         nueva.
 #
 #  EL FLUJO QUE HABILITA
-#    1. aws/pipeline/build-backend.sh compila el JAR y arma el ZIP.
+#    1. aws/pipeline/build-backend.sh compila el JAR.
 #    2. Lo sube aqui con "s3api put-object", que devuelve un VersionId.
-#    3. aws/backend.yaml apunta la Lambda a (bucket, key, VersionId).
-#    4. Al crear o actualizar la funcion, Lambda LEE el ZIP de este bucket
-#       usando su execution role (LabRole). En ningun momento del proceso
-#       existe una Access Key estatica: solo credenciales temporales.
+#    3. Le pide a la EC2 de backend.yaml (SSM Run Command) que anote ese
+#       VersionId y reinicie la aplicacion.
+#    4. Al arrancar, la EC2 LEE el jar de este bucket con su perfil de
+#       instancia (LabInstanceProfile / LabRole). En ningun momento del
+#       proceso existe una Access Key estatica: solo credenciales temporales.
 #
 #  TRAMPAS
 #    * Un bucket versionado guarda TODAS las versiones anteriores. Cada JAR de
@@ -76,9 +77,8 @@ Resources:
       BucketName: !Sub "${ProjectName}-artifacts-${AWS::AccountId}"
 
       # Cada subida crea una version nueva. Eso da dos cosas: poder volver a un
-      # JAR anterior, y —sobre todo— un VersionId que le demuestra a
-      # CloudFormation que el codigo CAMBIO. Sin versionado, el template se ve
-      # identico entre despliegues y la Lambda se queda con el codigo viejo.
+      # JAR anterior, y un VersionId exacto que la EC2 descarga y deja
+      # anotado (/etc/biblioteca/version): se sabe que version corre.
       VersioningConfiguration:
         Status: Enabled
 

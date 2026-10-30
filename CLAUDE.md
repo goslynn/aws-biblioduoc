@@ -25,17 +25,20 @@ documento.
 
 ```sh
 awsacademy start                   # credenciales frescas; caducan cada ~4 h
-./aws/scripts/bootstrap.sh         # crea TODO en orden; idempotente
+SMTP_HOST=... SMTP_USER=... SMTP_PASSWORD=... SMTP_FROM=... \
+./aws/scripts/bootstrap.sh         # crea TODO en orden; idempotente (SMTP_* solo la 1.a vez)
+# o bien: cp aws/.env.example aws/.env (SMTP_*, DEMO_USER...; en .gitignore) y
+./aws/scripts/bootstrap.sh         # la terminal gana sobre aws/.env
 ./aws/scripts/teardown.sh          # borra todo (pide escribir BORRAR; --yes lo salta)
 
-./aws/scripts/vpn-up.sh            # opcional: VPN WireGuard hasta la base + cliente local (sudo)
+./aws/scripts/vpn-up.sh            # opcional: VPN WireGuard hasta la base y el panel de RabbitMQ (sudo)
 ./aws/scripts/vpn-down.sh          # la baja y borra el stack (cuesta por hora)
 ```
 
 Pipelines parciales, cuando ya hay stacks desplegados:
 
 ```sh
-./aws/pipeline/build-backend.sh    # cambiaste codigo Java (mvnw package -> ZIP -> S3 -> stack)
+./aws/pipeline/build-backend.sh    # cambiaste codigo Java (mvnw package -> jar a S3 -> stack -> reinicio por SSM)
 ./aws/pipeline/api-deploy.sh       # cambiaste rutas, metodos o scopes en api.yaml
 ./aws/pipeline/publish-web.sh      # cambiaste el frontend (config + ng build + s3 sync)
 ./aws/pipeline/bruno-env.sh        # los tokens caducaron (60 min)
@@ -44,10 +47,11 @@ SKIP_TESTS=true ./aws/pipeline/build-backend.sh
 SOLO_CONFIG=true ./aws/pipeline/publish-web.sh   # solo genera los archivos del frontend
 DEBUG=true       ./aws/pipeline/publish-web.sh   # + la vista /diagnostico (no entregable)
 SKIP_WEB=true    ./aws/scripts/bootstrap.sh
+REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh   # recordatorio a los ~2 min (demo)
 ```
 
 Variables comunes a todos los scripts: `PROJECT_NAME` (biblioteca),
-`AWS_REGION` (us-east-1), `STAGE_NAME` (test), `DEMO_USER`, `LAB_ROLE_ARN`.
+`AWS_REGION` (us-east-1), `STAGE_NAME` (test), `DEMO_USER`, `DEMO_EMPLOYEE`.
 
 **Un cambio en `api.yaml` no llega al stage solo**: `AWS::ApiGateway::Deployment`
 es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
@@ -56,9 +60,10 @@ es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
 
 ```sh
 cd back
-./mvnw package                                          # compila y corre los 15 tests (necesita Docker)
+./mvnw package                                          # compila y corre los 33 tests (necesita Docker:
+                                                        #  PostgreSQL y RabbitMQ con Testcontainers, GreenMail)
 ./mvnw test
-./mvnw test -Dtest=LibroControllerTest                  # una clase
+./mvnw test -Dtest=AvisosIntegracionTest                # una clase
 ./mvnw test -Dtest=LibroControllerTest#nombreDelMetodo  # un test
 ```
 
@@ -79,7 +84,8 @@ verificacion del frontend es el recorrido en navegador del `front/README.md` §4
 ### Pruebas de la API
 
 ```sh
-cd bruno && bru run --env aws                   # caso bueno: 200/201
+cd bruno && bru run --env aws                   # estudiante: 200/201, y 403 en /gestion (RBAC)
+bru run --env aws-backoffice                    # empleado (M2M scope gestion): 200 en /gestion
 bru run --env aws-usuario-sin-scope             # 401
 bru run --env aws-id-token                      # 401
 bru run --env aws-token-invalido                # 401
@@ -93,28 +99,48 @@ verificacion es Bruno y el navegador.
 ### Diagnostico
 
 ```sh
-aws logs tail /aws/lambda/biblioteca-api --follow --region us-east-1
+aws logs tail /biblioteca/backend --follow --region us-east-1   # streams app y rabbitmq
+aws ec2 get-console-output --instance-id <id> --latest --output text   # primer arranque de la EC2
 aws cloudformation describe-stacks --stack-name biblioteca-api --query 'Stacks[0].Outputs' --output table
 aws cloudformation validate-template --template-body file://aws/api.yaml
 ```
 
-Los 401/403 del authorizer **no aparecen en los logs de la Lambda**: API
-Gateway rechaza antes de invocarla.
+Los 401 del authorizer **no aparecen en los logs del backend**: API Gateway
+rechaza antes de reenviar. Un 500 en todas las rutas casi siempre es el NLB sin
+destino sano (la app arrancando o caida): `aws elbv2 describe-target-health`.
 
 ---
 
 ## Arquitectura
 
 ```
-Angular (S3, endpoint REST)  ──▶  API Gateway REST (authorizer Cognito + scope)
-                                          │ AWS_PROXY, payload 1.0
+Angular (S3, endpoint REST)  ──▶  API Gateway REST (authorizer Cognito + scopes)
+                                          │ HTTP_PROXY por VPC Link
                                           ▼
-                              Lambda java21 + Lambda Web Adapter   ┐ VPC privada:
-                              Spring Boot revalida el MISMO token  │ sin IGW ni NAT
-                                          │ TLS verify-full        │
-                                          ▼                        │
-                              RDS PostgreSQL 16, sin IP publica    ┘
+                              NLB interno (subredes privadas)
+                                          │ :8080, health check /health
+                                          ▼
+                              EC2 (subred PUBLICA, SG: entra solo la VPC)   ── SMTP 587 ──▶ correo
+                               [app]      Spring Boot: revalida el token, RBAC,
+                                          consumidores @RabbitListener, @Scheduled
+                               [rabbitmq] 4.1 + panel (solo por la VPN)
+                                          │ TLS verify-full
+                                          ▼
+                              RDS PostgreSQL 16 (subredes privadas, sin IP publica)
 ```
+
+Por que EC2 y no Lambda: RabbitMQ necesita consumidores vivos todo el tiempo, y
+Lambda solo consume colas de **Amazon MQ**, que el lab bloquea (`mq:*`, `kafka:*`
+y `ses:*` con *explicitDeny*, medido con `simulate-principal-policy`). El broker
+va en la misma EC2; el backend no se parte entre Lambda y EC2 (decision del
+usuario).
+
+Los avisos por correo viajan asi: cambio de negocio + evento en la MISMA
+transaccion (`evento_pendiente`, outbox) → `RelayEventos` lo publica con
+publisher confirms en el topic `biblioteca.eventos` → consumidores con ACK
+manual → exchange direct `correo` (carriles `transaccional`/`masivo`) →
+`EnviadorSmtp`. Reintento con espera por DLX + TTL (`correo.espera`); DLQ en
+`correo.fallidos` y `eventos.fallidos`. Detalle en `back/README.md` §4.
 
 Siete stacks, uno por plantilla, sin `Export`/`Fn::ImportValue`: se encadenan
 con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
@@ -126,9 +152,9 @@ con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
 | `aws/cognito.yaml` | `biblioteca-cognito` | — (recibe la URL del sitio *calculada*) |
 | `aws/network.yaml` | `biblioteca-network` | — |
 | `aws/database.yaml` | `biblioteca-database` | network |
-| `aws/backend.yaml` | `biblioteca-backend` | artifacts, cognito, web, network, database + ZIP subido |
+| `aws/backend.yaml` | `biblioteca-backend` | artifacts, cognito, web, network, database + jar subido |
 | `aws/api.yaml` | `biblioteca-api` | cognito, backend, web |
-| `aws/vpn.yaml` (opcional) | `biblioteca-vpn` | network, database; lo crea `vpn-up.sh`, no el bootstrap |
+| `aws/vpn.yaml` (opcional) | `biblioteca-vpn` | network, database (+ backend para el panel); lo crea `vpn-up.sh`, no el bootstrap |
 
 El ciclo aparente (Cognito necesita la URL del frontend; el frontend necesita
 Cognito) se rompe **calculando** `https://<proyecto>-web-<AccountId>.s3.<region>.amazonaws.com`
@@ -140,25 +166,35 @@ otro stack o a un script.
 
 ### Seguridad en dos capas, y donde vive cada literal
 
-El scope `biblioteca-api/acceso` tiene que coincidir **caracter por caracter**
-en cuatro sitios: los dos App Clients y el Resource Server de `cognito.yaml`,
-`AuthorizationScopes` en `api.yaml`, el `hasAuthority("SCOPE_" + …)` de
-`SecurityConfig.java`, y la lista de scopes de Amplify en el frontend. Se
-propaga por parametros desde el Output `ScopeCompleto`.
+Dos scopes y un grupo. `biblioteca-api/acceso` (estudiantes) tiene que
+coincidir **caracter por caracter** en: el Resource Server y los App Clients SPA
+y M2M de `cognito.yaml`, `AuthorizationScopes` en `api.yaml`, `SecurityConfig`
+(por `BIBLIOTECA_SCOPE`) y la lista de scopes de Amplify. `biblioteca-api/gestion`
+(solo el App Client backoffice) en: Resource Server, `api.yaml` y `SecurityConfig`
+(por `BIBLIOTECA_SCOPE_GESTION`). Se propagan desde los Outputs `ScopeCompleto`
+y `ScopeGestion`. El grupo `empleados` en `cognito.yaml`,
+`biblioteca.grupo-empleados` de `application.properties` y `sesion.service.ts`.
+
+**RBAC**: el gateway acepta cualquiera de los dos scopes en todos los metodos;
+el rol lo decide Spring. `ROLE_EMPLEADO` = (grupo `empleados` en
+`cognito:groups` **y** scope de acceso) **o** scope de gestion. La regla vive en
+la ruta: `/api/gestion/**` → `hasRole("EMPLEADO")`. Los scopes se asignan por
+App Client, no por persona: el rol de una persona NO puede ser un scope.
 
 Codigos **medidos** contra el despliegue real (no supuestos):
 
 * Token valido **sin** el scope → API Gateway responde **401**, no 403. El 403
-  por autorizacion lo da **Spring**, y solo se ve invocando la Lambda
-  directamente (`aws lambda invoke`, ver `aws/README.md` §5).
+  por autorizacion lo da **Spring**: directo a la EC2 por la VPN
+  (`aws/README.md` §5) y, con RBAC, tambien a traves del gateway en
+  `/api/gestion/**` con un token de estudiante (pendiente de medir).
 * Un **id token** siempre da 401: no lleva claim `scope`, y `SecurityConfig`
   ademas exige `token_use == "access"`.
 * Una ruta inexistente da **403 Missing Authentication Token**, no 404.
 
 ### CORS: tres piezas, tres responsables
 
-Con integracion `AWS_PROXY`, API Gateway **no puede** anadir cabeceras a la
-respuesta real. El reparto es fijo:
+Con integracion `HTTP_PROXY`, API Gateway **no anade** cabeceras a la respuesta
+real. El reparto es fijo:
 
 1. preflight `OPTIONS` → API Gateway, integracion MOCK, `AuthorizationType: NONE`;
 2. cabecera del 200 → **Spring** (`corsConfigurationSource`, origen exacto desde `BIBLIOTECA_ORIGEN`);
@@ -177,7 +213,8 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   CloudFormation. Archivos generados y no versionados:
   `front/src/app/aws-config.ts` (plantilla: `aws-config.example.ts`),
   `front/src/app/diagnostico/rutas.ts` (plantillas: `rutas.example.ts` y
-  `rutas.example-debug.ts`), `bruno/environments/aws*.yml`, `aws/.local/`.
+  `rutas.example-debug.ts`), `bruno/environments/aws*.yml`, `aws/.local/`,
+  `aws/.env` (plantilla: `aws/.env.example`; lleva `SMTP_PASSWORD`).
 * **La vista de diagnostico es opt-in y no se entrega.** Ensena el access token
   en claro. Solo aparece con `DEBUG=true`, y lo que esa variable genera es la
   RUTA, no un `if`: apagada, el componente no lo importa nadie y Angular no lo
@@ -185,29 +222,39 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   vive en `EstadoSesion`: lo piden a Amplify el interceptor y esa vista, nadie
   mas.
 * **Cero recursos `AWS::IAM::*`**: el Learner Lab no permite crear roles.
-  `backend.yaml` recibe el ARN de `LabRole` como parametro. Tampoco hay ninguna
-  Access Key estatica en el sistema.
+  La EC2 usa el perfil `LabInstanceProfile` (parametro `InstanceProfileName`).
+  Tampoco hay ninguna Access Key estatica en el sistema.
+* **Ninguna peticion manda correos ni publica en RabbitMQ directamente**: deja
+  el evento en `BandejaDeSalida` dentro de su transaccion (`Propagation.MANDATORY`).
+  Los consumidores son idempotentes (entrega "al menos una vez"). El email del
+  destinatario sale de Cognito por el `sub`, nunca del cuerpo.
 * **El `solicitante` nunca viaja en el cuerpo**: sale de `Principal.getName()`
   (claim `sub`, o `client_id` en M2M).
 * **Dos prefijos por controlador**: `@RequestMapping({"/api/x", "/v1/api/x"})`.
   En API Gateway `/v1/{proxy+}` es un unico recurso y el enrutado fino lo hace
   Spring. Un `/v2` seria otra clase y convivirian.
 * **Toda desviacion se declara**, no se esconde: README §7 (canon de la guia,
-  JWKS fijado al desplegar, contrasenas resueltas en variables de entorno, VPN
-  opcional con IGW).
+  EC2 en subred publica, SMTP externo, JWKS fijado al desplegar, contrasenas
+  como variables del contenedor, backoffice como empleado en Bruno, VPN).
 * **La base no se expone.** Nada de `PubliclyAccessible: true`, NAT ni
-  bastion, y la red de la aplicacion no tiene IGW: la unica via permanente a
-  RDS es el SG de la Lambda. Por eso el seed y el esquema son migraciones
-  Flyway (`back/src/main/resources/db/migration`) que aplica la propia app al
-  arrancar. La unica excepcion es la **VPN opcional** (`aws/vpn.yaml`, fuera
-  del bootstrap): subred publica e IGW propios, solo UDP desde la IP del
-  equipo, y se borra al terminar con `vpn-down.sh`. No anadas nada mas a su
-  subred ni rutas a Internet a las privadas. Las migraciones aplicadas no se
-  editan: se anade una `V3__...sql`.
+  bastion. RDS vive en las subredes PRIVADAS, que no tienen ruta a Internet: la
+  unica via permanente es el SG de la EC2 de la app. La subred PUBLICA de
+  `network.yaml` (con el unico IGW de la VPC) es solo para la EC2 de la app
+  —cuyo SG no acepta nada desde Internet— y el servidor de la VPN opcional. No
+  anadas rutas a Internet a las privadas ni puertos abiertos a `0.0.0.0/0`. El
+  seed y el esquema son migraciones Flyway
+  (`back/src/main/resources/db/migration`) que aplica la propia app al arrancar.
+  Las migraciones aplicadas no se editan: se anade una `V4__...sql`.
 * **Dos usuarios de BD**: Flyway entra como maestro (`MasterSecret`); la app
-  como `biblioteca_app` (`AppSecret`), solo `SELECT`/`INSERT`. Si una consulta
-  nueva necesita mas permisos, se conceden en una migracion, no se cambia de
-  usuario.
+  como `biblioteca_app` (`AppSecret`): `SELECT`/`INSERT`, y desde V3 `UPDATE`
+  solo de columnas concretas (stock, ciclo de vida) y `DELETE` solo donde borrar
+  es negocio. Si una consulta nueva necesita mas permisos, se conceden en una
+  migracion, no se cambia de usuario. `SELECT ... FOR UPDATE` exige `UPDATE`:
+  el relay usa `DELETE ... RETURNING` para no necesitarlo.
+* **La configuracion de la EC2 no va en el UserData** (solo corre el primer
+  arranque, y cambiarlo detiene la instancia): va en el parametro SSM
+  `/<proyecto>/backend/app.env`, que los scripts de arranque releen en cada
+  inicio del servicio. Los secretos se leen de Secrets Manager en ese momento.
 * Si cambias comportamiento medido, **vuelve a medirlo** y actualiza la tabla
   del `README.md` §4 y el `ESPERADO_*` de los entornos de Bruno.
 
@@ -220,31 +267,39 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   vuelve a pasar por las reglas, cae en el `denyAll()` final, y **todo 404 y 409
   sale como 403 con cuerpo vacio**. MockMvc no reproduce ese reenvio: los tests
   pasaban en verde.
-* **`/health` es la unica ruta publica** y no se publica en API Gateway: el
-  Lambda Web Adapter no da por arrancada la aplicacion hasta recibir un 2xx.
+* **`/health` es la unica ruta publica** y no se publica en API Gateway: es el
+  health check del NLB y la senal (cfn-signal) del primer arranque de la EC2.
 * **`provideHttpClient(withInterceptors([...]))` va DENTRO del array
   `providers`** de `app.config.ts`. Fuera, compila, arranca y el interceptor no
   se registra: todo responde 401.
 * **Rutas con `#` (`withHashLocation`)**: el endpoint REST de S3 no redirige a
   `index.html`, y el *website endpoint* es HTTP puro, que Cognito rechaza como
   callback.
-* **`admin-initiate-auth` no emite custom scopes.** El token bueno solo sale del
-  App Client M2M (`client_credentials`) o del flujo del navegador. Esa
-  limitacion es justo lo que da gratis los casos 401/403 de la matriz.
-* **La Lambda no tiene salida a Internet.** Spring no puede descargar el JWKS:
-  lo baja `build-backend.sh` y entra por `BIBLIOTECA_JWKS`. No uses
-  `spring.security.oauth2.resourceserver.jwt.issuer-uri` (intentaria el
-  descubrimiento OIDC y no levantaria); el emisor va en `BIBLIOTECA_ISSUER`.
-  Tampoco puede llamar a ningun servicio de AWS en ejecucion: los secretos se
-  resuelven al desplegar.
+* **`admin-initiate-auth` no emite custom scopes.** El token bueno solo sale de
+  los App Clients M2M (`client_credentials`) o del flujo del navegador. Esa
+  limitacion da gratis los casos 401 de la matriz, y es por lo que en Bruno el
+  empleado es el cliente backoffice y no una persona del grupo.
+* **El JWKS se fija al desplegar** (lo baja `build-backend.sh`, entra por
+  `BIBLIOTECA_JWKS`): viene de la etapa Lambda sin Internet y se mantiene. No
+  uses `spring.security.oauth2.resourceserver.jwt.issuer-uri`; el emisor va en
+  `BIBLIOTECA_ISSUER`.
+* **`HttpPutResponseHopLimit: 2`** en la EC2: con IMDSv2 y el limite por
+  defecto, el contenedor de la app no alcanza el servicio de metadatos y el SDK
+  (Cognito `ListUsers`) se queda sin credenciales.
+* **Argumentos de cola inmutables**: cambiar un TTL, un DLX o el tipo de una
+  cola ya declarada hace fallar el arranque con `PRECONDITION_FAILED`; hay que
+  borrar la cola en el panel.
+* **El recordatorio NO es un mensaje con TTL**: RabbitMQ solo expira en la
+  cabeza de la cola (uno de 30 dias bloquearia al de 1) y un mensaje publicado
+  no se anula al devolver el libro. Es un `@Scheduled` con `UPDATE ... RETURNING`.
+* **El host del SMTP de los tests va en `application.properties` de test**, no
+  en el `DynamicPropertyRegistrar`: la autoconfiguracion del `JavaMailSender`
+  mira esa propiedad antes de que los contenedores registren las suyas.
 * **`src/test/resources/application.properties` reemplaza al principal**, no
   se suma: cualquier propiedad sin valor por defecto (p. ej. el placeholder
   `appPassword` de Flyway) hay que repetirla ahi.
 * **Flyway sustituye placeholders tambien en los comentarios SQL**: no
   escribas `${...}` en un comentario de una migracion.
-* **`ReservedConcurrency` (5 por defecto)** acota las conexiones a la
-  `db.t3.micro` (5 instancias × pool de 2). Si la cuenta no permite reservar,
-  desplegar con `ReservedConcurrency=-1`.
 
 La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 
@@ -256,6 +311,6 @@ La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 |---|---|
 | `README.md` | Vision general, arquitectura, matriz de seguridad, desviaciones declaradas |
 | `aws/README.md` | Contrato de cada stack, orden de despliegue, restricciones del Learner Lab, tabla de problemas |
-| `back/README.md` | Decisiones del backend y quien produce cada codigo de respuesta |
+| `back/README.md` | Historias de usuario, RabbitMQ (topologia, ACK/NACK, DLQ), decisiones y quien produce cada codigo |
 | `front/README.md` | Estructura Angular y recorrido de comprobacion en navegador |
 | `bruno/README.md` | Por que la matriz vive en los entornos y no en peticiones duplicadas |

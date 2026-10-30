@@ -12,11 +12,9 @@ import org.springframework.stereotype.Component;
  * DE DONDE SALEN LOS DATOS
  *   De la migracion db/migration/V2__catalogo_inicial.sql (el seed), que Flyway
  *   aplica al arrancar. La aplicacion se conecta con el rol biblioteca_app, que
- *   sobre esta tabla solo tiene SELECT: el catalogo no se puede modificar desde
- *   la API ni aunque hubiera un fallo en este codigo.
- *
- * La interfaz publica es la misma que cuando el catalogo vivia en un JSON, asi
- * que LibroController no se entero del cambio.
+ *   sobre esta tabla tiene SELECT y UPDATE de UNA columna, ejemplares (V3): el
+ *   stock cambia al aprobar, devolver y cargar; titulo, autor o ISBN no se
+ *   pueden modificar desde la API ni aunque hubiera un fallo en este codigo.
  */
 @Component
 public class CatalogoLibros {
@@ -74,6 +72,36 @@ public class CatalogoLibros {
         return jdbc.sql(COLUMNAS + "WHERE upper(id) = upper(:id)")
                 .param("id", id)
                 .query(Libro.class)
+                .optional();
+    }
+
+    /**
+     * Resta ejemplares SOLO si alcanzan, en una sentencia atomica.
+     *
+     * Leer el stock, comprobarlo en Java y luego restar dejaria una ventana
+     * en la que dos aprobaciones simultaneas ven "queda 1" y se llevan 2. Con
+     * la condicion dentro del UPDATE, Postgres la evalua con la fila ya
+     * bloqueada: la segunda aprobacion cambia 0 filas.
+     *
+     * @return false si no quedaban suficientes ejemplares
+     */
+    public boolean descontar(String libroId, int cantidad) {
+        return jdbc.sql("UPDATE libro SET ejemplares = ejemplares - :n WHERE id = :id AND ejemplares >= :n")
+                .param("id", libroId)
+                .param("n", cantidad)
+                .update() == 1;
+    }
+
+    /**
+     * Suma ejemplares (devolucion o carga de stock).
+     *
+     * @return los ejemplares que hay DESPUES de sumar, o vacio si el libro no existe
+     */
+    public Optional<Integer> sumar(String libroId, int cantidad) {
+        return jdbc.sql("UPDATE libro SET ejemplares = ejemplares + :n WHERE id = :id RETURNING ejemplares")
+                .param("id", libroId)
+                .param("n", cantidad)
+                .query(Integer.class)
                 .optional();
     }
 

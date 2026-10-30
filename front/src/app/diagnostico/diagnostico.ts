@@ -27,7 +27,7 @@ import { SesionService } from '../auth/sesion.service';
  *      no ves la cabecera escrita a mano, el interceptor parece magia.
  *
  *   3. La misma llamada SIN cabecera: responde 401. Ese 401 lo produce API
- *      Gateway antes de invocar la Lambda.
+ *      Gateway antes de llegar a la EC2.
  *
  * ES LA UNICA EXCEPCION a la regla de que solo sesion.service.ts habla con
  * Amplify, y lo es por diseno: el token crudo ya NO viaja en EstadoSesion,

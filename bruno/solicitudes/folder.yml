@@ -36,6 +36,13 @@ docs: |
   | el `libroId` debe existir | 404 |
   | el libro debe tener ejemplares | 409 |
 
+  El 409 de aqui es un aviso temprano: el stock se descuenta recien cuando un
+  empleado APRUEBA (carpeta `gestion`). Toda solicitud nace `RECIBIDA` y su
+  comprobante sale por correo, si el estudiante activo los avisos.
+
+  Un estudiante solo ve las SUYAS: `list` filtra por el token, y `get` de una
+  ajena responde 404.
+
   Sedes validas: `SAN_JOAQUIN`, `PLAZA_OESTE`, `PUENTE_ALTO`, `VINA_DEL_MAR`,
   `CONCEPCION`.
 
@@ -51,7 +58,7 @@ docs: |
   ## Persistencia
 
   Las solicitudes se guardan en PostgreSQL (RDS privado): sobreviven a los
-  arranques en frio y todas las instancias de la Lambda ven las mismas. Una
+  reinicios de la aplicacion y de la EC2. Una
   solicitud creada con `create` se puede leer despues con `get` y `list`,
   aunque pasen horas. Solo desaparecen si se destruye el stack de la base
   (`teardown.sh`).

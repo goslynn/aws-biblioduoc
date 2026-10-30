@@ -1,0 +1,66 @@
+info:
+  name: log
+  type: http
+  seq: 6
+
+http:
+  method: GET
+  url: "{{BASE_URL}}/api/gestion/bitacora"
+  params:
+    - name: limite
+      value: "20"
+      type: query
+      disabled: true
+      description: Cuantas entradas, de 1 a 200 (50 por defecto).
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_GESTION"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("cada entrada dice que paso, quien y cuando", function () {
+            res.getBody().forEach((e) => {
+              expect(e.tipo).to.be.a("string");
+              expect(e.actor).to.be.a("string");
+              expect(e.ocurridoEn).to.be.a("string");
+            });
+          });
+        }
+
+docs: |
+  # Bitacora
+
+  `GET /api/gestion/bitacora?limite=`. Los ultimos eventos publicados, del
+  mas nuevo al mas viejo. La llena el consumidor de la cola `bitacora`, que
+  esta enlazada al exchange topic con `#`: recibe una copia de TODO evento.
+  Es asincrona: una accion recien hecha puede tardar un segundo en aparecer.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | empleado | entorno `aws-backoffice` |
+  | 403 | el token no es de empleado | entorno `aws` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+examples:
+  - name: 200 con eventos
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          [
+            { "tipo": "solicitud.devuelta", "actor": "4f1kq...backoffice", "referencia": "SOL-0007",
+              "ocurridoEn": "2026-10-28T15:02:11.104Z", "detalle": "{...}" },
+            { "tipo": "solicitud.aprobada", "actor": "4f1kq...backoffice", "referencia": "SOL-0007",
+              "ocurridoEn": "2026-10-28T15:02:10.871Z", "detalle": "{...}" }
+          ]

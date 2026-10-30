@@ -2,18 +2,22 @@
 
 Aplicacion full stack cloud native en AWS para la asignatura **DSY1107**
 (evaluacion EA1). Permite a la comunidad Duoc **crear una cuenta**, **buscar en
-el catalogo** de la biblioteca y **solicitar uno o varios libros** en prestamo,
-indicando dias, motivo y sede de retiro.
+el catalogo**, **solicitar uno o varios libros** en prestamo y **recibir avisos
+por correo** de cada paso. El personal de biblioteca (**empleados**) aprueba o
+rechaza las solicitudes, registra devoluciones y carga stock.
 
 ```
-Angular en S3  ──▶  API Gateway (REST + Cognito)  ──▶  Spring Boot en Lambda
-      │                        │                     ┌── VPC privada, sin salida a Internet ──┐
-   Amplify Auth          authorizer + scope          │  Lambda: 2.ª validacion del JWT        │
-   (code + PKCE)          + CORS + stage             │     │ TLS verify-full, 5432            │
-      │                                              │     ▼                                  │
-      │                                              │  RDS PostgreSQL 16 (sin IP publica)    │
-      │                                              └────────────────────────────────────────┘
-      └──────────────▶  Amazon Cognito  ── JWKS (lo baja el pipeline al desplegar) ──▶ Lambda
+Angular en S3  ──▶  API Gateway (REST + Cognito)  ──VPC Link──▶  NLB interno
+      │                        │                                    │ :80 → :8080
+   Amplify Auth          authorizer + scopes             ┌── EC2 (subred publica, SG cerrado) ──┐
+   (code + PKCE)          + CORS + stage                 │  Spring Boot: API, 2.ª validacion    │
+      │                                                  │   del JWT, RBAC, consumidores        │
+      │                                                  │      │ AMQP (red de Docker)          │
+      │                                                  │  RabbitMQ 4.1 ── SMTP 587 ──▶ correo │
+      │                                                  └──────┼───────────────────────────────┘
+      │                                                         │ TLS verify-full, 5432
+      │                                                  RDS PostgreSQL 16 (subred privada, sin IP publica)
+      └──────────────▶  Amazon Cognito  ── JWKS (lo baja el pipeline al desplegar) ──▶ Spring
 ```
 
 Todo se crea con **CloudFormation** (una plantilla por servicio) desde la **AWS
@@ -25,7 +29,7 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 
 | Directorio | Que contiene |
 |---|---|
-| `back/` | Backend Spring Boot 4.1 (Java 21). El mismo jar corre con `java -jar` y dentro de Lambda |
+| `back/` | Backend Spring Boot 4.1 (Java 21): API REST, RBAC, productores y consumidores de RabbitMQ, envio de correo. Tiene su propio [README](back/README.md) |
 | `front/` | Frontend Angular 22 con AWS Amplify, publicado como sitio estatico en S3 |
 | `aws/` | Las siete plantillas de CloudFormation, los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
 | `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa. Tiene su propio [README](bruno/README.md) |
@@ -34,82 +38,143 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 
 ## 2. Que hace la aplicacion
 
-**Catalogo.** 20 libros en la tabla `libro` de PostgreSQL, sembrados por la
-migracion Flyway `V2__catalogo_inicial.sql`. Se busca por titulo, autor o ISBN
-(sin distinguir mayusculas ni tildes, con la extension `unaccent`) y se filtra
-por genero y disponibilidad. La API solo lo lee.
+### Historias de usuario
 
-**Solicitudes.** Se eligen uno o varios libros en el catalogo y se completa un
-formulario con dias de prestamo (1-30), motivo (10-300 caracteres) y sede. El
-backend valida, resuelve los titulos contra el catalogo y guarda la solicitud
-en **PostgreSQL**.
+| # | Como... | quiero... | para... |
+|---|---|---|---|
+| H0 | estudiante | **activar los avisos por correo** | enterarme de mis prestamos sin entrar a la plataforma |
+| H1 | estudiante | recibir un **comprobante** al enviar una solicitud | tener constancia de lo que pedi |
+| H2 | empleado | ver la **bandeja** y **aprobar o rechazar** con motivo | resolver los prestamos; el estudiante recibe la resolucion |
+| H3 | estudiante | un **recordatorio** antes del vencimiento | devolver a tiempo |
+| H4 | empleado | **registrar la devolucion** | reponer el stock |
+| H5 | estudiante | **"avisame cuando vuelva"** en un libro agotado | no revisar el catalogo todos los dias |
+| H6 | empleado | **cargar stock** | reponer ejemplares; quienes esperaban reciben un correo |
+| H7 | empleado | una **bitacora** de quien hizo que | auditar aprobaciones, rechazos y cargas |
 
-| Metodo | Ruta | Respuestas |
-|---|---|---|
-| GET | `/api/libros?q=&genero=&soloDisponibles=` | 200 |
-| GET | `/api/libros/generos` | 200 |
-| GET | `/api/libros/{id}` | 200 · 404 |
-| POST | `/api/solicitudes` | 201 · 400 · 404 · 409 |
-| GET | `/api/solicitudes?mias=&estado=` | 200 |
-| GET | `/api/solicitudes/{id}` | 200 · 404 |
-| GET | `/health` | 200, sin autenticacion y sin publicar en API Gateway |
+Los caminos tristes de cada una (SMTP caido, stock que se agota entre pedir y
+aprobar, doble aprobacion, devolucion antes del recordatorio...) estan en
+[`back/README.md`](back/README.md) §3 y cubiertos por los tests.
+
+### Ciclo de vida de una solicitud
+
+```
+RECIBIDA --empleado aprueba--> APROBADA --empleado registra devolucion--> DEVUELTA
+    \
+     `--empleado rechaza (con motivo)--> RECHAZADA
+```
+
+El stock se descuenta al **aprobar** (de forma atomica: si dos empleados se
+llevan el ultimo ejemplar a la vez, uno recibe 409) y se repone al **devolver**.
+El plazo de devolucion cuenta desde la aprobacion.
+
+### Rutas
+
+| Metodo | Ruta | Quien | Respuestas |
+|---|---|---|---|
+| GET | `/api/libros?q=&genero=&soloDisponibles=` | todos | 200 |
+| GET | `/api/libros/generos` | todos | 200 |
+| GET | `/api/libros/{id}` | todos | 200 · 404 |
+| GET | `/api/libros/avisame` | todos | 200 (libros que espero) |
+| POST · DELETE | `/api/libros/{id}/avisame` | todos | 201 / 204 · 404 · 409 (tiene stock) |
+| POST | `/api/solicitudes` | todos | 201 · 400 · 404 · 409 |
+| GET | `/api/solicitudes` | todos | 200, **solo las propias** |
+| GET | `/api/solicitudes/{id}` | dueno o empleado | 200 · 404 (tambien si es ajena) |
+| GET · PUT · DELETE | `/api/avisos/correo` | todos | 200 / 200 / 204 · 409 (sin email verificado) |
+| GET | `/api/gestion/solicitudes?estado=` | **empleado** | 200 · 403 |
+| POST | `/api/gestion/solicitudes/{id}/aprobacion` | **empleado** | 200 · 403 · 404 · 409 |
+| POST | `/api/gestion/solicitudes/{id}/rechazo` | **empleado** | 200 · 400 · 403 · 404 · 409 |
+| POST | `/api/gestion/solicitudes/{id}/devolucion` | **empleado** | 200 · 403 · 404 · 409 |
+| POST | `/api/gestion/libros/{id}/stock` | **empleado** | 200 · 400 · 403 · 404 |
+| GET | `/api/gestion/bitacora?limite=` | **empleado** | 200 · 403 |
+| GET | `/health` | nadie (NLB) | 200, sin autenticacion y sin publicar en API Gateway |
 
 Las mismas rutas existen bajo `/v1/api/...` (ver §6).
+
+### Los avisos viajan por RabbitMQ
+
+Mandar un correo es lento y depende de un tercero. Si cada peticion esperara al
+SMTP, una caida del proveedor tumbaria las solicitudes. Por eso ninguna
+peticion manda correos: deja un **evento**, y RabbitMQ se encarga del resto.
+
+```
+cambio de negocio + evento   (MISMA transaccion: bandeja de salida / outbox)
+          │  RelayEventos, cada segundo, con publisher confirms
+          ▼
+topic  biblioteca.eventos ── solicitud.* recordatorio.* aviso.* ──▶ notif.prestamos      ─┐
+                          ── stock.repuesto ──────────────────────▶ notif.disponibilidad ─┤ redactan
+                          ── # ───────────────────────────────────▶ bitacora              │
+                                                                                          ▼
+direct correo ── transaccional ──▶ correo.transaccional ─┐
+              ── masivo ─────────▶ correo.masivo ────────┴─▶ EnviadorSmtp ──▶ SMTP
+   fallo transitorio: NACK ──▶ correo.reintento ──▶ correo.espera (TTL 60 s) ──▶ vuelve
+   3 intentos, o fallo permanente ──▶ correo.fallidos (DLQ)
+```
+
+| Pieza de RabbitMQ | Donde | Para que |
+|---|---|---|
+| **topic** | `biblioteca.eventos` | cada consumidor se suscribe por patron; `#` (bitacora) recibe una copia de todo |
+| **direct** | `correo` | dos carriles: 200 avisos de un libro repuesto no retrasan el comprobante de nadie |
+| **fanout** | `correo.reintento` | lleva a la espera lo rechazado, sea cual sea su carril, conservando su routing key |
+| **ACK manual** | todos los consumidores | el mensaje no se da por procesado hasta que el codigo lo dice |
+| **NACK con requeue** | consumidores de eventos | fallo breve (base reiniciando): reintento inmediato; la cola **quorum** cuenta entregas y a la 5.ª lo aparta sola (`x-delivery-limit`) |
+| **NACK sin requeue + DLX** | eventos invalidos; SMTP caido | mensaje imposible directo a la DLQ; correo a la espera con **TTL** |
+| **DLQ** | `eventos.fallidos`, `correo.fallidos` | lo que no se pudo procesar queda a la vista en el panel, con su motivo |
+| **publisher confirms** | relay y publicador de correo | nada se da por publicado hasta que el broker lo confirma |
+| **prefetch distinto** | 5 transaccional, 1 masivo | el masivo no acapara el SMTP |
+
+Detalles, decisiones (por que el recordatorio es un `@Scheduled` y no un TTL
+por mensaje) y casos de fallo: [`back/README.md`](back/README.md).
 
 ### Lo que el cliente no decide
 
 El campo `solicitante` **no viaja en el formulario**: el backend lo lee del JWT
 ya validado (claim `sub` de la persona, o `client_id` si es un cliente maquina
-a maquina). Si viniera del cuerpo, cualquiera podria pedir libros a nombre de
-otro. Es tambien la prueba, dentro del codigo, de que el token llego intacto
-hasta Spring.
+a maquina). Por la misma razon, **activar los avisos no manda ningun correo en
+el cuerpo**: el backend lo lee de Cognito (email verificado) por el `sub`. Si
+cualquiera de los dos viniera del cliente, se podria pedir libros a nombre de
+otro o mandar avisos al correo de otra persona.
 
 ### Persistencia: PostgreSQL privado
 
-Las solicitudes y el catalogo viven en **RDS PostgreSQL 16**. Sobreviven a los
-arranques en frio y se comparten entre todas las instancias de la Lambda.
+Las solicitudes, el catalogo, los contactos, las suscripciones, la bitacora y
+la bandeja de salida viven en **RDS PostgreSQL 16**.
 
 La base **no esta expuesta**: no tiene IP publica, vive en subredes sin ruta a
 Internet (ni Internet Gateway ni NAT) y su security group solo acepta el 5432
-desde el security group de la Lambda. Por encima de eso:
+desde el security group de la EC2 de la aplicacion. Por encima de eso:
 
 | Capa | Medida |
 |---|---|
 | Transporte | `rds.force_ssl=1`, y la aplicacion verifica certificado y nombre (`sslmode=verify-full`) |
-| Credenciales | Aleatorias, generadas por Secrets Manager desde CloudFormation; nunca pasan por el repo |
-| Privilegios | La aplicacion usa el rol `biblioteca_app` (solo `SELECT`/`INSERT`); el maestro solo lo usa Flyway al arrancar |
+| Credenciales | Aleatorias, generadas por Secrets Manager desde CloudFormation; nunca pasan por el repo. La EC2 las lee al arrancar |
+| Privilegios | La aplicacion usa el rol `biblioteca_app`: `SELECT`/`INSERT`, y `UPDATE` solo de las columnas del ciclo de vida y del stock (V3). El maestro solo lo usa Flyway al arrancar |
 | Reposo | Almacenamiento y backups cifrados |
 
 El esquema y el **seed** del catalogo los aplica **Flyway** al arrancar la
-Lambda, desde dentro de la VPC: no hay bastion ni ninguna otra via hacia la
-base, a proposito. Las dos concesiones que exige este diseno estan en §7.
+aplicacion: no hay bastion ni ninguna otra via permanente hacia la base, a
+proposito.
 
-Para **consultarla desde tu equipo** (DataGrip, psql) hay una VPN WireGuard
-opcional y temporal: `./aws/scripts/vpn-up.sh` la levanta y configura el
-cliente; `./aws/scripts/vpn-down.sh` la borra. Detalles en `aws/README.md` §4.
+Para **consultarla desde tu equipo** (DataGrip, psql) —y ver el **panel de
+RabbitMQ**— hay una VPN WireGuard opcional y temporal: `./aws/scripts/vpn-up.sh`
+la levanta y configura el cliente; `./aws/scripts/vpn-down.sh` la borra.
+Detalles en `aws/README.md` §4.
 
-### Como se consigue una cuenta
-
-Hay **dos vias**, y conviven a proposito:
+### Como se consigue una cuenta, y quien es empleado
 
 | Via | Quien la usa | Verificacion |
 |---|---|---|
-| **Autoservicio**: boton *Crear cuenta* → `/signup` de la Hosted UI | cualquier persona | Cognito manda un **codigo de 6 digitos** al correo indicado; hasta teclearlo la cuenta queda `UNCONFIRMED` y no puede iniciar sesion |
-| **Administrador**: `admin-create-user` desde `bootstrap.sh` | el laboratorio, para la cuenta de demostracion | ninguna: se crea ya confirmada, con contrasena conocida |
+| **Autoservicio**: boton *Crear cuenta* → `/signup` de la Hosted UI | cualquier persona | Cognito manda un **codigo de 6 digitos** al correo indicado; hasta teclearlo la cuenta queda `UNCONFIRMED` |
+| **Administrador**: `admin-create-user` desde `bootstrap.sh` | el laboratorio: `alumno@duoc.cl` y `empleado@duoc.cl` | ninguna: se crean ya confirmadas, con contrasena conocida |
 
-Lo habilita `AllowAdminCreateUserOnly: false` en `aws/cognito.yaml`. Ese flag es
-tambien lo que hace aparecer el enlace *Sign up* dentro de la Hosted UI: no se
-configura por separado.
+**Empleado = miembro del grupo de Cognito `empleados`.** Cognito pone los
+grupos en el claim `cognito:groups` del access token, y Spring deduce de ahi el
+rol `EMPLEADO`. `bootstrap.sh` mete en el grupo a `empleado@duoc.cl`; en la vida
+real lo haria un administrador. Los scopes no sirven para esto: se asignan por
+App Client, no por persona.
 
-**Para probar el registro hace falta una casilla real.** El codigo se manda de
-verdad, con el remitente por defecto de Cognito (~50 correos al dia por pool,
-sin SES). Una direccion inventada como `alumno@duoc.cl` no recibe nada y la
-cuenta se queda a medias; por eso la cuenta de demostracion se sigue creando por
-la via del administrador, que no depende del correo.
-
-El usuario que se registra solo obtiene **exactamente los mismos permisos** que
-cualquier otro: el App Client del SPA pide el custom scope en los dos caminos,
-asi que su access token sirve para toda la API. No hay roles ni niveles.
+**Para recibir correos hace falta una casilla real.** Las cuentas de
+demostracion tienen direcciones inventadas: registrate con la tuya desde la
+Hosted UI y activa los avisos en *Mis solicitudes*.
 
 ---
 
@@ -117,14 +182,20 @@ asi que su access token sirve para toda la API. No hay roles ni niveles.
 
 ```sh
 awsacademy start                # arranca el laboratorio y refresca credenciales
+
+SMTP_HOST=smtp.gmail.com SMTP_USER=tu@gmail.com \
+SMTP_PASSWORD='<contrasena de aplicacion>' SMTP_FROM=tu@gmail.com \
 ./aws/scripts/bootstrap.sh      # crea TODO, en orden, de forma idempotente
 ```
 
-Al terminar imprime la URL del sitio, la de la API, la cuenta de demostracion y
-los comandos para probar. La primera vez tarda unos 10 minutos mas por la
-creacion de la instancia RDS. Requisitos locales: `aws`, `jq`, `curl`, `zip`,
-`python3`, `npm` y **Docker** (los tests del backend levantan un PostgreSQL con
-Testcontainers; `SKIP_TESTS=true` los salta). Para desmontarlo:
+Las `SMTP_*` (el proveedor de correo; el lab bloquea SES) solo hacen falta la
+primera vez, y pueden ir en `aws/.env` en vez de la terminal
+(`cp aws/.env.example aws/.env`; esta en `.gitignore`). Al terminar imprime la URL del sitio, la de la API, las cuentas de
+demostracion y los comandos para probar. La primera vez tarda unos 20 minutos
+(RDS, la EC2 instalando Docker y el VPC Link). Requisitos locales: `aws`, `jq`,
+`curl`, `python3`, `npm` y **Docker** (los tests del backend levantan
+PostgreSQL y RabbitMQ con Testcontainers; `SKIP_TESTS=true` los salta). Para
+desmontarlo:
 
 ```sh
 ./aws/scripts/teardown.sh
@@ -135,9 +206,10 @@ El detalle de cada stack, cada script y cada parametro esta en
 
 ### Como se prueba
 
-* **La API**, con Bruno: `cd bruno && bru run --env aws`
+* **La API**, con Bruno: `cd bruno && bru run --env aws` (y `--env aws-backoffice` para la gestion)
 * **La aplicacion**, en el navegador, abriendo la URL del sitio con DevTools en
-  la pestana Network.
+  la pestana Network. El recorrido completo esta en `front/README.md` §4.
+* **Las colas**, en el panel de RabbitMQ por la VPN (`vpn-up.sh` imprime la URL y las credenciales).
 
 Ningun script prueba la API por su cuenta: los scripts construyen, y la
 verificacion se hace con Bruno y con el navegador.
@@ -146,31 +218,41 @@ verificacion se hace con Bruno y con el navegador.
 
 ## 4. La seguridad, en dos capas
 
-Todos los codigos de esta tabla estan **medidos** contra el despliegue real, no
-supuestos. Las dos columnas son las dos capas.
+Las filas sin marca estan **medidas** contra el despliegue real. Las marcadas
+con ⧗ llegaron con el backend en EC2 y estan **pendientes de medir**: se
+deducen del codigo y de los tests, y hay que confirmarlas y quitar la marca.
 
-| Credencial | Por API Gateway | Directo a la Lambda | Quien rechaza |
+| Credencial | Por API Gateway | Directo a la EC2 (VPN) | Quien rechaza |
 |---|---|---|---|
 | sin cabecera `Authorization` | **401** | **401** | authorizer / Spring Security |
 | token inventado (`Bearer abc`) | **401** | **401** | firma invalida, en las dos capas |
 | **id token** | **401** | **401** | falta el claim `scope` / `token_use != access` |
-| access token **sin** el scope | **401** | **403** | ver la nota de abajo |
+| access token **sin** ningun scope de la API | **401** | **403** | ver la nota de abajo |
 | access token **con** el scope | **200** | **200** | nadie: pasa las dos capas |
+| estudiante en `/api/gestion/**` ⧗ | **403** | **403** | **Spring**, RBAC (`hasRole("EMPLEADO")`) |
+| empleado (grupo) o backoffice en `/api/gestion/**` ⧗ | **200** | **200** | nadie |
+| solicitud de OTRO estudiante ⧗ | **404** | **404** | **Spring**: no confirma que exista |
 | id inexistente, token valido | **404** | **404** | **Spring** |
 | formulario invalido | **400** | — | **Spring**, Bean Validation |
 | libro sin ejemplares | **409** | — | **Spring**, regla de negocio |
+| activar avisos sin email verificado (M2M) ⧗ | **409** | — | **Spring** |
 | ruta que no existe | **403** | — | API Gateway, *Missing Authentication Token* |
 
-### 401 por API Gateway, 403 al invocar la Lambda directamente
+La columna "directo" se midio cuando el backend era una Lambda (con
+`aws lambda invoke`); la regla de Spring que la produce no cambio. Con la EC2
+se reproduce por la VPN: ver `aws/README.md` §5.
+
+### 401 por API Gateway, 403 desde Spring
 
 Un access token valido pero sin el scope requerido responde **401** a traves de
 API Gateway, con el mismo cuerpo generico que un token invalido
 (`{"message":"Unauthorized"}`): el authorizer `COGNITO_USER_POOLS` no distingue
-autenticacion de autorizacion. Invocando la misma Lambda directamente,
-`SecurityConfig` (`hasAuthority`) si hace esa distincion y responde **403**.
+autenticacion de autorizacion. Spring si hace esa distincion y responde **403**.
 
-Este comportamiento sostiene el segundo nivel de defensa: si algo evita API
-Gateway, la validacion de Spring sigue exigiendo el scope.
+Con RBAC, ese 403 **se ve tambien a traves del gateway**: el token de un
+estudiante es valido y trae el scope de la API, asi que el gateway lo deja
+pasar, y es Spring quien lo rechaza en `/api/gestion/**`. El entorno `aws` de
+Bruno lo comprueba.
 
 ### Por que el id token da 401 y no 200
 
@@ -179,18 +261,20 @@ traiga el claim `scope`. Un id token no lo lleva, por diseno de OIDC, asi que
 usar el access token es un requisito tecnico y no una recomendacion. El
 entorno `aws-id-token` de Bruno verifica este caso.
 
-### Un solo scope, y por que
+### Dos scopes, un grupo, y por que
 
-El resource server define un unico scope, `biblioteca-api/acceso`, que autoriza
-tanto la lectura del catalogo como la creacion de solicitudes. Se llama
-`acceso` y no `libros-read` precisamente porque cubre tambien el `POST`.
+| Literal | Quien lo trae | Para que |
+|---|---|---|
+| scope `biblioteca-api/acceso` | el SPA (personas) y el cliente M2M | toda la API de estudiante |
+| scope `biblioteca-api/gestion` | solo el cliente M2M **backoffice** | ser EMPLEADO sin ser persona (un sistema de inventario; y Bruno) |
+| grupo `empleados` | las personas que un administrador agrega | ser EMPLEADO siendo persona |
 
-Partirlo en `libros-read` y `solicitudes-write` es la evolucion natural, y
-permitiria emitir credenciales que solo consulten el catalogo. No se hizo para
-mantener la configuracion en una sola pieza legible: ese literal tiene que
-coincidir **caracter por caracter** en cuatro sitios (los dos App Clients,
-`AuthorizationScopes` en `aws/api.yaml`, el `hasAuthority` de Spring y la lista
-de scopes de Amplify), y duplicarlo duplica tambien las oportunidades de error.
+El gateway acepta cualquiera de los dos scopes en todos los metodos; el rol lo
+decide Spring. Cada literal de scope tiene que coincidir **caracter por
+caracter** en: el Resource Server y los App Clients de `cognito.yaml`,
+`AuthorizationScopes` en `api.yaml`, `SecurityConfig` (por `BIBLIOTECA_SCOPE` y
+`BIBLIOTECA_SCOPE_GESTION`) y, el de acceso, la lista de scopes de Amplify. El
+nombre del grupo, en `cognito.yaml`, `application.properties` y el frontend.
 
 ---
 
@@ -202,8 +286,9 @@ Angular 22 standalone con signals y Amplify Auth 6.
 |---|---|---|
 | Configuracion de Amplify | `front/src/main.ts` | Se configura **antes** de arrancar Angular |
 | Interceptor | `front/src/app/auth/auth.interceptor.ts` | Anade el `Bearer` a toda peticion de `HttpClient` |
-| Guard | `front/src/app/auth/auth.guard.ts` | Impide **navegar** a las rutas privadas sin sesion |
-| Servicios | `libros.service.ts`, `solicitudes.service.ts` | Encapsulan URL y llamadas; los componentes no saben de HTTP |
+| Guards | `front/src/app/auth/auth.guard.ts` | `authGuard`: rutas privadas; `empleadoGuard`: las de gestion |
+| Servicios | `libros`, `solicitudes`, `avisos`, `gestion` | Encapsulan URL y llamadas; los componentes no saben de HTTP |
+| Gestion | `front/src/app/gestion/` | Bandeja (aprobar, rechazar, devolver) y carga de stock |
 | Configuracion AWS | `aws-config.ts` | **Generada** por el pipeline; no se versiona |
 | Vista de diagnostico | `diagnostico/` | **Opt-in**: solo se compila con `DEBUG=true` (ver abajo) |
 
@@ -212,12 +297,13 @@ Angular 22 standalone con signals y Amplify Auth 6.
 Un **Guard** controla la navegacion: que rutas puede abrir el usuario. Un
 **interceptor** controla las llamadas HTTP: que cabecera llevan. Y **ninguno de
 los dos protege la API**: los dos corren en el navegador del usuario, que puede
-saltarselos con la consola abierta. Si el Guard desapareciera, la API seguiria
-igual de protegida, porque quien protege son API Gateway y Spring Security.
+saltarselos con la consola abierta. Si los Guards desaparecieran, la API
+seguiria igual de protegida, porque quien protege son API Gateway y Spring
+Security.
 
-El Guard esta porque hay rutas privadas de verdad (`/catalogo`, `/solicitud`,
-`/mis-solicitudes`): sin el, alguien sin sesion veria pantallas vacias llenas
-de errores 401.
+Lo mismo vale para `empleadoGuard` y los enlaces *Bandeja* y *Stock*: se
+muestran segun el claim `cognito:groups` del access token, pero un estudiante
+que forzara la ruta solo veria errores 403 de Spring.
 
 ### La vista de diagnostico: opt-in, y apagada por defecto
 
@@ -252,10 +338,11 @@ bucket: sin enlace y sin ruta, pero descargable. El token sigue viviendo en el
 navegador (lo guarda Amplify, y con DevTools se ve): lo que se quita es que la
 aplicacion lo publique en pantalla por su cuenta.
 
-El token tampoco viaja ya en el estado compartido de la sesion
-(`EstadoSesion` solo lleva `autenticado` y `usuario`): quien lo necesita se lo
-pide a Amplify, y eso ocurre en exactamente dos sitios, el interceptor y esta
-vista.
+El token tampoco viaja en el estado compartido de la sesion (`EstadoSesion`
+lleva `autenticado`, `usuario` y `empleado`): quien lo necesita se lo pide a
+Amplify, y eso ocurre en exactamente dos sitios, el interceptor y esta vista.
+(`refrescar()` mira el payload del access token para saber si hay sesion y si
+es empleado, y lo descarta.)
 
 ### Por que las rutas llevan `#`
 
@@ -284,6 +371,13 @@ o cambiar el significado de un codigo de respuesta.
 busqueda nuevo, o un endpoint nuevo. Eso son cambios compatibles y caben en la
 version que ya existe.
 
+**Una excepcion declarada:** `GET /api/solicitudes` sin parametros devolvia
+TODAS las solicitudes y ahora devuelve solo las del portador. Es un cambio
+incompatible que no paso a `/v2` porque cerrarlo es una correccion de
+seguridad (cualquier estudiante veia las solicitudes de los demas), no una
+evolucion del contrato. La bandeja completa sigue existiendo, para empleados,
+en `/api/gestion/solicitudes`.
+
 ---
 
 ## 7. Desviaciones declaradas respecto del canon de la guia
@@ -292,14 +386,18 @@ Se declaran aqui en lugar de esconderlas.
 
 | La guia dice | Aqui se hizo | Por que |
 |---|---|---|
-| Backend en **EC2** (`dnf install corretto`, puerto 8888, SG abierto) | **Lambda + AWS Lambda Web Adapter** | La IP publica cambia en cada reinicio y la instancia muere al cerrar el lab. El **mismo jar** corre con `java -jar` en local y dentro de Lambda, sin tocar codigo ni `pom.xml`. Los logs siguen estando en CloudWatch, y el `execution role` lee el artefacto de S3 sin ninguna Access Key |
-| **SG abriendo 8888 a `0.0.0.0/0`** | Nada expuesto | La propia guia avisa de que no es una arquitectura recomendable |
-| Bypass directo a `<EC2_IP>:8888` | **Function URL temporal** con `AuthType: NONE`, tras un flag de CloudFormation | Reproducible: se enciende, se demuestra y se apaga. El item 19 pasa de *explicable* a **demostrable** |
-| **REST API** | **REST API. Se conserva** | No por los scopes por metodo, que el HTTP API tambien admite: por el authorizer `COGNITO_USER_POOLS`, por los `GatewayResponse` que hacen visible un 401 en el navegador, y por el paso explicito de desplegar al stage |
+| Backend en **EC2** (`dnf install corretto`, puerto 8888, SG abierto) | **EC2 con Docker, detras de un NLB interno y un VPC Link**, sin ningun puerto abierto a Internet | Se vuelve a EC2 (antes era Lambda) porque RabbitMQ necesita consumidores que vivan siempre, y Lambda solo se dispara desde **Amazon MQ**, que el lab bloquea (`mq:*` con *explicitDeny*, medido). El broker va en la misma EC2. API Gateway llega por VPC Link; la EC2 no acepta nada desde Internet |
+| **SG abriendo 8888 a `0.0.0.0/0`** | Entrada solo desde la VPC (NLB) | La propia guia avisa de que no es una arquitectura recomendable |
+| Bypass directo a `<EC2_IP>:8888` | Llamada directa a `<IP privada>:8080` **por la VPN** | La segunda capa se demuestra igual (Spring rechaza sin el gateway delante), sin abrir la instancia a Internet |
+| **REST API** | **REST API. Se conserva** | Por el authorizer `COGNITO_USER_POOLS`, por los `GatewayResponse` que hacen visible un 401 en el navegador y por el paso explicito de desplegar al stage. (Su VPC Link exige un NLB; el de HTTP API aceptaria un ALB) |
 | Consola web de AWS | **AWS CLI v2 + CloudFormation** | Reproducible, versionado e idempotente |
 | **Postman** | **Bruno**, versionado en el repositorio | Asserts automaticos, vive en git y corre en terminal |
-| Sin persistencia (o una base accesible por red) | **RDS privado, Lambda en VPC sin NAT** | Para no pagar un NAT, la Lambda no sale a Internet. Dos concesiones, declaradas: (1) el **JWKS de Cognito se fija al desplegar** (lo baja `build-backend.sh`): si Cognito rotara sus claves habria que volver a correr el pipeline; (2) las **contrasenas quedan resueltas en las variables de entorno** de la Lambda, legibles para quien tenga `lambda:GetFunctionConfiguration` en la cuenta. Leerlas en ejecucion exigiria un VPC endpoint de Secrets Manager, que se paga por hora |
-| Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql. Mientras existe, la VPC tiene un Internet Gateway, pero solo para una subred publica propia con el servidor VPN; las subredes de la Lambda y de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
+| Red sin salida a Internet | **La EC2 va en una subred PUBLICA**, con IP publica solo para salir | Necesita salir al SMTP (587; **SES esta bloqueado** en el lab) y a 443 (imagenes, S3, Secrets Manager, SSM, Cognito). Un NAT Gateway cobraria por hora aunque el lab este apagado. Su security group no acepta nada desde Internet. **RDS sigue en subredes privadas sin ruta a Internet** |
+| — | **JWKS de Cognito fijado al desplegar** (lo baja `build-backend.sh`) | Viene de la etapa Lambda (sin salida a Internet). Con la EC2 ya no haria falta, pero se mantiene: arranca sin depender de la red. Si Cognito rotara sus claves habria que volver a correr el pipeline |
+| — | **Las contrasenas viajan al contenedor como variables de entorno** | La EC2 las lee de Secrets Manager en cada arranque y las deja en un archivo en `/run` (tmpfs, 600). No estan en el UserData ni en la plantilla, pero quien tenga acceso root a la instancia (o `docker inspect`) las ve |
+| — | **Correo por un proveedor SMTP externo** (Gmail, Brevo...) | SES tiene *explicitDeny* en el lab. El proveedor se elige al desplegar; su contrasena va a Secrets Manager (parametro `NoEcho`) |
+| Un empleado real en las pruebas automaticas | **El cliente M2M `backoffice` hace de empleado en Bruno** | Un token de PERSONA con custom scope solo sale del flujo del navegador (`admin-initiate-auth` no emite custom scopes). El empleado humano (grupo `empleados`) se prueba en el navegador |
+| Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql y ver el panel de RabbitMQ. Usa la subred publica del proyecto; las subredes de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
 | `ng serve` en `localhost:4200` | **Sitio publicado en S3** | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |
 
 ---
@@ -311,9 +409,9 @@ Se declaran aqui en lugar de esconderlas.
 | AWS CLI v2 | toda la infraestructura | `aws --version` |
 | Java 21 | compilar el backend | `java -version` |
 | Maven Wrapper | build reproducible, sin instalar Maven | `cd back && ./mvnw -v` |
+| Docker | los tests del backend (PostgreSQL y RabbitMQ con Testcontainers) | `docker info` |
 | Node.js + npm | compilar el frontend | `node -v` |
-| `zip` | armar el paquete de la Lambda | `zip -v` |
-| `python3` | leer JSON en los scripts | `python3 --version` |
+| `python3`, `jq` | leer JSON en los scripts | `python3 --version` |
 | Bruno (`bru`) | pruebas HTTP versionadas | `bru --version` |
 | Navegador con DevTools | diagnostico de CORS y del preflight | — |
 

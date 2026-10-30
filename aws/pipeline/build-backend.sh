@@ -3,35 +3,46 @@
 #  biblioteca / build-backend.sh   --   Pipeline del backend: build, publish, deploy
 # ==============================================================================
 #
-#  QUE HACE, EN CUATRO PASOS
+#  QUE HACE, EN CINCO PASOS
 #    1. COMPILA    ./mvnw package  ->  back/target/biblioteca-backend-*.jar
-#                  (los tests levantan un PostgreSQL en Docker: hace falta
-#                  Docker, o SKIP_TESTS=true)
-#    2. EMPAQUETA  el fat jar + un run.sh + la CA de RDS dentro de un ZIP
-#    3. PUBLICA    sube el ZIP al bucket de artefactos y anota su VersionId
-#    4. DESPLIEGA  actualiza el stack de la Lambda apuntando a ese VersionId
+#                  (los tests levantan PostgreSQL y RabbitMQ en Docker: hace
+#                  falta Docker, o SKIP_TESTS=true)
+#    2. PUBLICA    sube el fat jar al bucket de artefactos y anota su VersionId
+#    3. DESPLIEGA  crea o actualiza el stack del backend (EC2 + RabbitMQ + NLB).
+#                  La PRIMERA vez, CloudFormation espera a que /health responda
+#                  dentro de la instancia (CreationPolicy) antes de darlo por
+#                  creado.
+#    4. REINICIA   si la instancia ya existia, le pide por SSM Run Command que
+#                  anote la version nueva del jar y reinicie el servicio
+#                  biblioteca-app. El script de arranque vuelve a leer TODO:
+#                  jar, configuracion (SSM) y secretos.
+#    5. ESPERA     a que el NLB vuelva a dar la instancia por sana. Es estado
+#                  del despliegue, no una prueba de la API.
 #
-#  POR QUE EL PASO 4 ES "cloudformation deploy" Y NO "lambda update-function-code"
-#    Porque asi la plantilla sigue siendo la unica fuente de la verdad: el
-#    stack sabe exactamente que version del codigo esta corriendo. Con
-#    update-function-code el codigo y el stack se desincronizan, y el siguiente
-#    despliegue de CloudFormation revierte la funcion sin avisar.
+#  POR QUE EL PASO 4 Y NO "RECREAR LA INSTANCIA"
+#    Recrear la EC2 en cada despliegue tardaria minutos y borraria el volumen
+#    de RabbitMQ (colas y mensajes pendientes). El stack sigue siendo la fuente
+#    de la verdad de la INFRAESTRUCTURA y de la configuracion (parametro de
+#    SSM); el jar es un artefacto versionado en S3, y la version que corre
+#    queda escrita en /etc/biblioteca/version.
 #
 #  USO
-#    ./aws/pipeline/build-backend.sh
-#    EnableBypassDemoUrl=true ./aws/pipeline/build-backend.sh   (demo Fase 13)
+#    SMTP_HOST=smtp.gmail.com SMTP_USER=yo@gmail.com SMTP_PASSWORD='...' \
+#    SMTP_FROM=yo@gmail.com ./aws/pipeline/build-backend.sh
+#
+#    Las cuatro SMTP_* son obligatorias SOLO la primera vez. Despues, si no se
+#    pasan, CloudFormation conserva las del despliegue anterior. En vez de la
+#    terminal pueden ir en aws/.env (plantilla: aws/.env.example).
 #
 #  VARIABLES OPCIONALES
 #    PROJECT_NAME (biblioteca)  AWS_REGION (us-east-1)  SKIP_TESTS (false)
-#    LAB_ROLE_ARN (se deduce)   EnableBypassDemoUrl (false)
+#    REMINDER_LEAD (PT24H): antelacion del recordatorio de vencimiento
+#    INSTANCE_TYPE (t3.medium)
 #
-#  DESCARGA DOS COSAS PUBLICAS (lecturas de configuracion, no pruebas)
-#    * El JWKS de Cognito: las claves publicas con que se firman los tokens.
-#      La Lambda vive en una VPC sin salida a Internet y no puede bajarlas
-#      ella misma, asi que se le entregan como parametro del stack.
-#    * El bundle de certificados de la CA de RDS para la region: con el, la
-#      aplicacion verifica que habla con SU base (sslmode=verify-full).
-#    Si Cognito rotara sus claves, basta con volver a correr este script.
+#  DESCARGA UNA COSA PUBLICA (lectura de configuracion, no una prueba)
+#    El JWKS de Cognito: las claves publicas con que se firman los tokens.
+#    Se fijan al desplegar (parametro JwksJson). Si Cognito rotara sus claves,
+#    basta con volver a correr este script.
 #
 #  DEPENDE DE que ya existan los stacks de artefactos, web, Cognito, red y
 #  base de datos.
@@ -42,22 +53,39 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/_comun.sh"
 
 SKIP_TESTS="${SKIP_TESTS:-false}"
-OBJECT_KEY="backend/${PROJECT_NAME}-lambda.zip"
-ENABLE_BYPASS="${EnableBypassDemoUrl:-false}"
+OBJECT_KEY="backend/${PROJECT_NAME}-backend.jar"
 
-requiere aws zip curl jq
+requiere aws curl jq
 [ -x "${ROOT}/back/mvnw" ] || die "no encuentro back/mvnw"
 
-ACCOUNT_ID="$(cuenta_aws)"
-LAB_ROLE_ARN="${LAB_ROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/LabRole}"
+cuenta_aws >/dev/null
+
+# Primera vez: el stack no existe y no hay valores anteriores que conservar.
+EXISTIA=false
+existe_stack "$STACK_BACKEND" && EXISTIA=true
+if [ "$EXISTIA" = "false" ]; then
+  for v in SMTP_HOST SMTP_USER SMTP_PASSWORD SMTP_FROM; do
+    [ -n "${!v:-}" ] || die "falta ${v}. La primera vez hay que indicar el proveedor de correo,
+    en aws/.env (cp aws/.env.example aws/.env) o en la terminal:
+
+    SMTP_HOST=smtp.gmail.com SMTP_USER=tu@gmail.com SMTP_PASSWORD='<contrasena de aplicacion>' \\
+    SMTP_FROM=tu@gmail.com ./aws/scripts/bootstrap.sh
+
+    (Gmail exige verificacion en dos pasos y una contrasena de aplicacion;
+    Brevo usa smtp-relay.brevo.com y un remitente verificado.)"
+  done
+fi
 
 log "Leyendo los stacks de los que depende el backend"
 ARTIFACTS_BUCKET="$(output_obligatorio "$STACK_ARTIFACTS" ArtifactsBucketName)"
 ISSUER_URL="$(output_obligatorio "$STACK_COGNITO" IssuerUrl)"
+USER_POOL_ID="$(output_obligatorio "$STACK_COGNITO" UserPoolId)"
 SCOPE_COMPLETO="$(output_obligatorio "$STACK_COGNITO" ScopeCompleto)"
+SCOPE_GESTION="$(output_obligatorio "$STACK_COGNITO" ScopeGestion)"
 SITE_ORIGIN="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
-SUBNET_IDS="$(output_obligatorio "$STACK_NETWORK" PrivateSubnetIds)"
-LAMBDA_SG="$(output_obligatorio "$STACK_NETWORK" LambdaSecurityGroupId)"
+PUBLIC_SUBNET="$(output_obligatorio "$STACK_NETWORK" PublicSubnetId)"
+PRIVATE_SUBNETS="$(output_obligatorio "$STACK_NETWORK" PrivateSubnetIds)"
+APP_SG="$(output_obligatorio "$STACK_NETWORK" AppSecurityGroupId)"
 DB_ENDPOINT="$(output_obligatorio "$STACK_DATABASE" DbEndpoint)"
 DB_PORT="$(output_obligatorio "$STACK_DATABASE" DbPort)"
 DB_NAME="$(output_obligatorio "$STACK_DATABASE" DbName)"
@@ -65,12 +93,12 @@ MASTER_SECRET_ARN="$(output_obligatorio "$STACK_DATABASE" MasterSecretArn)"
 APP_SECRET_ARN="$(output_obligatorio "$STACK_DATABASE" AppSecretArn)"
 info "bucket  ${ARTIFACTS_BUCKET}"
 info "issuer  ${ISSUER_URL}"
-info "scope   ${SCOPE_COMPLETO}"
+info "scopes  ${SCOPE_COMPLETO} | ${SCOPE_GESTION}"
 info "origen  ${SITE_ORIGIN}"
 info "base    ${DB_ENDPOINT}:${DB_PORT}/${DB_NAME} (privada)"
 
 # El JWKS, compactado a una linea: va como valor de un parametro y de una
-# variable de entorno. jq ademas comprueba que sea JSON con claves de verdad.
+# linea VARIABLE=valor. jq ademas comprueba que sea JSON con claves de verdad.
 log "Descargando las claves publicas de Cognito (JWKS)"
 JWKS="$(curl -fsS "${ISSUER_URL}/.well-known/jwks.json" | jq -ce 'select((.keys | length) > 0)')" \
   || die "no pude descargar el JWKS de ${ISSUER_URL}"
@@ -90,104 +118,93 @@ JAR="$(find "${ROOT}/back/target" -maxdepth 1 -name '*.jar' ! -name '*.original'
 [ -n "$JAR" ] || die "no encontre el jar en back/target/"
 info "jar $(basename "$JAR") ($(du -h "$JAR" | cut -f1))"
 
-# --- 2. Empaquetar ------------------------------------------------------------
-# Contenido del ZIP, todo en la raiz (Lambda lo descomprime en /var/task):
-#     app.jar     -> el fat jar, sin modificar
-#     run.sh      -> el "Handler" de la funcion, que ejecuta el Web Adapter
-#     rds-ca.pem  -> la CA de RDS, para verificar el certificado de la base
-log "Armando el ZIP de la Lambda"
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
-
-cp "$JAR" "${TMP}/app.jar"
-
-# La CA de RDS de la region: la que firma el certificado de la instancia. La
-# URL de jdbc (backend.yaml) la busca en /var/task/rds-ca.pem.
-curl -fsS -o "${TMP}/rds-ca.pem" \
-  "https://truststore.pki.rds.amazonaws.com/${AWS_REGION}/${AWS_REGION}-bundle.pem" \
-  || die "no pude descargar el bundle de la CA de RDS"
-grep -q 'BEGIN CERTIFICATE' "${TMP}/rds-ca.pem" || die "el bundle de la CA de RDS no contiene certificados"
-
-cat > "${TMP}/run.sh" <<'RUNSH'
-#!/bin/bash
-# Punto de entrada de la Lambda. El AWS Lambda Web Adapter ejecuta este script
-# en lugar del arranque normal de Java (por la variable AWS_LAMBDA_EXEC_WRAPPER)
-# y despues traduce cada invocacion en un request HTTP contra $PORT. Por eso la
-# aplicacion Spring Boot corre exactamente igual que en tu maquina.
-exec java -jar /var/task/app.jar
-RUNSH
-
-# CRITICO: sin el bit de ejecucion, la funcion muere al arrancar con un error
-# generico e ilegible. En Linux, "zip" conserva los permisos del archivo.
-chmod +x "${TMP}/run.sh"
-
-ZIP="${TMP}/lambda.zip"
-( cd "$TMP" && zip -q -X "$ZIP" app.jar run.sh rds-ca.pem )
-info "zip $(du -h "$ZIP" | cut -f1)"
-
-# --- 3. Publicar en S3 --------------------------------------------------------
+# --- 2. Publicar en S3 --------------------------------------------------------
 log "Subiendo a s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}"
-# Se usa put-object en vez de "s3 cp" porque devuelve el VersionId, y ese
-# VersionId es lo que le demuestra a CloudFormation que el codigo cambio.
+# put-object en vez de "s3 cp" porque devuelve el VersionId: es lo que la EC2
+# descarga exactamente, y lo que queda anotado como version en ejecucion.
 VERSION_ID="$(aws s3api put-object \
   --bucket "$ARTIFACTS_BUCKET" \
   --key "$OBJECT_KEY" \
-  --body "$ZIP" \
+  --body "$JAR" \
   --region "$AWS_REGION" \
   --query VersionId --output text)"
 info "VersionId ${VERSION_ID}"
 
-# --- 4. Desplegar el stack ----------------------------------------------------
+# --- 3. Desplegar el stack ----------------------------------------------------
 log "Desplegando el stack '${STACK_BACKEND}'"
-if [ "$ENABLE_BYPASS" = "true" ]; then
-  warn "EnableBypassDemoUrl=true: se va a exponer una Function URL SIN autenticacion."
-  warn "Es solo para la demostracion de Defense in Depth. Apagala al terminar."
-fi
+[ "$EXISTIA" = "true" ] || info "primera vez: la instancia instala Docker y arranca (~5 min)"
 
-despliega_stack backend.yaml "$STACK_BACKEND" \
-  "ProjectName=${PROJECT_NAME}" \
-  "LabRoleArn=${LAB_ROLE_ARN}" \
-  "ArtifactsBucketName=${ARTIFACTS_BUCKET}" \
-  "ArtifactsObjectKey=${OBJECT_KEY}" \
-  "ArtifactsObjectVersion=${VERSION_ID}" \
-  "IssuerUrl=${ISSUER_URL}" \
-  "JwksJson=${JWKS}" \
-  "RequiredScope=${SCOPE_COMPLETO}" \
-  "WebOrigin=${SITE_ORIGIN}" \
-  "PrivateSubnetIds=${SUBNET_IDS}" \
-  "LambdaSecurityGroupId=${LAMBDA_SG}" \
-  "DbEndpoint=${DB_ENDPOINT}" \
-  "DbPort=${DB_PORT}" \
-  "DbName=${DB_NAME}" \
-  "MasterSecretArn=${MASTER_SECRET_ARN}" \
-  "AppSecretArn=${APP_SECRET_ARN}" \
-  "EnableBypassDemoUrl=${ENABLE_BYPASS}" \
-  || { por_que_fallo "$STACK_BACKEND"; die "fallo el despliegue del backend"; }
+PARAMETROS=(
+  "ProjectName=${PROJECT_NAME}"
+  "ArtifactsBucketName=${ARTIFACTS_BUCKET}"
+  "ArtifactsObjectKey=${OBJECT_KEY}"
+  "IssuerUrl=${ISSUER_URL}"
+  "UserPoolId=${USER_POOL_ID}"
+  "JwksJson=${JWKS}"
+  "RequiredScope=${SCOPE_COMPLETO}"
+  "ManagementScope=${SCOPE_GESTION}"
+  "WebOrigin=${SITE_ORIGIN}"
+  "PublicSubnetId=${PUBLIC_SUBNET}"
+  "PrivateSubnetIds=${PRIVATE_SUBNETS}"
+  "AppSecurityGroupId=${APP_SG}"
+  "DbEndpoint=${DB_ENDPOINT}"
+  "DbPort=${DB_PORT}"
+  "DbName=${DB_NAME}"
+  "MasterSecretArn=${MASTER_SECRET_ARN}"
+  "AppSecretArn=${APP_SECRET_ARN}"
+)
+# Opcionales: si no se pasan, el stack conserva el valor anterior (o el
+# Default de la plantilla, la primera vez).
+for par in SmtpHost:SMTP_HOST SmtpUser:SMTP_USER SmtpPassword:SMTP_PASSWORD SmtpFrom:SMTP_FROM \
+           ReminderLead:REMINDER_LEAD InstanceType:INSTANCE_TYPE; do
+  variable="${par#*:}"
+  [ -z "${!variable:-}" ] || PARAMETROS+=("${par%%:*}=${!variable}")
+done
 
-FUNCTION_NAME="$(output_obligatorio "$STACK_BACKEND" FunctionName)"
+despliega_stack backend.yaml "$STACK_BACKEND" "${PARAMETROS[@]}" \
+  || { por_que_fallo "$STACK_BACKEND"; die "fallo el despliegue del backend.
+    Si la instancia no llego a dar la senal, mira su consola:
+        aws ec2 get-console-output --instance-id <id> --latest --output text"; }
+
+INSTANCE_ID="$(output_obligatorio "$STACK_BACKEND" InstanceId)"
+TARGET_GROUP="$(output_obligatorio "$STACK_BACKEND" TargetGroupArn)"
 LOG_GROUP="$(output_obligatorio "$STACK_BACKEND" LogGroupName)"
-BYPASS_URL="$(output_de "$STACK_BACKEND" BypassUrl)"
+
+# --- 4. Reiniciar con el jar nuevo ----------------------------------------------
+if [ "$EXISTIA" = "true" ]; then
+  log "Reiniciando la aplicacion en ${INSTANCE_ID} (SSM Run Command)"
+  COMANDOS="$(jq -nc --arg v "$VERSION_ID" \
+    '{commands: ["echo \($v) > /etc/biblioteca/version", "systemctl restart biblioteca-app"]}')"
+  COMMAND_ID="$(aws ssm send-command \
+    --instance-ids "$INSTANCE_ID" \
+    --document-name AWS-RunShellScript \
+    --comment "biblioteca: desplegar jar ${VERSION_ID}" \
+    --parameters "$COMANDOS" \
+    --region "$AWS_REGION" \
+    --query Command.CommandId --output text)" \
+    || die "SSM no acepto el comando. ¿Esta la instancia encendida? (el lab la detiene al cerrar la sesion)"
+  aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --region "$AWS_REGION" \
+    || die "el reinicio fallo: aws ssm get-command-invocation --command-id ${COMMAND_ID} --instance-id ${INSTANCE_ID}"
+  info "servicio reiniciado con la version ${VERSION_ID}"
+
+  # --- 5. Esperar a que el NLB la de por sana ----------------------------------
+  # Spring tarda unos segundos en levantar; durante ese rato el NLB la marca
+  # como no sana y API Gateway responderia 500. Se espera a que vuelva.
+  log "Esperando a que el NLB vuelva a dar la instancia por sana"
+  sleep 30
+  aws elbv2 wait target-in-service --target-group-arn "$TARGET_GROUP" \
+    --targets "Id=${INSTANCE_ID}" --region "$AWS_REGION" \
+    || die "la instancia no paso los health checks. Mira los logs:
+        aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}"
+fi
 
 log "Backend publicado"
 cat <<EOF
-    Funcion   ${FUNCTION_NAME}
+    Instancia ${INSTANCE_ID}
     Codigo    s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY} (version ${VERSION_ID})
 
-    Ver el arranque de Spring en la primera llamada:
+    Logs de la app y de RabbitMQ:
         aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}
-EOF
-
-if [ -n "$BYPASS_URL" ]; then
-  cat <<EOF
-
-    PUERTA TRASERA ACTIVA (demo de Defense in Depth):
-        ${BYPASS_URL}
-    Llega a la aplicacion sin pasar por API Gateway. Apagala al terminar con:
-        EnableBypassDemoUrl=false ./aws/pipeline/build-backend.sh
-EOF
-fi
-
-cat <<EOF
 
     Si cambiaste rutas o metodos, acuerdate de volver a publicar la API:
         ./aws/pipeline/api-deploy.sh

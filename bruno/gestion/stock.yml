@@ -1,0 +1,58 @@
+info:
+  name: stock
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{BASE_URL}}/api/gestion/libros/:id/stock"
+  params:
+    - name: id
+      value: "L-013"
+      type: path
+      description: >-
+        Libro al que se cargan ejemplares. Cada bru run con el backoffice suma
+        1 a L-013; para ver un "avisame", carga un libro agotado (L-005).
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: '{ "cantidad": 1 }'
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_GESTION"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("devuelve el libro con su stock nuevo", function () {
+            const cuerpo = res.getBody();
+            expect(cuerpo.id).to.equal(decodeURIComponent(req.getUrl().split("/").slice(-2)[0]));
+            expect(cuerpo.disponible).to.equal(true);
+          });
+        }
+
+docs: |
+  # Cargar stock
+
+  `POST /api/gestion/libros/{id}/stock` con `{"cantidad": n}` (1 a 100).
+  Suma ejemplares y deja `stock.cargado` en la bitacora. Si el libro estaba
+  en 0, ademas publica `stock.repuesto`: cada estudiante que lo esperaba
+  recibe un correo por la cola **masiva**.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | cargado | entorno `aws-backoffice` |
+  | 400 | cantidad fuera de 1..100 | cuerpo `{"cantidad": 0}` |
+  | 404 | el libro no existe | `id = L-999` |
+  | 403 | el token no es de empleado | entorno `aws` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |

@@ -1,12 +1,12 @@
 package cl.duoc.biblioteca.solicitudes;
 
 import java.net.URI;
-import java.security.Principal;
 import java.util.ArrayList;
 import java.util.List;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -18,13 +18,15 @@ import org.springframework.web.server.ResponseStatusException;
 
 import cl.duoc.biblioteca.catalogo.CatalogoLibros;
 import cl.duoc.biblioteca.catalogo.Libro;
+import cl.duoc.biblioteca.config.Roles;
 import jakarta.validation.Valid;
 
 /**
- * Solicitudes de prestamo: la parte de escritura de la plataforma.
+ * Solicitudes de prestamo, vistas por el ESTUDIANTE: crear y consultar las
+ * propias. Aprobar, rechazar y devolver es cosa de empleados y vive en
+ * {@link GestionSolicitudController}, bajo /api/gestion.
  *
- * Aqui esta el unico endpoint que MODIFICA estado (POST), y por eso es el que
- * mejor demuestra la cadena completa de seguridad: el token tiene que pasar
+ * El POST demuestra la cadena completa de seguridad: el token tiene que pasar
  * por el authorizer de API Gateway, por Spring Security y recien entonces
  * llega a este metodo, que ademas LEE la identidad desde ese mismo token.
  */
@@ -33,10 +35,13 @@ import jakarta.validation.Valid;
 public class SolicitudController {
 
     private final RepositorioSolicitudes solicitudes;
+    private final ServicioPrestamos prestamos;
     private final CatalogoLibros catalogo;
 
-    public SolicitudController(RepositorioSolicitudes solicitudes, CatalogoLibros catalogo) {
+    public SolicitudController(RepositorioSolicitudes solicitudes, ServicioPrestamos prestamos,
+            CatalogoLibros catalogo) {
         this.solicitudes = solicitudes;
+        this.prestamos = prestamos;
         this.catalogo = catalogo;
     }
 
@@ -44,14 +49,20 @@ public class SolicitudController {
      * POST /api/solicitudes -> 201 con la solicitud creada.
      *
      * Codigos que puede devolver, y quien los produce:
-     *   201  la solicitud se creo               -> este metodo
+     *   201  la solicitud se creo (y el evento
+     *        solicitud.creada queda en la bandeja
+     *        de salida: el comprobante por correo
+     *        llega despues, sin hacer esperar)   -> este metodo
      *   400  el formulario no valida            -> Bean Validation (@Valid)
      *   404  algun libroId no existe            -> este metodo
      *   409  algun libro no tiene ejemplares    -> este metodo
+     *        (es un aviso temprano: el stock se
+     *        descuenta recien al APROBAR)
      *   401  sin token, token invalido, o token
      *        valido SIN el scope exigido        -> API Gateway / Spring Security
      *   403  token valido SIN el scope, pero
-     *        solo invocando la Lambda directa   -> Spring Security (hasAuthority)
+     *        solo llamando a la EC2 sin pasar
+     *        por el gateway                     -> Spring Security (hasAuthority)
      *
      * EL SOLICITANTE NO VIENE DEL FORMULARIO. Sale de {@code Principal}, que
      * Spring rellena con el JWT ya validado (claim "sub" para un usuario,
@@ -59,7 +70,7 @@ public class SolicitudController {
      * codigo, de que la identidad llego intacta hasta el backend.
      */
     @PostMapping
-    public ResponseEntity<Solicitud> crear(@Valid @RequestBody NuevaSolicitud formulario, Principal principal) {
+    public ResponseEntity<Solicitud> crear(@Valid @RequestBody NuevaSolicitud formulario, Authentication principal) {
         List<LineaSolicitud> lineas = new ArrayList<>();
 
         for (ItemSolicitado item : formulario.items()) {
@@ -79,48 +90,37 @@ public class SolicitudController {
             lineas.add(new LineaSolicitud(libro.id(), libro.titulo(), libro.autor(), item.cantidad()));
         }
 
-        Solicitud creada = solicitudes.crear(nombreDe(principal), formulario, lineas);
+        Solicitud creada = prestamos.crear(principal.getName(), formulario, lineas);
         return ResponseEntity
                 .created(URI.create("/api/solicitudes/" + creada.id()))
                 .body(creada);
     }
 
     /**
-     * GET /api/solicitudes?estado=&mias=
+     * GET /api/solicitudes -> las del portador del token, y SOLO esas.
      *
-     * Sin parametros devuelve todas las solicitudes guardadas (la
-     * bandeja del equipo de biblioteca). Con {@code mias=true} devuelve solo
-     * las del portador del token, que es lo que consume la vista
-     * "mis solicitudes" del frontend.
+     * Antes, sin parametros devolvia todas: cualquier estudiante veia las
+     * solicitudes de los demas. Con RBAC, la bandeja completa es de empleados
+     * (GET /api/gestion/solicitudes). {@code mias} se sigue aceptando para no
+     * romper clientes viejos, pero ya no cambia nada.
      */
     @GetMapping
     public List<Solicitud> listar(
-            @RequestParam(name = "estado", required = false) EstadoSolicitud estado,
-            @RequestParam(name = "mias", defaultValue = "false") boolean mias,
-            Principal principal) {
-
-        if (mias) {
-            return solicitudes.deSolicitante(nombreDe(principal));
-        }
-        return estado == null ? solicitudes.todas() : solicitudes.porEstado(estado);
-    }
-
-    /** GET /api/solicitudes/{id} -> 200, o 404 generado por Spring si no existe. */
-    @GetMapping("/{id}")
-    public Solicitud porId(@PathVariable String id) {
-        return solicitudes.buscar(id).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND, "No existe la solicitud " + id));
+            @RequestParam(name = "mias", defaultValue = "true") boolean mias,
+            Authentication principal) {
+        return solicitudes.deSolicitante(principal.getName());
     }
 
     /**
-     * Identidad del llamante.
-     *
-     * Antes de la Fase 12 (cuando Spring Security todavia no esta configurado)
-     * el Principal es null aunque la peticion traiga un token: en ese momento
-     * el unico que lo valida es API Gateway y Spring ni lo mira. Devolver
-     * "anonimo" deja esa diferencia a la vista en lugar de esconderla.
+     * GET /api/solicitudes/{id} -> 200 si es del portador o si este es
+     * empleado. Una solicitud AJENA responde 404, no 403: un 403 confirmaria
+     * que ese id existe, y los ids son correlativos faciles de recorrer.
      */
-    private static String nombreDe(Principal principal) {
-        return principal == null ? "anonimo" : principal.getName();
+    @GetMapping("/{id}")
+    public Solicitud porId(@PathVariable String id, Authentication principal) {
+        return solicitudes.buscar(id)
+                .filter(s -> s.solicitante().equals(principal.getName()) || Roles.esEmpleado(principal))
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND, "No existe la solicitud " + id));
     }
 }

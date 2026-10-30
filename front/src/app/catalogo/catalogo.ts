@@ -33,7 +33,14 @@ export class Catalogo implements OnInit {
   readonly cargando = signal(false);
   readonly error = signal('');
 
+  /** Ids de los libros agotados que este usuario espera ("avisame"). */
+  readonly esperando = signal<Set<string>>(new Set());
+
   ngOnInit(): void {
+    this.libros.esperando().subscribe({
+      next: (ids) => this.esperando.set(new Set(ids)),
+      error: () => this.esperando.set(new Set()),
+    });
     this.libros.generos().subscribe({
       next: (lista) => this.generos.set(lista),
       error: () => this.generos.set([]),
@@ -58,6 +65,25 @@ export class Catalogo implements OnInit {
         this.resultados.set([]);
         this.cargando.set(false);
       },
+    });
+  }
+
+  /**
+   * "Avisame cuando vuelva" en un libro agotado. El aviso llega por correo
+   * cuando un empleado cargue stock o se devuelva un ejemplar, si los avisos
+   * estan activos (en "Mis solicitudes").
+   */
+  alternarAvisame(libro: Libro): void {
+    const espera = this.esperando().has(libro.id);
+    const peticion = espera ? this.libros.dejarDeEsperar(libro.id) : this.libros.avisame(libro.id);
+    peticion.subscribe({
+      next: () => {
+        const nuevo = new Set(this.esperando());
+        if (espera) { nuevo.delete(libro.id); } else { nuevo.add(libro.id); }
+        this.esperando.set(nuevo);
+      },
+      // 409: alguien cargo stock entretanto. Se recarga para mostrarlo.
+      error: (fallo) => fallo.status === 409 ? this.buscar() : this.error.set(this.describir(fallo.status)),
     });
   }
 

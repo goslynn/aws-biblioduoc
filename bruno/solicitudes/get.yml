@@ -55,7 +55,7 @@ docs: |
   | Codigo | Cuando | Como reproducirlo aqui |
   |---|---|---|
   | 200 | la solicitud existe | ejecutar `create` antes |
-  | 404 | el id no existe | `id = SOL-9999` |
+  | 404 | el id no existe, o la solicitud es de OTRA persona (no se confirma que exista) | `id = SOL-9999` |
   | 401 | token invalido o id token | entornos `aws-token-invalido` / `aws-id-token` |
   | 401 | token valido sin el scope: el authorizer no distingue | entorno `aws-usuario-sin-scope` |
 

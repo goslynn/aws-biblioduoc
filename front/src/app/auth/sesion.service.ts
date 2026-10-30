@@ -22,9 +22,18 @@ import { awsConfig } from '../aws-config';
 export interface EstadoSesion {
   autenticado: boolean;
   usuario: string;
+  /**
+   * Si la persona esta en el grupo de empleados de Cognito. SOLO decide que
+   * se muestra (los enlaces de gestion); quien decide que se PUEDE hacer es
+   * Spring, que lee el mismo claim del token ya validado.
+   */
+  empleado: boolean;
 }
 
-const SIN_SESION: EstadoSesion = { autenticado: false, usuario: '' };
+const SIN_SESION: EstadoSesion = { autenticado: false, usuario: '', empleado: false };
+
+/** Grupo de Cognito de los empleados (cognito.yaml, EmployeesGroupName). */
+const GRUPO_EMPLEADOS = 'empleados';
 
 /**
  * Unico punto de la aplicacion que habla con Amplify Auth para gestionar la
@@ -111,11 +120,15 @@ export class SesionService {
    * email en el User Pool, ese campo es el sub en formato UUID, no el correo.
    * Si no se puede resolver ninguno de los dos, queda vacio en vez de mostrar
    * el UUID.
+   *
+   * "empleado" sale del claim "cognito:groups" del MISMO access token (su
+   * contenido ya decodificado; el token en si no se guarda).
    */
   async refrescar(): Promise<EstadoSesion> {
     try {
       const sesion = await fetchAuthSession();
-      const token = sesion.tokens?.accessToken?.toString() ?? '';
+      const accessToken = sesion.tokens?.accessToken;
+      const token = accessToken?.toString() ?? '';
       if (!token) {
         this.estado.set(SIN_SESION);
         return SIN_SESION;
@@ -130,7 +143,9 @@ export class SesionService {
           usuario = '';
         }
       }
-      const nuevo: EstadoSesion = { autenticado: true, usuario };
+      const grupos = accessToken?.payload['cognito:groups'];
+      const empleado = Array.isArray(grupos) && grupos.includes(GRUPO_EMPLEADOS);
+      const nuevo: EstadoSesion = { autenticado: true, usuario, empleado };
       this.estado.set(nuevo);
       return nuevo;
     } catch {

@@ -59,13 +59,20 @@
       <p class="sinopsis">{{ libro.sinopsis }}</p>
       <p class="tenue"><code>{{ libro.id }}</code> · ISBN {{ libro.isbn }} · {{ libro.ubicacion }}</p>
 
-      <button
-        type="button"
-        [disabled]="!libro.disponible || seleccion.contiene(libro.id)"
-        (click)="seleccion.agregar(libro)">
-        @if (seleccion.contiene(libro.id)) { Ya esta en tu solicitud }
-        @else { Agregar a la solicitud }
-      </button>
+      @if (libro.disponible) {
+        <button
+          type="button"
+          [disabled]="seleccion.contiene(libro.id)"
+          (click)="seleccion.agregar(libro)">
+          @if (seleccion.contiene(libro.id)) { Ya esta en tu solicitud }
+          @else { Agregar a la solicitud }
+        </button>
+      } @else {
+        <button type="button" [class.sutil]="esperando().has(libro.id)" (click)="alternarAvisame(libro)">
+          @if (esperando().has(libro.id)) { Dejar de avisarme }
+          @else { Avisame cuando vuelva }
+        </button>
+      }
     </article>
   }
 </div>

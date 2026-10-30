@@ -3,8 +3,9 @@ opencollection: 1.0.0
 info:
   name: biblioteca-api
   summary: >-
-    API interna de la Biblioteca Duoc: catalogo de libros y solicitudes de
-    prestamo, detras de API Gateway con authorizer de Cognito.
+    API interna de la Biblioteca Duoc: catalogo de libros, solicitudes de
+    prestamo, gestion por empleados y avisos por correo, detras de API Gateway
+    con authorizer de Cognito.
   version: 1.0.0
 
 # Autenticacion declarada UNA sola vez. Todas las peticiones heredan
@@ -20,11 +21,21 @@ request:
 docs: |
   # biblioteca-api
 
-  Catalogo de libros (solo lectura) y solicitudes de prestamo, guardados en
+  Catalogo de libros, solicitudes de prestamo, gestion por empleados (aprobar,
+  rechazar, devolver, cargar stock) y avisos por correo, guardados en
   PostgreSQL. Todo pasa por **API Gateway REST**, que valida el JWT con un
-  authorizer de **Cognito** y exige el scope `biblioteca-api/acceso` en cada
-  metodo. Detras hay un **Spring Boot sobre Lambda** que vuelve a validar el
-  mismo token.
+  authorizer de **Cognito** y exige uno de los scopes de la API
+  (`biblioteca-api/acceso` o `biblioteca-api/gestion`). Por un **VPC Link**
+  llega a un **Spring Boot en EC2**, que vuelve a validar el mismo token y
+  decide el **rol** (estudiante o empleado). Los correos salen por
+  **RabbitMQ**, en la misma EC2, sin hacer esperar a la peticion.
+
+  | Carpeta | Para quien |
+  |---|---|
+  | `libros` | todos: catalogo y "avisame cuando vuelva" |
+  | `solicitudes` | todos: crear y consultar las propias |
+  | `avisos` | todos: activar o desactivar los correos |
+  | `gestion` | solo empleados (403 para el resto) |
 
   ## La matriz de seguridad vive en los ENTORNOS
 
@@ -33,23 +44,33 @@ docs: |
   credencial**, y una credencial es exactamente lo que define un entorno.
 
   Cada entorno declara, ademas del token, el codigo que esa credencial debe
-  obtener (`ESPERADO_LECTURA` y `ESPERADO_CREACION`). Por eso `bru run` pasa en
-  **verde en los seis casos**: la matriz completa, automatizada, sin duplicar ni
-  una peticion.
+  obtener (`ESPERADO_LECTURA`, `ESPERADO_CREACION` y `ESPERADO_GESTION`). Por
+  eso `bru run` pasa en **verde en los cinco casos**: la matriz completa,
+  automatizada, sin duplicar ni una peticion.
 
-  | Entorno | Credencial | Lecturas | Crear | Que demuestra |
-  |---|---|---|---|---|
-  | `aws` | cliente M2M con el custom scope | 200 | 201 | el camino completo funciona |
-  | `aws-usuario-sin-scope` | access token de usuario (admin-initiate-auth) | 401 | 401 | un token valido al que le falta el scope |
-  | `aws-id-token` | id token del mismo usuario | 401 | 401 | un id token no sirve para autorizar: no lleva claim `scope` |
-  | `aws-token-invalido` | `no-es-un-jwt-de-verdad` | 401 | 401 | el authorizer valida la **firma**, no solo la presencia |
+  | Entorno | Credencial | Lecturas | Crear | Gestion | Que demuestra |
+  |---|---|---|---|---|---|
+  | `aws` | cliente M2M, scope `acceso` | 200 | 201 | **403** | el camino completo, y el RBAC de Spring |
+  | `aws-backoffice` | cliente M2M, scope `gestion` | 200 | 201 | 200 | un empleado aprueba, devuelve y carga stock |
+  | `aws-usuario-sin-scope` | access token de usuario (admin-initiate-auth) | 401 | 401 | 401 | un token valido al que le falta el scope |
+  | `aws-id-token` | id token del mismo usuario | 401 | 401 | 401 | un id token no sirve para autorizar: no lleva claim `scope` |
+  | `aws-token-invalido` | `no-es-un-jwt-de-verdad` | 401 | 401 | 401 | el authorizer valida la **firma**, no solo la presencia |
+
+  Algunas peticiones derivan su codigo de estos tres (por ejemplo, activar
+  avisos con un cliente M2M es **409**: no hay usuario de Cognito con email).
+  Cada una lo explica en su pestana *Docs*.
 
   **Codigos medidos, no supuestos.** La fila del token sin scope decia 403 sobre
   el papel. Medida contra el despliegue real, API Gateway responde **401**, con
   el mismo cuerpo que ante un token inventado: desde fuera **no distingue** "no
   se quien eres" de "se quien eres pero no puedes". El 403 por falta de
-  autorizacion si existe, y lo emite **Spring Security** cuando se invoca la
-  Lambda sin pasar por el gateway.
+  autorizacion si existe, y lo emite **Spring Security**: ahora se ve a traves
+  del gateway en la carpeta `gestion` con el entorno `aws` (el token es de esta
+  API, pero su portador no es empleado).
+
+  > Las filas `aws-backoffice` y la columna *Gestion* se anadieron con el
+  > backend en EC2 y estan **pendientes de medir** contra el despliegue real.
+  > Cuando lo esten, esta nota se borra.
 
   ## Como se generan los entornos
 
@@ -66,10 +87,11 @@ docs: |
 
   ```sh
   cd bruno
-  bru run --env aws                     # 200 / 201   14/14 tests
-  bru run --env aws-usuario-sin-scope   # 401          5/5  tests
-  bru run --env aws-id-token            # 401          5/5  tests
-  bru run --env aws-token-invalido      # 401          5/5  tests
+  bru run --env aws                     # 200 / 201, 403 en gestion
+  bru run --env aws-backoffice          # 200 / 201, 200 en gestion
+  bru run --env aws-usuario-sin-scope   # 401
+  bru run --env aws-id-token            # 401
+  bru run --env aws-token-invalido      # 401
   ```
 
   En NixOS, si OpenSSL se queja del directorio de certificados:

@@ -12,14 +12,9 @@ http:
       type: query
       disabled: true
       description: >-
-        Devuelve solo las solicitudes del portador del token. El backend
-        compara con el sujeto del JWT; no se manda ningun identificador de
-        usuario desde el cliente.
-    - name: estado
-      value: "RECIBIDA"
-      type: query
-      disabled: true
-      description: Filtra por estado -- RECIBIDA, APROBADA o RECHAZADA.
+        Se acepta por compatibilidad y ya no cambia nada: este endpoint
+        devuelve SIEMPRE solo las solicitudes del portador del token. La
+        bandeja completa es de empleados (gestion/list).
   auth: inherit
 
 runtime:
@@ -37,42 +32,39 @@ runtime:
             expect(res.getBody()).to.be.an("array");
           });
 
-          test("si hay filtro de estado, se respeta", function () {
-            const url = req.getUrl();
+          test("todas son del portador del token", function () {
             const cuerpo = res.getBody();
-            const filtro = /estado=([A-Z]+)/.exec(url);
-            if (filtro) {
-              expect(cuerpo.every((s) => s.estado === filtro[1])).to.equal(true);
-            }
+            const solicitantes = new Set(cuerpo.map((s) => s.solicitante));
+            expect(solicitantes.size).to.be.at.most(1);
           });
         }
 
 docs: |
-  # Listar solicitudes
+  # Listar mis solicitudes
 
-  `GET /api/solicitudes`. Sin parametros devuelve la bandeja completa del
-  equipo de biblioteca; con `mias=true`, solo las del portador del token.
+  `GET /api/solicitudes`. Devuelve **solo las del portador del token** (el
+  `sub` o `client_id` del JWT). Antes, sin parametros, devolvia todas: con
+  RBAC, la bandeja completa paso a `GET /api/gestion/solicitudes`, solo para
+  empleados.
 
   ## Parametros
 
   | Nombre | Tipo | Obligatorio | Descripcion |
   |---|---|---|---|
-  | `mias` | query | no | `true` limita el resultado al sujeto del JWT |
-  | `estado` | query | no | `RECIBIDA`, `APROBADA` o `RECHAZADA` |
+  | `mias` | query | no | aceptado por compatibilidad; no cambia el resultado |
 
   ## Respuestas
 
   | Codigo | Cuando | Como reproducirlo aqui |
   |---|---|---|
-  | 200 | credencial con el scope | entorno `aws` |
+  | 200 | credencial con alguno de los scopes | entornos `aws` y `aws-backoffice` |
   | 401 | token invalido o id token | entornos `aws-token-invalido` / `aws-id-token` |
   | 401 | token valido sin el scope: el authorizer no distingue | entorno `aws-usuario-sin-scope` |
 
   ## Por que puede venir vacia
 
-  Solo si todavia no se ha creado ninguna solicitud (o, con `mias=true`,
-  ninguna del portador del token). Las solicitudes estan en PostgreSQL: no se
-  pierden cuando la Lambda se recicla. Ejecuta `create` y despues este.
+  Solo si el portador del token todavia no creo ninguna. Ejecuta `create` y
+  despues este.
 
 examples:
   - name: 200 con una solicitud

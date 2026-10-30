@@ -12,7 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 
-import cl.duoc.biblioteca.PostgresDePrueba;
+import cl.duoc.biblioteca.ServiciosDePrueba;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.JwtRequestPostProcessor;
@@ -21,7 +21,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 /** Las reglas de negocio del formulario, que son las que producen 400, 404 y 409. */
 @SpringBootTest
-@Import(PostgresDePrueba.class)
+@Import(ServiciosDePrueba.class)
 @AutoConfigureMockMvc
 class SolicitudControllerTest {
 

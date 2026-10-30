@@ -1,4 +1,4 @@
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 
@@ -23,13 +23,12 @@ export class SolicitudesService {
     return this.http.post<Solicitud>(this.base, solicitud);
   }
 
-  /** GET /api/solicitudes?mias=true -> solo las del portador del token. */
+  /**
+   * GET /api/solicitudes -> solo las del portador del token. El filtro lo
+   * aplica el backend con el sub del JWT; la bandeja completa es de
+   * empleados (GestionService).
+   */
   mias(): Observable<Solicitud[]> {
-    return this.http.get<Solicitud[]>(this.base, { params: new HttpParams().set('mias', 'true') });
-  }
-
-  /** GET /api/solicitudes -> la bandeja completa del equipo de biblioteca. */
-  todas(): Observable<Solicitud[]> {
     return this.http.get<Solicitud[]>(this.base);
   }
 }

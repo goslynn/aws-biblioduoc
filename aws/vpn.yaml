@@ -5,20 +5,22 @@ AWSTemplateFormatVersion: "2010-09-09"
 # ==============================================================================
 #
 #  PARA QUE EXISTE
-#    La base no tiene IP publica y su security group solo acepta a la Lambda:
+#    La base no tiene IP publica y su security group solo acepta a la EC2:
 #    desde tu equipo no hay camino. Este stack abre UNO, temporal, para
 #    consultarla con DataGrip, psql o cualquier cliente. No forma parte de la
 #    aplicacion: bootstrap.sh no lo crea. Lo crea y lo borra
 #    aws/scripts/vpn-up.sh / vpn-down.sh, que ademas configuran tu equipo.
 #
 #  QUE HACE
-#    * PublicSubnet + InternetGateway + PublicRouteTable -> una subred publica
-#      NUEVA y SOLO para el servidor VPN. Las subredes privadas de network.yaml
-#      no se tocan: siguen sin ruta a Internet.
+#    * El servidor va en la subred PUBLICA de network.yaml (la misma de la EC2
+#      de la aplicacion): una VPC admite un solo Internet Gateway. Las subredes
+#      privadas no se tocan: siguen sin ruta a Internet.
 #    * VpnSecurityGroup -> entrada: SOLO el puerto UDP de WireGuard y SOLO desde
 #      tu IP publica (la detecta vpn-up.sh). Ni SSH ni ningun otro puerto.
 #    * DatabaseFromVpnIngress -> una regla mas en el security group de RDS: el
 #      5432 tambien desde el servidor VPN. Desaparece al borrar este stack.
+#    * AppFromVpnIngress -> lo mismo para el panel de RabbitMQ (15672) en la EC2
+#      de la aplicacion: http://<IP privada de la EC2>:15672 desde tu equipo.
 #    * VpnInstance -> Ubuntu en t3.micro, sin par de llaves SSH y sin perfil
 #      IAM: no hay forma de "entrar" en la maquina; solo atravesarla.
 #
@@ -33,7 +35,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #       RDS lo ve venir del VpnSecurityGroup y la regla de arriba lo acepta.
 #    4. El nombre DNS de una RDS privada resuelve a su IP privada tambien desde
 #       fuera, asi que el cliente usa el endpoint real y puede verificar el
-#       certificado (sslmode=verify-full), igual que la Lambda.
+#       certificado (sslmode=verify-full), igual que la aplicacion.
 #
 #  LA LLAVE PRIVADA DEL SERVIDOR NUNCA SALE DEL SERVIDOR
 #    Se genera en el primer arranque. Solo la PUBLICA se anuncia en la consola
@@ -54,7 +56,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      vpn-down.sh cuando termines.
 #
 #  DEPENDE DE
-#    network (VpcId, VpcCidr, DatabaseSecurityGroupId) y database (puerto).
+#    network (VpcId, VpcCidr, PublicSubnetId, DatabaseSecurityGroupId,
+#    AppSecurityGroupId) y database (puerto).
 #
 #  ENTREGA (Outputs)
 #    InstanceId -> vpn-up.sh (IP publica en vivo y llave publica del servidor)
@@ -63,13 +66,15 @@ AWSTemplateFormatVersion: "2010-09-09"
 #  DESPLIEGUE MANUAL (lo normal es usar ./aws/scripts/vpn-up.sh)
 #    aws cloudformation deploy --template-file aws/vpn.yaml \
 #      --stack-name biblioteca-vpn --region us-east-1 \
-#      --parameter-overrides VpcId=... VpcCidr=... DatabaseSecurityGroupId=... \
+#      --parameter-overrides VpcId=... VpcCidr=... PublicSubnetId=... \
+#        DatabaseSecurityGroupId=... AppSecurityGroupId=... \
 #        ClientPublicKey=... ClientCidr=<tu-ip>/32
 # ==============================================================================
 
 Description: >-
-  biblioteca - Servidor WireGuard temporal en una subred publica propia, para
-  llegar desde un equipo autorizado a la RDS privada. Solo UDP desde una IP.
+  biblioteca - Servidor WireGuard temporal en la subred publica del proyecto,
+  para llegar desde un equipo autorizado a la RDS privada y al panel de
+  RabbitMQ. Solo UDP desde una IP.
 
 Parameters:
 
@@ -87,10 +92,22 @@ Parameters:
     Type: String
     Description: Rango de la VPC (Output VpcCidr de network.yaml). Es lo unico a lo que el servidor reenvia trafico del tunel.
 
-  PublicSubnetCidr:
-    Type: String
-    Default: 10.20.100.0/24
-    Description: Rango de la subred publica del servidor VPN. Dentro de VpcCidr y sin solaparse con las privadas.
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      Subred publica del proyecto (Output PublicSubnetId de network.yaml). Una
+      VPC admite un solo Internet Gateway, y ya lo tiene network.yaml.
+
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >-
+      Security group de la EC2 de la aplicacion (Output AppSecurityGroupId de
+      network.yaml). Mientras exista la VPN, abre el panel de RabbitMQ al tunel.
+
+  RabbitPanelPort:
+    Type: Number
+    Default: 15672
+    Description: Puerto del panel de administracion de RabbitMQ en la EC2.
 
   DatabaseSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
@@ -146,67 +163,6 @@ Parameters:
 Resources:
 
   # ---------------------------------------------------------------------------
-  #  La puerta a Internet. Solo la usa la subred publica de abajo: las tablas
-  #  de rutas de las subredes privadas no la mencionan.
-  # ---------------------------------------------------------------------------
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-vpn-igw"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  InternetGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      VpcId: !Ref VpcId
-      InternetGatewayId: !Ref InternetGateway
-
-  PublicSubnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VpcId
-      CidrBlock: !Ref PublicSubnetCidr
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      # No se asigna IP publica a todo lo que caiga aqui: solo la instancia la
-      # pide, de forma explicita, en su interfaz.
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-vpn-publica"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  # Tabla de rutas PROPIA de la subred publica: local + 0.0.0.0/0 -> IGW.
-  # La tabla de las privadas (network.yaml) sigue solo con la ruta local.
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VpcId
-      Tags:
-        - Key: Name
-          Value: !Sub "${ProjectName}-vpn-publica"
-        - Key: Project
-          Value: !Ref ProjectName
-
-  PublicDefaultRoute:
-    Type: AWS::EC2::Route
-    # La ruta no se puede crear hasta que el IGW este enganchado a la VPC.
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  PublicSubnetRouteTable:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      SubnetId: !Ref PublicSubnet
-      RouteTableId: !Ref PublicRouteTable
-
-  # ---------------------------------------------------------------------------
   #  Security group del servidor.
   #    Entrada: SOLO UDP de WireGuard, SOLO desde ClientCidr.
   #    Salida:  80/443 para instalar WireGuard con apt en el primer arranque,
@@ -240,6 +196,11 @@ Resources:
           FromPort: !Ref DbPort
           ToPort: !Ref DbPort
           DestinationSecurityGroupId: !Ref DatabaseSecurityGroupId
+        - Description: Panel de RabbitMQ en la EC2 de la aplicacion
+          IpProtocol: tcp
+          FromPort: !Ref RabbitPanelPort
+          ToPort: !Ref RabbitPanelPort
+          DestinationSecurityGroupId: !Ref AppSecurityGroupId
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-vpn"
@@ -258,20 +219,30 @@ Resources:
       ToPort: !Ref DbPort
       SourceSecurityGroupId: !Ref VpnSecurityGroup
 
+  # Igual que la anterior, para el panel de RabbitMQ (colas, DLQ, mensajes).
+  # Tambien desaparece al borrar la VPN.
+  AppFromVpnIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      Description: Panel de RabbitMQ desde el servidor VPN (temporal)
+      IpProtocol: tcp
+      FromPort: !Ref RabbitPanelPort
+      ToPort: !Ref RabbitPanelPort
+      SourceSecurityGroupId: !Ref VpnSecurityGroup
+
   # ---------------------------------------------------------------------------
   #  El servidor. Sin KeyName (no hay SSH) y sin IamInstanceProfile (no puede
   #  llamar a ningun servicio de AWS): lo unico que hace es WireGuard.
   # ---------------------------------------------------------------------------
   VpnInstance:
     Type: AWS::EC2::Instance
-    # Sin ruta a Internet, el apt del primer arranque fallaria.
-    DependsOn: PublicDefaultRoute
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
       NetworkInterfaces:
         - DeviceIndex: "0"
-          SubnetId: !Ref PublicSubnet
+          SubnetId: !Ref PublicSubnetId
           AssociatePublicIpAddress: true
           GroupSet: [!Ref VpnSecurityGroup]
       # IMDSv2 obligatorio: cierra el robo de metadatos por peticiones falsas.

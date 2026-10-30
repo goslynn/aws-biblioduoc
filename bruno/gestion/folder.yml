@@ -1,0 +1,52 @@
+info:
+  name: gestion
+  type: folder
+  seq: 4
+  description: Rutas de EMPLEADO - bandeja, aprobar, rechazar, devolver, stock y bitacora
+
+request:
+  auth: inherit
+
+docs: |
+  # gestion (solo empleados)
+
+  Todo lo que hay bajo `/api/gestion/**`. API Gateway lo publica con un unico
+  recurso proxy y acepta cualquiera de los dos scopes; **quien decide es
+  Spring** (`hasRole("EMPLEADO")`). Por eso aqui aparece, por fin a traves del
+  gateway, un **403**: el token es valido y es de esta API, pero su portador no
+  es empleado.
+
+  ## Quien es empleado
+
+  | Credencial | Empleado | Por que |
+  |---|---|---|
+  | persona del grupo Cognito `empleados` (navegador) | si | claim `cognito:groups` + scope `acceso` |
+  | cliente M2M `backoffice` (entorno `aws-backoffice`) | si | scope `gestion` |
+  | cliente M2M normal (entorno `aws`) | no | solo scope `acceso`: 403 |
+
+  En Bruno, el backoffice hace de empleado: un token de PERSONA con custom
+  scope solo lo emite el flujo del navegador.
+
+  ## Ciclo de vida de una solicitud
+
+  ```
+  RECIBIDA --aprobacion--> APROBADA --devolucion--> DEVUELTA
+      \
+       `--rechazo--> RECHAZADA
+  ```
+
+  * **aprobacion** descuenta el stock de forma atomica (409 si ya no alcanza)
+    y fija el vencimiento: el plazo cuenta desde que se aprueba.
+  * **rechazo** exige motivo (400 sin el); el estudiante lo recibe por correo.
+  * **devolucion** repone el stock y, si el libro estaba agotado, dispara los
+    "avisame".
+
+  Cada accion responde 200 con la solicitud ya cambiada; su correo sale
+  despues, por RabbitMQ.
+
+  ## Orden en `bru run`
+
+  `approve` y `return` usan `{{solicitudCreada}}`, la que acaba de crear
+  `solicitudes/create`. `reject` va al final sobre la MISMA solicitud, ya
+  devuelta: con el backoffice responde **409**. Para ver su 200, ejecuta
+  `solicitudes/create` y luego `reject` directamente.

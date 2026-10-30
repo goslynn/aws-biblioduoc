@@ -1,6 +1,6 @@
 import { Routes } from '@angular/router';
 
-import { authGuard } from './auth/auth.guard';
+import { authGuard, empleadoGuard } from './auth/auth.guard';
 import { rutasDiagnostico } from './diagnostico/rutas';
 import { Inicio } from './inicio';
 
@@ -9,7 +9,8 @@ import { Inicio } from './inicio';
  *
  * Solo /inicio es publica. Todo lo demas pasa por authGuard, porque todo lo
  * demas llama a la API y la API exige token: sin sesion, esas vistas solo
- * podrian mostrar errores 401.
+ * podrian mostrar errores 401. Las de /gestion pasan ademas por
+ * empleadoGuard: sin ser empleado, solo verian errores 403.
  *
  * Los componentes se cargan con import() (lazy loading): el bundle inicial no
  * arrastra el catalogo ni el formulario, que es lo que ve alguien que todavia
@@ -43,6 +44,18 @@ export const routes: Routes = [
     canActivate: [authGuard],
     title: 'Mis solicitudes · Biblioteca Duoc',
     loadComponent: () => import('./solicitudes/mis-solicitudes').then((m) => m.MisSolicitudes),
+  },
+  {
+    path: 'gestion/solicitudes',
+    canActivate: [empleadoGuard],
+    title: 'Bandeja · Biblioteca Duoc',
+    loadComponent: () => import('./gestion/bandeja').then((m) => m.Bandeja),
+  },
+  {
+    path: 'gestion/stock',
+    canActivate: [empleadoGuard],
+    title: 'Stock · Biblioteca Duoc',
+    loadComponent: () => import('./gestion/stock').then((m) => m.Stock),
   },
   ...rutasDiagnostico,
 

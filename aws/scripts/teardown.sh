@@ -9,11 +9,11 @@
 #
 #      0. vpn        (opcional; vive en la red y abre la base) -> vpn-down.sh,
 #                       que ademas baja la interfaz local
-#      1. api        (depende de la Lambda y del pool)
-#      2. backend    (depende del bucket, de la red y de la base)
+#      1. api        (depende del NLB y del pool; borra el VPC Link)
+#      2. backend    (EC2 + RabbitMQ + NLB; depende del bucket, la red y la base)
 #      3. database   <- se borra la instancia SIN snapshot: es un laboratorio
-#      4. network    <- puede tardar hasta ~20 min: AWS libera con calma las
-#                       interfaces de red que la Lambda creo en sus subredes
+#      4. network    <- puede tardar unos minutos: AWS libera con calma las
+#                       interfaces de red del NLB y del VPC Link
 #      5. cognito
 #      6. web        <- hay que VACIAR el bucket primero
 #      7. artifacts  <- hay que vaciarlo, y ademas borrar TODAS las versiones
@@ -43,7 +43,7 @@ cat <<EOF
 
       ${STACK_VPN}         (si existe) + la interfaz WireGuard de este equipo
       ${STACK_API}
-      ${STACK_BACKEND}
+      ${STACK_BACKEND}    + la EC2, RabbitMQ y los mensajes que queden en sus colas
       ${STACK_DATABASE}   + la base PostgreSQL entera, sin snapshot
       ${STACK_NETWORK}
       ${STACK_COGNITO}
@@ -120,7 +120,7 @@ vacia_bucket "$(output_de "$STACK_ARTIFACTS" ArtifactsBucketName)"
 borra_stack "$STACK_API"
 borra_stack "$STACK_BACKEND"
 borra_stack "$STACK_DATABASE"
-info "la red puede tardar hasta ~20 min: AWS esta liberando las interfaces de la Lambda"
+info "la red puede tardar unos minutos: AWS esta liberando las interfaces del NLB y del VPC Link"
 borra_stack "$STACK_NETWORK"
 borra_stack "$STACK_COGNITO"
 borra_stack "$STACK_WEB"

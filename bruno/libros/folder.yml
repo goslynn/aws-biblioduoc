@@ -2,7 +2,7 @@ info:
   name: libros
   type: folder
   seq: 1
-  description: Catalogo de libros (solo lectura)
+  description: Catalogo de libros y "avisame cuando vuelva"
 
 request:
   auth: inherit
@@ -11,9 +11,18 @@ docs: |
   # libros
 
   El catalogo de la biblioteca, en la tabla `libro` de PostgreSQL. Lo siembra
-  la migracion Flyway `V2__catalogo_inicial.sql` y la API solo lo **lee**: el
-  rol con el que se conecta la aplicacion no tiene permiso de escritura sobre
-  esa tabla, y por eso no hay endpoints de escritura aqui.
+  la migracion Flyway `V2__catalogo_inicial.sql`. Desde aqui solo se **lee**:
+  el stock (`ejemplares`) cambia al aprobar, devolver y cargar, y eso vive en
+  la carpeta `gestion` (empleados). El rol de la aplicacion solo puede
+  actualizar esa columna; titulo, autor o ISBN no se tocan desde la API.
+
+  ## Avisame cuando vuelva
+
+  Ante un libro con 0 ejemplares, un estudiante se suscribe
+  (`subscribe`). Cuando una carga de stock o una devolucion lo deja con
+  ejemplares, sale un correo por cada suscrito, por RabbitMQ (cola de correo
+  **masivo**), y su suscripcion se cierra. Solo reciben correo quienes
+  activaron los avisos (carpeta `avisos`).
 
   ## Modelo
 

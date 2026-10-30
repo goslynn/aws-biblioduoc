@@ -9,13 +9,16 @@
 #    1. artifacts + web + cognito + network -> en paralelo: no dependen de nadie
 #    1b. database                        -> PostgreSQL privado (~10 min), dentro
 #                                           de la red de 1
-#    2. pipeline/build-backend.sh        -> compila, sube el ZIP y crea la Lambda
-#                                           (necesita 1 y 1b: bucket, issuer,
-#                                           origen, subredes, base)
-#    3. api                              -> necesita el pool y la funcion
+#    2. pipeline/build-backend.sh        -> compila, sube el jar y crea la EC2
+#                                           con RabbitMQ y el NLB (necesita 1 y
+#                                           1b: bucket, issuer, origen, subredes,
+#                                           base)
+#    3. api                              -> necesita el pool y el NLB (VPC Link)
 #    4. pipeline/api-deploy.sh           -> publica la API en el stage
-#    5. usuario de demostracion          -> para el login y para el caso
-#                                           "token sin el custom scope"
+#    5. usuarios de demostracion         -> un estudiante y un EMPLEADO (en el
+#                                           grupo de Cognito), para el login y
+#                                           para el caso "token sin el custom
+#                                           scope"
 #    6. pipeline/bruno-env.sh            -> entornos de prueba con tokens reales
 #    7. pipeline/publish-web.sh          -> configura, compila y sube el frontend
 #
@@ -30,11 +33,17 @@
 #  ES IDEMPOTENTE: se puede volver a ejecutar tantas veces como haga falta.
 #
 #  USO
-#    ./aws/scripts/bootstrap.sh
+#    SMTP_HOST=smtp.gmail.com SMTP_USER=tu@gmail.com SMTP_PASSWORD='...' \
+#    SMTP_FROM=tu@gmail.com ./aws/scripts/bootstrap.sh
+#
+#    Las SMTP_* (el proveedor de los avisos por correo) solo hacen falta la
+#    PRIMERA vez; ver aws/pipeline/build-backend.sh. Tambien pueden ir en
+#    aws/.env (cp aws/.env.example aws/.env), igual que DEMO_USER.
 #
 #  VARIABLES OPCIONALES
 #    PROJECT_NAME (biblioteca)  AWS_REGION (us-east-1)  STAGE_NAME (test)
-#    DEMO_USER (alumno@duoc.cl) SKIP_WEB (false, para no compilar el frontend)
+#    DEMO_USER (alumno@duoc.cl) DEMO_EMPLOYEE (empleado@duoc.cl)
+#    SKIP_WEB (false, para no compilar el frontend)
 #    DEBUG (false): la hereda publish-web.sh y publica la vista /diagnostico,
 #      que ensena el access token en claro. Solo para explicar la arquitectura.
 #
@@ -46,15 +55,15 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_comun.sh"
 
 DEMO_USER="${DEMO_USER:-alumno@duoc.cl}"
+DEMO_EMPLOYEE="${DEMO_EMPLOYEE:-empleado@duoc.cl}"
 SKIP_WEB="${SKIP_WEB:-false}"
 
 # ------------------------------------------------------------------ paso 0 ----
 log "Comprobando el entorno"
-requiere aws zip curl jq python3
+requiere aws curl jq python3
 [ "$SKIP_WEB" = "true" ] || requiere npm
 
 ACCOUNT_ID="$(cuenta_aws)"
-LAB_ROLE_ARN="${LAB_ROLE_ARN:-arn:aws:iam::${ACCOUNT_ID}:role/LabRole}"
 
 # La URL del sitio, calculada ANTES de que exista el bucket. Ver la cabecera.
 SITE_ORIGIN="https://${PROJECT_NAME}-web-${ACCOUNT_ID}.s3.${AWS_REGION}.amazonaws.com"
@@ -124,23 +133,26 @@ despliega_stack database.yaml "$STACK_DATABASE" \
 
 
 # ------------------------------------------------------------------ paso 2 ----
-log "Backend: compilar, empaquetar, publicar y desplegar"
-LAB_ROLE_ARN="$LAB_ROLE_ARN" "${ROOT}/aws/pipeline/build-backend.sh"
+log "Backend: compilar, publicar y desplegar (EC2 + RabbitMQ + NLB)"
+"${ROOT}/aws/pipeline/build-backend.sh"
 
 # ------------------------------------------------------------------ paso 3 ----
 log "Desplegando la API"
+info "la primera vez, el VPC Link tarda varios minutos en quedar disponible"
 USER_POOL_ARN="$(output_obligatorio "$STACK_COGNITO" UserPoolArn)"
 SCOPE_COMPLETO="$(output_obligatorio "$STACK_COGNITO" ScopeCompleto)"
-FUNCTION_ARN="$(output_obligatorio "$STACK_BACKEND" FunctionArn)"
-FUNCTION_NAME="$(output_obligatorio "$STACK_BACKEND" FunctionName)"
+SCOPE_GESTION="$(output_obligatorio "$STACK_COGNITO" ScopeGestion)"
+NLB_ARN="$(output_obligatorio "$STACK_BACKEND" NlbArn)"
+NLB_DNS="$(output_obligatorio "$STACK_BACKEND" NlbDnsName)"
 SITE_ORIGIN_REAL="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
 
 despliega_stack api.yaml "$STACK_API" \
   "ProjectName=${PROJECT_NAME}" \
   "UserPoolArn=${USER_POOL_ARN}" \
-  "LambdaFunctionArn=${FUNCTION_ARN}" \
-  "LambdaFunctionName=${FUNCTION_NAME}" \
+  "NlbArn=${NLB_ARN}" \
+  "NlbDnsName=${NLB_DNS}" \
   "RequiredScope=${SCOPE_COMPLETO}" \
+  "ManagementScope=${SCOPE_GESTION}" \
   "AllowOrigin=${SITE_ORIGIN_REAL}" \
   "StageName=${STAGE_NAME}" \
   || { por_que_fallo "$STACK_API"; die "fallo el despliegue de la API"; }
@@ -154,34 +166,54 @@ despliega_stack api.yaml "$STACK_API" \
 # Crear el usuario de demostracion NO es infraestructura, es un dato: por eso
 # se hace con la CLI y no con CloudFormation (que ademas no sabe crear
 # usuarios de Cognito con contrasena).
-log "Usuario de demostracion"
+log "Usuarios de demostracion"
 USER_POOL_ID="$(output_obligatorio "$STACK_COGNITO" UserPoolId)"
+GRUPO_EMPLEADOS="$(output_obligatorio "$STACK_COGNITO" GrupoEmpleados)"
 
 # Contrasena aleatoria en cada ejecucion: asi no hay ninguna credencial
 # escrita en el repositorio, ni siquiera de mentira.
-DEMO_PASSWORD="Duoc$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(14)))')1a"
+contrasena() {
+  printf 'Duoc%s1a' "$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(14)))')"
+}
 
-if aws cognito-idp admin-get-user --user-pool-id "$USER_POOL_ID" --username "$DEMO_USER" \
-     --region "$AWS_REGION" >/dev/null 2>&1; then
-  info "el usuario ${DEMO_USER} ya existe; se le pone una contrasena nueva"
-else
-  aws cognito-idp admin-create-user \
+# Crea (si falta) un usuario con el email ya verificado y le fija la clave.
+usuario_demo() {
+  local usuario="$1" clave="$2"
+  if aws cognito-idp admin-get-user --user-pool-id "$USER_POOL_ID" --username "$usuario" \
+       --region "$AWS_REGION" >/dev/null 2>&1; then
+    info "el usuario ${usuario} ya existe; se le pone una contrasena nueva"
+  else
+    aws cognito-idp admin-create-user \
+      --user-pool-id "$USER_POOL_ID" \
+      --username "$usuario" \
+      --user-attributes "Name=email,Value=${usuario}" "Name=email_verified,Value=true" \
+      --message-action SUPPRESS \
+      --region "$AWS_REGION" >/dev/null
+    info "usuario ${usuario} creado"
+  fi
+  # --permanent evita el estado FORCE_CHANGE_PASSWORD, que bloquearia tanto el
+  # login de la Hosted UI como el admin-initiate-auth de bruno-env.sh.
+  aws cognito-idp admin-set-user-password \
     --user-pool-id "$USER_POOL_ID" \
-    --username "$DEMO_USER" \
-    --user-attributes "Name=email,Value=${DEMO_USER}" "Name=email_verified,Value=true" \
-    --message-action SUPPRESS \
-    --region "$AWS_REGION" >/dev/null
-  info "usuario ${DEMO_USER} creado"
-fi
+    --username "$usuario" \
+    --password "$clave" \
+    --permanent \
+    --region "$AWS_REGION"
+}
 
-# --permanent evita el estado FORCE_CHANGE_PASSWORD, que bloquearia tanto el
-# login de la Hosted UI como el admin-initiate-auth de bruno-env.sh.
-aws cognito-idp admin-set-user-password \
+DEMO_PASSWORD="$(contrasena)"
+EMPLOYEE_PASSWORD="$(contrasena)"
+usuario_demo "$DEMO_USER" "$DEMO_PASSWORD"
+usuario_demo "$DEMO_EMPLOYEE" "$EMPLOYEE_PASSWORD"
+
+# El RBAC: meter al empleado en el grupo. Idempotente (agregarlo dos veces no
+# falla). Como el usuario, es un DATO y no infraestructura.
+aws cognito-idp admin-add-user-to-group \
   --user-pool-id "$USER_POOL_ID" \
-  --username "$DEMO_USER" \
-  --password "$DEMO_PASSWORD" \
-  --permanent \
+  --username "$DEMO_EMPLOYEE" \
+  --group-name "$GRUPO_EMPLEADOS" \
   --region "$AWS_REGION"
+info "${DEMO_EMPLOYEE} esta en el grupo ${GRUPO_EMPLEADOS}"
 
 cat > "${LOCAL_DIR}/usuario-demo.env" <<EOF
 # Generado por aws/scripts/bootstrap.sh. Esta en .gitignore.
@@ -189,6 +221,8 @@ cat > "${LOCAL_DIR}/usuario-demo.env" <<EOF
 # entrar por la Hosted UI.
 DEMO_USER='${DEMO_USER}'
 DEMO_PASSWORD='${DEMO_PASSWORD}'
+DEMO_EMPLOYEE='${DEMO_EMPLOYEE}'
+EMPLOYEE_PASSWORD='${EMPLOYEE_PASSWORD}'
 EOF
 chmod 600 "${LOCAL_DIR}/usuario-demo.env"
 info "credenciales guardadas en aws/.local/usuario-demo.env"
@@ -216,11 +250,16 @@ cat <<EOF
     Hosted UI    ${HOSTED_UI}
     Logs         aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}
 
-    Entra con    ${DEMO_USER}
-                 (la contrasena esta en aws/.local/usuario-demo.env)
+    Entra con    ${DEMO_USER}      (estudiante)
+                 ${DEMO_EMPLOYEE}   (empleado: ve la gestion)
+                 (las contrasenas estan en aws/.local/usuario-demo.env)
+
+    Los avisos por correo solo llegan a un email REAL: registrate con el
+    tuyo desde la Hosted UI y activa los avisos en "Mis solicitudes".
 
     Probar la API:
         cd bruno && bru run --env aws
+        cd bruno && bru run --env aws-backoffice
 
     Probar la aplicacion:
         abre ${SITE_URL} en el navegador, con DevTools en la pestana Network

@@ -86,22 +86,22 @@ docs: |
   | 401 | se manda un **id token**: no lleva claim `scope` | entorno `aws-id-token` |
   | 401 | sin cabecera `Authorization` | pestana *Auth* → *No Auth* |
   | 401 | token valido **sin** el scope exigido | entorno `aws-usuario-sin-scope` |
-  | 500 | falta `AWS::Lambda::Permission` en `aws/api.yaml` | (no deberia pasar) |
+  | 500 | el NLB no tiene destino sano (la EC2 arrancando o caida) | (no deberia pasar; mira el target group) |
 
   Una lista vacia **no** es un error: si la busqueda no encuentra nada, el
   codigo sigue siendo 200 con `[]`.
 
   ## Detalle
 
-  Los cuatro rechazos los produce **API Gateway**, antes de invocar la Lambda:
-  no llegan al codigo Java ni aparecen en los logs de la funcion. Si buscas el
+  Los cuatro rechazos los produce **API Gateway**, antes de llegar a la EC2:
+  no llegan al codigo Java ni aparecen en los logs del backend. Si buscas el
   error en CloudWatch y no lo encuentras, es por eso.
 
   Y los cuatro son **401**, incluido el token valido al que solo le falta el
   scope: el authorizer `COGNITO_USER_POOLS` no distingue autenticacion de
   autorizacion y devuelve el mismo cuerpo generico en todos los casos. El 403
-  por falta de scope si existe, pero lo emite **Spring Security**, y solo se ve
-  invocando la Lambda directamente (ver `README.md` §4).
+  por falta de autorizacion si existe, pero lo emite **Spring Security** (ver
+  la carpeta `gestion` con el entorno `aws`, o `README.md` §3).
 
 examples:
   - name: 200 catalogo completo
@@ -148,7 +148,7 @@ examples:
       autenticacion correcta, autorizacion insuficiente. El cuerpo es IDENTICO
       al del id token de arriba, y ese es el hallazgo: desde fuera el authorizer
       no distingue los dos casos. El 403 que le corresponderia a este caso lo
-      emite Spring, y solo se ve invocando la Lambda directamente.
+      emite Spring, llamando a la EC2 sin pasar por el gateway (VPN).
     response:
       status: 401
       statusText: Unauthorized

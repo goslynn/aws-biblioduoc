@@ -19,7 +19,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 #  >>> COMO QUEDA PROTEGIDA, CAPA POR CAPA <<<
 #    1. Red: PubliclyAccessible false y subredes sin ruta a Internet. El
 #       endpoint resuelve a una IP privada que solo existe dentro de la VPC.
-#    2. Security group: solo acepta el 5432 desde el grupo de la Lambda.
+#    2. Security group: solo acepta el 5432 desde el grupo de la EC2 de la
+#       aplicacion (y, mientras exista, desde la VPN opcional).
 #    3. Transporte: rds.force_ssl=1 rechaza cualquier conexion sin TLS, y la
 #       aplicacion ademas verifica el certificado y el nombre (verify-full).
 #    4. Credenciales: aleatorias, de 32 caracteres, generadas aqui mismo.
@@ -30,10 +31,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 #       cuenta.
 #
 #  FLUJO QUE HABILITA
-#    1. backend.yaml resuelve los dos secretos AL DESPLEGAR (referencias
-#       dinamicas {{resolve:secretsmanager:...}}) y se los pasa a la Lambda.
-#    2. En el arranque en frio, Flyway entra con el maestro y aplica las
-#       migraciones pendientes: la primera vez, esquema + rol + seed.
+#    1. backend.yaml le pasa a la EC2 los ARN de los dos secretos; la EC2 los
+#       LEE de Secrets Manager cada vez que arranca la aplicacion.
+#    2. Al arrancar, Flyway entra con el maestro y aplica las migraciones
+#       pendientes: la primera vez, esquema + rol + seed.
 #    3. Desde ahi, cada peticion usa el pool de conexiones de biblioteca_app.
 #
 #  TRAMPAS

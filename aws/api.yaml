@@ -7,6 +7,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #  QUE HACE
 #    Publica el backend en internet y lo protege. Es la pieza que une
 #    cognito.yaml con backend.yaml, y la unica puerta legitima a la aplicacion.
+#    * VpcLink -> el tunel privado de API Gateway hasta el NLB interno de
+#                 backend.yaml. La EC2 no tiene ningun puerto abierto a
+#                 Internet: el unico camino es este.
 #
 #  POR QUE REST API (v1) Y NO HTTP API (v2)
 #    Cuidado con el argumento facil, porque es falso: el HTTP API SI admite
@@ -22,19 +25,26 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      * el paso explicito de "desplegar al stage", que en HTTP API no existe
 #        porque se despliega solo.
 #    El coste de la decision es justo lo que se mide abajo: aqui un token sin el
-#    scope tambien recibe 401.
+#    scope tambien recibe 401. (Y el VPC Link de una REST API exige un NLB; el
+#    de una HTTP API aceptaria un ALB.)
 #
 #  EL CAMINO DE UNA PETICION
 #    GET /test/api/libros  +  Authorization: Bearer <access_token>
 #      +-> ¿existe el recurso?            si no -> 403 "Missing Authentication Token"
 #      +-> Authorizer COGNITO_USER_POOLS  firma/emisor/expiracion malas -> 401
-#      +-> AuthorizationScopes            token sin el scope exigido     -> 401
+#      +-> AuthorizationScopes            token sin NINGUNO de los scopes -> 401
 #          MEDIDO, y no es lo que documenta AWS: el authorizer de User Pools
 #          responde 401, con el mismo cuerpo generico que ante un token
-#          invalido. El 403 por falta de scope lo da Spring, y solo se ve
-#          invocando la Lambda directamente. Ver README.md §4 y aws/README.md §5.
-#      +-> Integracion AWS_PROXY (payload 1.0) -> Lambda
-#      +-> Web Adapter -> Tomcat -> el controlador de Spring
+#          invalido. Ver README.md §4.
+#      +-> Integracion HTTP_PROXY por el VPC Link -> NLB interno -> EC2:8080
+#      +-> Tomcat -> Spring Security (2a validacion, y el ROL) -> el controlador
+#
+#  >>> DOS SCOPES, Y QUIEN DECIDE QUE <<<
+#    Todos los metodos aceptan "acceso" (estudiantes y empleados) O "gestion"
+#    (el cliente backoffice). El gateway solo responde a "¿este token es para
+#    esta API?". Que un estudiante no pueda aprobar solicitudes lo decide
+#    SPRING por la ruta /api/gestion/**: el 403 de RBAC sale de la aplicacion,
+#    y es el primero de la matriz que se ve A TRAVES del gateway.
 #
 #  >>> POR QUE EXIGIR UN SCOPE OBLIGA A USAR EL ACCESS TOKEN <<<
 #    Cuando un metodo declara AuthorizationScopes, API Gateway exige que el
@@ -42,16 +52,16 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    de OIDC. Resultado: el id_token deja de pasar sin configurar nada mas.
 #
 #  >>> EL REPARTO DEL CORS, QUE AQUI NO ES OBVIO <<<
-#    Con integracion AWS_PROXY, API Gateway NO puede anadir cabeceras a la
-#    respuesta real: lo que sale es tal cual lo devolvio la Lambda. Asi que el
-#    CORS se reparte en TRES piezas, y hacen falta las tres:
+#    Con integracion HTTP_PROXY, API Gateway NO anade cabeceras a la respuesta
+#    real: lo que sale es tal cual lo devolvio la EC2. Asi que el CORS se
+#    reparte en TRES piezas, y hacen falta las tres:
 #
 #      1. El preflight OPTIONS  -> lo responde este stack con integracion MOCK.
 #         Nunca lleva Authorization, por eso su AuthorizationType es NONE.
 #      2. La respuesta REAL 2xx -> la cabecera Allow-Origin la pone SPRING
-#         (ConfiguracionCors en el backend, variable BIBLIOTECA_ORIGEN).
+#         (corsConfigurationSource, variable BIBLIOTECA_ORIGEN).
 #      3. Los errores del propio gateway (401/403, que nunca llegan a la
-#         Lambda) -> GatewayResponses DEFAULT_4XX y DEFAULT_5XX. Sin esto, el
+#         EC2) -> GatewayResponses DEFAULT_4XX y DEFAULT_5XX. Sin esto, el
 #         navegador muestra "status 0 / blocked by CORS" en vez del 401 real, y
 #         el resto del laboratorio deja de ser diagnosticable.
 #
@@ -59,7 +69,14 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    * Las cabeceras de CORS son EXPRESIONES: una cadena literal se escribe con
 #      comillas simples dentro de las dobles -> "'https://...'". Es el error
 #      tipografico mas comun de esta plantilla.
-#    * Sin AWS::Lambda::Permission, TODAS las rutas responden 500.
+#    * En HTTP_PROXY los path parameters NO viajan solos: cada {id} o {proxy}
+#      de la Uri necesita su integration.request.path.X. Sin el, la EC2 recibe
+#      literalmente "/api/libros/{id}".
+#    * El VPC Link tarda varios minutos en quedar AVAILABLE; el primer
+#      despliegue del stack espera por el.
+#    * Si el NLB no tiene ningun destino sano (la app arrancando, o caida),
+#      API Gateway responde 500 "Internal server error". Mira los health
+#      checks del target group antes de mirar el codigo.
 #    * AWS::ApiGateway::Deployment es INMUTABLE: si cambias un metodo,
 #      CloudFormation actualiza el metodo pero el stage sigue sirviendo lo
 #      viejo. Por eso el pipeline ejecuta siempre aws/pipeline/api-deploy.sh
@@ -68,8 +85,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      el navegador ni siquiera intentaria la peticion real.
 #
 #  DEPENDE DE
-#    * cognito.yaml -> UserPoolArn, ScopeCompleto
-#    * backend.yaml -> FunctionArn, FunctionName
+#    * cognito.yaml -> UserPoolArn, ScopeCompleto, ScopeGestion
+#    * backend.yaml -> NlbArn, NlbDnsName
 #    * web.yaml     -> SiteOrigin (para el CORS)
 #
 #  ENTREGA (Outputs)
@@ -81,16 +98,16 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      --template-file aws/api.yaml \
 #      --stack-name biblioteca-api \
 #      --parameter-overrides \
-#        ProjectName=biblioteca UserPoolArn=... LambdaFunctionArn=... \
-#        LambdaFunctionName=... RequiredScope=biblioteca-api/acceso \
+#        ProjectName=biblioteca UserPoolArn=... NlbArn=... NlbDnsName=... \
+#        RequiredScope=biblioteca-api/acceso ManagementScope=biblioteca-api/gestion \
 #        AllowOrigin=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com
 #    ...y despues, SIEMPRE:  ./aws/pipeline/api-deploy.sh
 # ==============================================================================
 
 Description: >-
-  biblioteca - API Gateway REST API con authorizer COGNITO_USER_POOLS, scope
-  exigido por metodo, CORS manual y stage desplegable. Depende de cognito.yaml,
-  backend.yaml y web.yaml.
+  biblioteca - API Gateway REST API con authorizer COGNITO_USER_POOLS, scopes
+  exigidos por metodo, VPC Link hacia el NLB interno, CORS manual y stage
+  desplegable. Depende de cognito.yaml, backend.yaml y web.yaml.
 
 Parameters:
 
@@ -105,21 +122,27 @@ Parameters:
     AllowedPattern: "^arn:aws:cognito-idp:.+$"
     Description: Output "UserPoolArn" de cognito.yaml. Es el ProviderARN del authorizer.
 
-  LambdaFunctionArn:
+  NlbArn:
     Type: String
-    Description: Output "FunctionArn" de backend.yaml. Destino de la integracion.
+    AllowedPattern: "^arn:aws:elasticloadbalancing:.+$"
+    Description: Output "NlbArn" de backend.yaml. Destino del VPC Link.
 
-  LambdaFunctionName:
+  NlbDnsName:
     Type: String
-    Description: Output "FunctionName" de backend.yaml. Sujeto del permiso de invocacion.
+    Description: Output "NlbDnsName" de backend.yaml. Host de las URI de integracion.
 
   RequiredScope:
     Type: String
     Default: biblioteca-api/acceso
     Description: >-
       Output "ScopeCompleto" de cognito.yaml. Un token valido SIN este scope
-      recibe 401 (medido; ver la cabecera); uno con el scope pasa. Debe ser
+      (ni el de gestion) recibe 401 (medido; ver la cabecera). Debe ser
       identico al que exige Spring.
+
+  ManagementScope:
+    Type: String
+    Default: biblioteca-api/gestion
+    Description: Output "ScopeGestion" de cognito.yaml. El del cliente backoffice.
 
   AllowOrigin:
     Type: String
@@ -139,9 +162,8 @@ Parameters:
 Resources:
 
   # ===========================================================================
-  #  LA API Y SU ARBOL DE RECURSOS
+  #  LA API, SU TUNEL Y SU ARBOL DE RECURSOS
   # ===========================================================================
-
   RestApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
@@ -170,9 +192,10 @@ Resources:
       ParentId: !Ref ResourceApi
       PathPart: libros
 
-  # /api/libros/{id}   -> tambien atiende /api/libros/generos: para API Gateway
-  #                       "generos" es un valor mas de {id}, y es Spring quien
-  #                       decide que ese literal lo atiende otro metodo.
+  # /api/libros/{id}   -> tambien atiende /api/libros/generos y
+  #                       /api/libros/avisame: para API Gateway son un valor
+  #                       mas de {id}, y es Spring quien decide que ese
+  #                       literal lo atiende otro metodo.
   ResourceLibroItem:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -196,6 +219,46 @@ Resources:
       ParentId: !Ref ResourceSolicitudes
       PathPart: "{id}"
 
+  # /api/libros/{id}/avisame
+  ResourceLibroAvisame:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceLibroItem
+      PathPart: avisame
+
+  # /api/avisos
+  ResourceAvisos:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceApi
+      PathPart: avisos
+
+  # /api/avisos/correo
+  ResourceAvisosCorreo:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceAvisos
+      PathPart: correo
+
+  # /api/gestion
+  ResourceGestion:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceApi
+      PathPart: gestion
+
+  # /api/gestion/{proxy+}
+  ResourceGestionProxy:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !Ref ResourceGestion
+      PathPart: "{proxy+}"
+
   # /v1
   ResourceV1:
     Type: AWS::ApiGateway::Resource
@@ -209,7 +272,7 @@ Resources:
   #  de repetir los cuatro recursos de arriba. Lo importante del versionado no
   #  es la URL bonita: es poder enrutar /v1 y /v2 a integraciones DISTINTAS sin
   #  romper a los clientes existentes. Con este proxy, el dia que haya un /v2
-  #  basta con otro recurso apuntando a otra Lambda.
+  #  basta con otro recurso apuntando a otro destino.
   ResourceV1Proxy:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -217,13 +280,26 @@ Resources:
       ParentId: !Ref ResourceV1
       PathPart: "{proxy+}"
 
+  # ---------------------------------------------------------------------------
+  #  EL VPC LINK. API Gateway vive fuera de la VPC; esto le da una entrada
+  #  privada (PrivateLink) hasta el NLB interno. Sin el, la unica forma de
+  #  llegar a la EC2 seria darle un puerto publico.
+  # ---------------------------------------------------------------------------
+  VpcLink:
+    Type: AWS::ApiGateway::VpcLink
+    Properties:
+      Name: !Sub "${ProjectName}-vpc-link"
+      Description: API Gateway -> NLB interno -> EC2 de la aplicacion
+      TargetArns:
+        - !Ref NlbArn
+
   # ===========================================================================
   #  EL AUTHORIZER
   # ===========================================================================
 
   # De tipo COGNITO_USER_POOLS: API Gateway descarga el JWKS del pool y valida
-  # firma, emisor y expiracion por su cuenta, SIN invocar la Lambda (un 401 no
-  # llega a costar una invocacion).
+  # firma, emisor y expiracion por su cuenta, SIN llegar a la EC2 (un 401 no
+  # le cuesta nada al backend).
   CognitoAuthorizer:
     Type: AWS::ApiGateway::Authorizer
     Properties:
@@ -240,10 +316,12 @@ Resources:
 
   # ===========================================================================
   #  METODOS DE NEGOCIO
-  #  Los cinco comparten la misma integracion y el mismo par
-  #  (authorizer, scope). Se declaran uno a uno —y no con un proxy— para que
-  #  esta plantilla documente exactamente que se expone al publico: cualquier
-  #  ruta no listada aqui ni siquiera llega a la Lambda.
+  #  Todos comparten el mismo destino (el NLB, por el VPC Link) y el mismo
+  #  par (authorizer, scopes). Las rutas del estudiante se declaran una a una
+  #  —y no con un proxy— para que esta plantilla documente exactamente que se
+  #  expone: cualquier ruta no listada aqui ni siquiera llega a la EC2.
+  #  IntegrationHttpMethod es el MISMO que el del cliente: con HTTP_PROXY se
+  #  reenvia la peticion tal cual.
   # ===========================================================================
 
   # GET /api/libros -> LibroController.buscar()
@@ -255,17 +333,17 @@ Resources:
       HttpMethod: GET
       AuthorizationType: COGNITO_USER_POOLS
       AuthorizerId: !Ref CognitoAuthorizer
-      # ESTA linea es la que convierte "token valido" en "token autorizado".
       AuthorizationScopes:
         - !Ref RequiredScope
+        - !Ref ManagementScope
       Integration:
-        Type: AWS_PROXY
-        # SIEMPRE POST: es el metodo con el que se invoca a una Lambda, no
-        # tiene relacion con el metodo HTTP que ve el cliente.
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionArn}/invocations"
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/libros"
 
-  # GET /api/libros/{id} -> LibroController.porId() / generos()
+  # GET /api/libros/{id} -> porId(), generos() y GET /api/libros/avisame (para el gateway, "generos" y "avisame" son un {id} mas)
   MethodLibroItemGet:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -276,16 +354,65 @@ Resources:
       AuthorizerId: !Ref CognitoAuthorizer
       AuthorizationScopes:
         - !Ref RequiredScope
-      # Declarar el path parameter no es obligatorio con AWS_PROXY (el evento
-      # ya lo lleva), pero documenta el contrato y permite validarlo.
+        - !Ref ManagementScope
       RequestParameters:
         method.request.path.id: true
       Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionArn}/invocations"
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/libros/{id}"
+        RequestParameters:
+          integration.request.path.id: method.request.path.id
 
-  # GET /api/solicitudes -> SolicitudController.listar()
+  # POST /api/libros/{id}/avisame -> AvisameController.suscribir()
+  MethodAvisamePost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceLibroAvisame
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      AuthorizationScopes:
+        - !Ref RequiredScope
+        - !Ref ManagementScope
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: POST
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/libros/{id}/avisame"
+        RequestParameters:
+          integration.request.path.id: method.request.path.id
+
+  # DELETE /api/libros/{id}/avisame -> AvisameController.cancelar()
+  MethodAvisameDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceLibroAvisame
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      AuthorizationScopes:
+        - !Ref RequiredScope
+        - !Ref ManagementScope
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: DELETE
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/libros/{id}/avisame"
+        RequestParameters:
+          integration.request.path.id: method.request.path.id
+
+  # GET /api/solicitudes -> SolicitudController.listar() (solo las propias)
   MethodSolicitudesGet:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -296,15 +423,15 @@ Resources:
       AuthorizerId: !Ref CognitoAuthorizer
       AuthorizationScopes:
         - !Ref RequiredScope
+        - !Ref ManagementScope
       Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionArn}/invocations"
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/solicitudes"
 
   # POST /api/solicitudes -> SolicitudController.crear()
-  #  El unico metodo que escribe. Es tambien el que mejor demuestra la cadena
-  #  completa: el token pasa el authorizer, pasa Spring Security y ADEMAS se
-  #  lee dentro del controlador para saber quien solicita.
   MethodSolicitudesPost:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -315,10 +442,13 @@ Resources:
       AuthorizerId: !Ref CognitoAuthorizer
       AuthorizationScopes:
         - !Ref RequiredScope
+        - !Ref ManagementScope
       Integration:
-        Type: AWS_PROXY
+        Type: HTTP_PROXY
         IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionArn}/invocations"
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/solicitudes"
 
   # GET /api/solicitudes/{id} -> SolicitudController.porId()
   MethodSolicitudItemGet:
@@ -331,12 +461,99 @@ Resources:
       AuthorizerId: !Ref CognitoAuthorizer
       AuthorizationScopes:
         - !Ref RequiredScope
+        - !Ref ManagementScope
       RequestParameters:
         method.request.path.id: true
       Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionArn}/invocations"
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/solicitudes/{id}"
+        RequestParameters:
+          integration.request.path.id: method.request.path.id
+
+  # GET /api/avisos/correo -> ContactoController.estado()
+  MethodCorreoGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceAvisosCorreo
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      AuthorizationScopes:
+        - !Ref RequiredScope
+        - !Ref ManagementScope
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/avisos/correo"
+
+  # PUT /api/avisos/correo -> ContactoController.activar() (el consentimiento)
+  MethodCorreoPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceAvisosCorreo
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      AuthorizationScopes:
+        - !Ref RequiredScope
+        - !Ref ManagementScope
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: PUT
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/avisos/correo"
+
+  # DELETE /api/avisos/correo -> ContactoController.desactivar()
+  MethodCorreoDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceAvisosCorreo
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      AuthorizationScopes:
+        - !Ref RequiredScope
+        - !Ref ManagementScope
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: DELETE
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/avisos/correo"
+
+  # ANY /api/gestion/{proxy+} -> GestionSolicitudController, GestionStockController, BitacoraController.
+  #  Un proxy y no un recurso por ruta: aqui el gateway no puede aportar
+  #  nada, porque el rol EMPLEADO solo lo conoce Spring.
+  MethodGestionAny:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceGestionProxy
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      AuthorizationScopes:
+        - !Ref RequiredScope
+        - !Ref ManagementScope
+      RequestParameters:
+        method.request.path.proxy: true
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/api/gestion/{proxy}"
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
 
   # ANY /v1/{proxy+} -> las mismas rutas, bajo el prefijo versionado.
   MethodV1Any:
@@ -349,12 +566,17 @@ Resources:
       AuthorizerId: !Ref CognitoAuthorizer
       AuthorizationScopes:
         - !Ref RequiredScope
+        - !Ref ManagementScope
       RequestParameters:
         method.request.path.proxy: true
       Integration:
-        Type: AWS_PROXY
-        IntegrationHttpMethod: POST
-        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunctionArn}/invocations"
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        ConnectionType: VPC_LINK
+        ConnectionId: !Ref VpcLink
+        Uri: !Sub "http://${NlbDnsName}/v1/{proxy}"
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
 
   # ===========================================================================
   #  CORS, PIEZA 1: el preflight.
@@ -364,7 +586,7 @@ Resources:
   #  puedo". Ese OPTIONS:
   #    * NO lleva la cabecera Authorization (por especificacion), asi que
   #      AuthorizationType TIENE que ser NONE;
-  #    * no necesita llegar a la Lambda: se responde con integracion MOCK, que
+  #    * no necesita llegar a la EC2: se responde con integracion MOCK, que
   #      es un 200 fabricado por API Gateway sin backend detras.
   #
   #  Las cabeceras se declaran DOS veces: en IntegrationResponses (el valor) y
@@ -386,11 +608,9 @@ Resources:
         IntegrationResponses:
           - StatusCode: "200"
             ResponseParameters:
-              # Comillas SIMPLES dentro de las dobles: API Gateway espera una
-              # expresion, y asi se escribe una cadena literal.
               method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
               method.response.header.Access-Control-Max-Age: "'600'"
       MethodResponses:
         - StatusCode: "200"
@@ -417,12 +637,40 @@ Resources:
               method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
               method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
       MethodResponses:
         - StatusCode: "200"
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
+
+  MethodAvisameOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceLibroAvisame
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
 
   MethodSolicitudesOptions:
     Type: AWS::ApiGateway::Method
@@ -441,12 +689,14 @@ Resources:
               method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
               method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
       MethodResponses:
         - StatusCode: "200"
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
 
   MethodSolicitudItemOptions:
     Type: AWS::ApiGateway::Method
@@ -465,12 +715,66 @@ Resources:
               method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
               method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
       MethodResponses:
         - StatusCode: "200"
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
+
+  MethodCorreoOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceAvisosCorreo
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
+
+  MethodGestionOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ResourceGestionProxy
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: "200"
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
+      MethodResponses:
+        - StatusCode: "200"
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
 
   MethodV1ProxyOptions:
     Type: AWS::ApiGateway::Method
@@ -488,18 +792,20 @@ Resources:
             ResponseParameters:
               method.response.header.Access-Control-Allow-Origin: !Sub "'${AllowOrigin}'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Max-Age: "'600'"
       MethodResponses:
         - StatusCode: "200"
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: true
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Max-Age: true
 
   # ===========================================================================
   #  CORS, PIEZA 3: los errores del propio gateway.
   #
-  #  Un 401 del authorizer NUNCA llega a la Lambda, asi que nadie le pone las
+  #  Un 401 del authorizer NUNCA llega a la EC2, asi que nadie le pone las
   #  cabeceras de CORS... y el navegador, al no poder leer la respuesta, la
   #  reporta como "status 0 / blocked by CORS". El alumno entonces persigue un
   #  problema de CORS que no existe, cuando el problema real era el token.
@@ -541,14 +847,23 @@ Resources:
     DependsOn:
       - MethodLibrosGet
       - MethodLibroItemGet
+      - MethodAvisamePost
+      - MethodAvisameDelete
       - MethodSolicitudesGet
       - MethodSolicitudesPost
       - MethodSolicitudItemGet
+      - MethodCorreoGet
+      - MethodCorreoPut
+      - MethodCorreoDelete
+      - MethodGestionAny
       - MethodV1Any
       - MethodLibrosOptions
       - MethodLibroItemOptions
+      - MethodAvisameOptions
       - MethodSolicitudesOptions
       - MethodSolicitudItemOptions
+      - MethodCorreoOptions
+      - MethodGestionOptions
       - MethodV1ProxyOptions
     Properties:
       RestApiId: !Ref RestApi
@@ -566,19 +881,7 @@ Resources:
       # El logging de ejecucion (MethodSettings con LoggingLevel) exige que la
       # cuenta tenga configurado un rol de CloudWatch a nivel de API Gateway,
       # cosa que en el Learner Lab no siempre se puede crear. Se omite a
-      # proposito: los logs que importan son los de la Lambda.
-
-  # Sin este permiso, API Gateway no puede invocar la funcion y TODAS las
-  # rutas responden un 500 poco descriptivo. Vive en este stack, y no en
-  # backend.yaml, para que el backend no necesite saber nada de la API.
-  InvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref LambdaFunctionName
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
-      # Cualquier metodo y cualquier stage de ESTA api, y de ninguna otra.
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*"
+      # proposito: los logs que importan son los del backend.
 
 Outputs:
 
@@ -589,7 +892,8 @@ Outputs:
   ApiEndpoint:
     Description: >-
       URL base publica, ya con el stage. Los endpoints completos son
-      <ApiEndpoint>/api/libros y <ApiEndpoint>/api/solicitudes
+      <ApiEndpoint>/api/libros, <ApiEndpoint>/api/solicitudes,
+      <ApiEndpoint>/api/avisos/correo y <ApiEndpoint>/api/gestion/...
     Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
 
   AuthorizerId:

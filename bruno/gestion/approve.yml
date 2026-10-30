@@ -1,0 +1,61 @@
+info:
+  name: approve
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{BASE_URL}}/api/gestion/solicitudes/:id/aprobacion"
+  params:
+    - name: id
+      value: "{{solicitudCreada}}"
+      type: path
+      description: >-
+        Solicitud a aprobar. Por defecto, la que dejo solicitudes/create
+        (variable de runtime, no de entorno).
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_GESTION"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("queda APROBADA, con quien y hasta cuando", function () {
+            const cuerpo = res.getBody();
+            expect(cuerpo.estado).to.equal("APROBADA");
+            expect(cuerpo.resueltaPor).to.be.a("string").and.not.equal("");
+            expect(cuerpo.venceEn).to.be.a("string");
+          });
+        }
+
+docs: |
+  # Aprobar una solicitud
+
+  `POST /api/gestion/solicitudes/{id}/aprobacion`, sin cuerpo.
+
+  En una transaccion: `RECIBIDA -> APROBADA`, descuenta los ejemplares de
+  cada libro con un UPDATE condicional (`... WHERE ejemplares >= n`) y deja el
+  evento `solicitud.aprobada` en la bandeja de salida. Si un libro ya no
+  alcanza, se deshace TODO. El estudiante recibe el correo despues.
+
+  ## Parametros
+
+  | Nombre | Tipo | Obligatorio | Descripcion |
+  |---|---|---|---|
+  | `id` | path | si | Solicitud, formato `SOL-0001` |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | aprobada | entorno `aws-backoffice`, recien creada |
+  | 404 | no existe | `id = SOL-9999` |
+  | 409 | ya no esta RECIBIDA, o ya no queda stock | ejecutarla dos veces |
+  | 403 | el token no es de empleado | entorno `aws` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |

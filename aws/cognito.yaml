@@ -6,13 +6,22 @@ AWSTemplateFormatVersion: "2010-09-09"
 #
 #  QUE HACE
 #    * UserPool       -> el directorio de usuarios (email + password).
-#    * ResourceServer -> declara la API como recurso protegido y define el
-#                        CUSTOM SCOPE "biblioteca-api/acceso".
+#    * ResourceServer -> declara la API como recurso protegido y define los
+#                        CUSTOM SCOPES "biblioteca-api/acceso" (estudiantes y
+#                        empleados) y "biblioteca-api/gestion" (backoffice).
+#    * EmpleadosGroup -> el grupo de las PERSONAS que gestionan prestamos y
+#                        stock. Cognito pone los grupos de cada usuario en el
+#                        claim "cognito:groups" de su access token, y Spring
+#                        deduce de ahi el rol EMPLEADO.
 #    * SpaClient      -> la app Angular. Cliente PUBLICO (sin secreto) que usa
 #                        Authorization Code + PKCE contra la Hosted UI.
 #    * M2mClient      -> cliente maquina a maquina (con secreto) que obtiene un
 #                        token por client_credentials, sin navegador. Es el que
-#                        usa la coleccion de Bruno.
+#                        usa la coleccion de Bruno para el estudiante.
+#    * BackofficeClient -> otro cliente M2M, con el scope "gestion": el sistema
+#                        de inventario. Para Spring es un EMPLEADO, y es lo que
+#                        permite probar la gestion desde Bruno (un token de
+#                        PERSONA con custom scope solo sale del navegador).
 #    * UserPoolDomain -> la Hosted UI: la pantalla de login, la de REGISTRO y
 #                        los endpoints /oauth2/authorize, /signup y
 #                        /oauth2/token.
@@ -32,14 +41,23 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    puede distinguir "autenticado" de "anonimo". El scope introduce la segunda
 #    pregunta: "autenticado, si, pero ¿autorizado a esto?". Con el detalle
 #    medido: a traves de API Gateway ese caso tambien responde 401, porque el
-#    authorizer no separa las dos preguntas; el 403 lo emite Spring al invocar
-#    la Lambda directamente (ver README.md §4).
+#    authorizer no separa las dos preguntas; el 403 lo emite Spring (se ve en
+#    /api/gestion con un token que no es de empleado; README.md §4).
 #
 #    Consecuencia tecnica, y es la buena: cuando api.yaml exige
 #    AuthorizationScopes, API Gateway pide que el token traiga el claim "scope".
 #    Un ID TOKEN no lo lleva NUNCA (no existe en OIDC), asi que el id_token deja
 #    de servir para llamar a la API sin que haya que configurar nada mas. El
 #    consejo "usa el access token" pasa de recomendacion a restriccion medible.
+#
+#  >>> RBAC: DOS FORMAS DE SER EMPLEADO, UNA REGLA <<<
+#    API Gateway solo pregunta "¿trae alguno de los scopes de la API?". Quien
+#    puede gestionar lo decide Spring (SecurityConfig):
+#      * una persona del grupo "empleados" con el scope de acceso, o
+#      * un cliente con el scope "gestion" (BackofficeClient).
+#    Los scopes se asignan por APP CLIENT, no por usuario: por eso el rol de
+#    una persona no puede ser un scope, y es un grupo. Desviacion declarada en
+#    README §7: en Bruno, el backoffice hace de empleado.
 #
 #  >>> LAS DOS FUENTES DE TOKEN, Y POR QUE SON DOS <<<
 #    * Navegador (SpaClient, code+PKCE)  -> access_token CON el custom scope.
@@ -75,9 +93,12 @@ AWSTemplateFormatVersion: "2010-09-09"
 #
 #  ENTREGA (Outputs)
 #    UserPoolArn    -> api.yaml (el authorizer)
-#    UserPoolId     -> backend.yaml (issuer-uri), bruno-env.sh, usuario demo
+#    UserPoolId     -> backend.yaml (email de los avisos), bruno-env.sh, usuarios demo
 #    SpaClientId    -> el frontend (Amplify) y bruno-env.sh
 #    M2mClientId    -> bruno-env.sh
+#    BackofficeClientId -> bruno-env.sh
+#    ScopeGestion   -> api.yaml, backend.yaml
+#    GrupoEmpleados -> bootstrap.sh (mete al empleado de demostracion)
 #    IssuerUrl      -> backend.yaml y api.yaml
 #    ScopeCompleto  -> api.yaml, backend.yaml, el frontend y Bruno
 #    HostedUiDomain -> el frontend y bruno-env.sh
@@ -93,8 +114,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 # ==============================================================================
 
 Description: >-
-  biblioteca - Cognito User Pool con Resource Server, custom scope, cliente SPA
-  (PKCE) y cliente M2M (client_credentials). Sin dependencias.
+  biblioteca - Cognito User Pool con Resource Server, dos custom scopes, grupo
+  de empleados, cliente SPA (PKCE) y dos clientes M2M (client_credentials).
+  Sin dependencias.
 
 Parameters:
 
@@ -117,9 +139,23 @@ Parameters:
     Type: String
     Default: acceso
     Description: >-
-      Nombre del custom scope. Se llama "acceso" y no "libros-read" porque
-      autoriza tambien el POST de solicitudes: un unico scope para toda la API.
-      Partirlo en lectura y escritura es la evolucion natural (ver README).
+      Nombre del custom scope de los usuarios. Se llama "acceso" y no
+      "libros-read" porque autoriza tambien el POST de solicitudes. La gestion
+      de una PERSONA no va por scope sino por grupo (ver la cabecera).
+
+  ManagementScopeName:
+    Type: String
+    Default: gestion
+    Description: >-
+      Custom scope del cliente M2M backoffice. Quien lo trae es EMPLEADO para
+      Spring: aprueba, rechaza, registra devoluciones y carga stock.
+
+  EmployeesGroupName:
+    Type: String
+    Default: empleados
+    Description: >-
+      Grupo de Cognito de los empleados. Debe coincidir con
+      biblioteca.grupo-empleados de back/src/main/resources/application.properties.
 
   CallbackUrls:
     Type: CommaDelimitedList
@@ -236,6 +272,20 @@ Resources:
       Scopes:
         - ScopeName: !Ref ScopeName
           ScopeDescription: Acceso al catalogo y a las solicitudes de prestamo
+        - ScopeName: !Ref ManagementScopeName
+          ScopeDescription: Gestion de prestamos y stock por un sistema (backoffice)
+
+  # ---------------------------------------------------------------------------
+  #  EL GRUPO DE EMPLEADOS. Sin rol IAM (RoleArn): aqui el grupo no da
+  #  permisos en AWS, solo aparece en el token. bootstrap.sh mete en el al
+  #  empleado de demostracion; un administrador real lo haria desde la consola.
+  # ---------------------------------------------------------------------------
+  EmpleadosGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: !Ref EmployeesGroupName
+      Description: Personal de biblioteca. Aprueban, rechazan, registran devoluciones y cargan stock.
 
   # ---------------------------------------------------------------------------
   #  CLIENTE SPA: el que usa Angular desde el navegador.
@@ -285,7 +335,7 @@ Resources:
         # (admin-initiate-auth), nunca desde el browser, asi que no debilita el
         # login del frontend. Existe para que bruno-env.sh pueda fabricar el
         # caso "token valido SIN el custom scope": 401 a traves del gateway, y
-        # 403 por Spring al invocar la Lambda directamente.
+        # 403 por Spring si se llama a la EC2 sin pasar por el (VPN).
         - ALLOW_ADMIN_USER_PASSWORD_AUTH
 
       # No revela si un email existe cuando el login falla.
@@ -333,6 +383,26 @@ Resources:
         AccessToken: minutes
 
   # ---------------------------------------------------------------------------
+  #  CLIENTE BACKOFFICE: el "sistema de inventario". Igual que el M2M, pero con
+  #  el scope de gestion y SIN el de acceso: no es un estudiante.
+  # ---------------------------------------------------------------------------
+  BackofficeClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: ResourceServer
+    Properties:
+      ClientName: !Sub "${ProjectName}-backoffice"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - !Sub "${ResourceServerId}/${ManagementScopeName}"
+      AccessTokenValidity: !Ref DuracionTokenMinutos
+      TokenValidityUnits:
+        AccessToken: minutes
+
+  # ---------------------------------------------------------------------------
   #  La Hosted UI. Sin dominio no hay pantalla de login ni endpoints OAuth2.
   #  El AccountId en el prefijo evita chocar con el dominio de otro alumno: es
   #  unico en toda la region, no solo en tu cuenta.
@@ -363,6 +433,18 @@ Outputs:
       un Output es visible para cualquiera que pueda hacer describe-stacks.
       bruno-env.sh lo obtiene con describe-user-pool-client.
     Value: !Ref M2mClient
+
+  BackofficeClientId:
+    Description: Cliente M2M con el scope de gestion. Su secreto, igual que el del M2M, no se publica.
+    Value: !Ref BackofficeClient
+
+  ScopeGestion:
+    Description: Scope del backoffice. Lo aceptan api.yaml y Spring (rol EMPLEADO).
+    Value: !Sub "${ResourceServerId}/${ManagementScopeName}"
+
+  GrupoEmpleados:
+    Description: Grupo de Cognito de los empleados.
+    Value: !Ref EmpleadosGroup
 
   IssuerUrl:
     Description: >-

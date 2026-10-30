@@ -1,0 +1,53 @@
+info:
+  name: waiting
+  type: http
+  seq: 3
+
+http:
+  method: GET
+  url: "{{BASE_URL}}/api/libros/avisame"
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_LECTURA"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("devuelve una lista de ids de libro", function () {
+            const cuerpo = res.getBody();
+            expect(cuerpo).to.be.an("array");
+            cuerpo.forEach((id) => expect(id).to.match(/^L-\d{3}$/));
+          });
+        }
+
+docs: |
+  # Libros que espero
+
+  `GET /api/libros/avisame`. Los ids de los libros a los que el portador del
+  token esta suscrito con "avisame cuando vuelva". El frontend lo usa para
+  pintar *Dejar de avisarme* en vez de *Avisame*.
+
+  Para API Gateway, `avisame` es un `{id}` mas de `/api/libros/{id}`; es Spring
+  quien sabe que ese literal lo atiende otro controlador.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | credencial con alguno de los scopes | entornos `aws` y `aws-backoffice` |
+  | 401 | token invalido, id token o sin scope | entornos `aws-token-invalido`, `aws-id-token`, `aws-usuario-sin-scope` |
+
+examples:
+  - name: 200 esperando un libro
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: '["L-005"]'

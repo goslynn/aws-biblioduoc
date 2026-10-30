@@ -15,7 +15,32 @@
 #
 #  Nunca se usa --profile ni AWS_PROFILE, y ningun script llama a "awsacademy":
 #  se asume que "aws" ya funciona. Si no funciona, se avisa y se para.
+#
+#  ARCHIVO aws/.env (opcional, en .gitignore; plantilla: aws/.env.example)
+#    Cualquiera de las variables de los scripts (SMTP_*, DEMO_USER, ...) se
+#    puede dejar ahi en vez de escribirla en la terminal. Lo que se pase en la
+#    terminal GANA sobre el archivo. Se lee linea a linea como VARIABLE=valor;
+#    no se ejecuta como script.
 # ==============================================================================
+
+carga_env() {
+  local archivo="$1" linea clave valor
+  [ -f "$archivo" ] || return 0
+  while IFS= read -r linea || [ -n "$linea" ]; do
+    linea="${linea%$'\r'}"
+    [[ "$linea" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
+    clave="${BASH_REMATCH[2]}"
+    valor="${BASH_REMATCH[3]}"
+    # Comillas envolventes opcionales: '...' o "..." (sin interpretar nada dentro).
+    if [[ "$valor" =~ ^\'(.*)\'$ || "$valor" =~ ^\"(.*)\"$ ]]; then
+      valor="${BASH_REMATCH[1]}"
+    fi
+    # Ya definida en el entorno (terminal o script padre): no se pisa.
+    [ -n "${!clave+x}" ] && continue
+    export "$clave=$valor"
+  done < "$archivo"
+}
+carga_env "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.env"
 
 PROJECT_NAME="${PROJECT_NAME:-biblioteca}"
 AWS_REGION="${AWS_REGION:-us-east-1}"

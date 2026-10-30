@@ -1,0 +1,75 @@
+info:
+  name: subscribe
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{BASE_URL}}/api/libros/:id/avisame"
+  params:
+    - name: id
+      value: "L-005"
+      type: path
+      description: >-
+        Libro AGOTADO. L-005 (Building Microservices) tiene 0 ejemplares en el
+        seed. Con L-001, que tiene stock, se ve el 409.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        // Con una credencial valida, suscribirse es 201 (tambien si ya lo
+        // estaba: es idempotente). Sin credencial, el mismo 401 de siempre.
+        const lectura = Number(bru.getEnvVar("ESPERADO_LECTURA"));
+        const esperado = lectura === 200 ? 201 : lectura;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Avisame cuando vuelva
+
+  `POST /api/libros/{id}/avisame`, sin cuerpo. Suscribe al portador del token a
+  un libro agotado. Cuando una carga de stock (`gestion/stock`) o una
+  devolucion (`gestion/return`) lo deja con ejemplares, se publica
+  `stock.repuesto` en RabbitMQ y cada suscrito con avisos activos recibe un
+  correo. Despues, su suscripcion se cierra.
+
+  ## Parametros
+
+  | Nombre | Tipo | Obligatorio | Descripcion |
+  |---|---|---|---|
+  | `id` | path | si | Libro, formato `L-001`; debe tener 0 ejemplares |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 201 | suscrito (o ya lo estaba) | entorno `aws`, `id = L-005` |
+  | 404 | el libro no existe | `id = L-999` |
+  | 409 | el libro TIENE ejemplares: se pide directamente | `id = L-001` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+  Un cliente M2M puede suscribirse, pero nunca recibe correo: no es un usuario
+  de Cognito y no puede activar avisos.
+
+examples:
+  - name: 201 suscrito
+    response:
+      status: 201
+      statusText: Created
+  - name: 409 el libro tiene stock
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "status": 409,
+            "error": "Conflict",
+            "message": "Clean Code tiene ejemplares disponibles: pidelo directamente",
+            "path": "/api/libros/L-001/avisame"
+          }

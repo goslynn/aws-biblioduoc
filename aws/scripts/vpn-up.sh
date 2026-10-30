@@ -74,6 +74,8 @@ VPC_CIDR="$(output_de "$STACK_NETWORK" VpcCidr)"
 [ -n "$VPC_CIDR" ] || VPC_CIDR="$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" \
   --region "$AWS_REGION" --query 'Vpcs[0].CidrBlock' --output text)"
 DB_SG="$(output_obligatorio "$STACK_NETWORK" DatabaseSecurityGroupId)"
+PUBLIC_SUBNET="$(output_obligatorio "$STACK_NETWORK" PublicSubnetId)"
+APP_SG="$(output_obligatorio "$STACK_NETWORK" AppSecurityGroupId)"
 DB_ENDPOINT="$(output_obligatorio "$STACK_DATABASE" DbEndpoint)"
 DB_PORT="$(output_obligatorio "$STACK_DATABASE" DbPort)"
 DB_NAME="$(output_obligatorio "$STACK_DATABASE" DbName)"
@@ -124,7 +126,9 @@ despliega_stack vpn.yaml "$STACK_VPN" \
   "ProjectName=${PROJECT_NAME}" \
   "VpcId=${VPC_ID}" \
   "VpcCidr=${VPC_CIDR}" \
+  "PublicSubnetId=${PUBLIC_SUBNET}" \
   "DatabaseSecurityGroupId=${DB_SG}" \
+  "AppSecurityGroupId=${APP_SG}" \
   "DbPort=${DB_PORT}" \
   "ClientPublicKey=${CLIENTE_PUB}" \
   "ClientCidr=${VPN_ORIGEN}" \
@@ -218,6 +222,23 @@ psql "postgresql://${BD_USUARIO}:${BD_CLAVE}@${DB_ENDPOINT}:${DB_PORT}/${DB_NAME
 EOF
 )
 
+# El panel de RabbitMQ, si el backend esta desplegado: misma VPN, otro puerto.
+PANEL=""
+APP_IP="$(output_de "$STACK_BACKEND" AppPrivateIp)"
+RABBIT_SECRET="$(output_de "$STACK_BACKEND" RabbitSecretArn)"
+if [ -n "$APP_IP" ] && [ -n "$RABBIT_SECRET" ]; then
+  RABBIT_JSON="$(aws secretsmanager get-secret-value --secret-id "$RABBIT_SECRET" \
+    --region "$AWS_REGION" --query SecretString --output text)" || RABBIT_JSON=""
+  if [ -n "$RABBIT_JSON" ]; then
+    PANEL="
+    RabbitMQ:    http://${APP_IP}:15672
+    Usuario:     $(printf '%s' "$RABBIT_JSON" | jq -r .username)
+    Contrasena:  $(printf '%s' "$RABBIT_JSON" | jq -r .password)
+                 (colas, DLQ correo.fallidos / eventos.fallidos, mensajes)
+"
+  fi
+fi
+
 log "Tunel levantado"
 cat <<EOF
 
@@ -225,7 +246,7 @@ cat <<EOF
     Usuario:     ${BD_USUARIO}
     TLS:         verify-full con ${VPN_DIR}/rds-ca.pem
     Conexion:    ${VPN_DIR}/conexion.txt   (URL para DataGrip y comando psql)
-
+${PANEL}
     El tunel solo enruta ${VPC_CIDR}; el resto de tu trafico no cambia.
     Al terminar:  ./aws/scripts/vpn-down.sh   (el servidor cuesta por hora)
 

@@ -1,0 +1,61 @@
+info:
+  name: list
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{BASE_URL}}/api/gestion/solicitudes"
+  params:
+    - name: estado
+      value: "RECIBIDA"
+      type: query
+      disabled: true
+      description: Filtra por estado -- RECIBIDA, APROBADA, RECHAZADA o DEVUELTA.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_GESTION"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("si hay filtro de estado, se respeta", function () {
+            const filtro = /estado=([A-Z]+)/.exec(req.getUrl());
+            if (filtro) {
+              expect(res.getBody().every((s) => s.estado === filtro[1])).to.equal(true);
+            }
+          });
+        }
+
+docs: |
+  # Bandeja del empleado
+
+  `GET /api/gestion/solicitudes?estado=`. Todas las solicitudes, de la mas
+  reciente a la mas antigua, o solo las de un estado.
+
+  ## Parametros
+
+  | Nombre | Tipo | Obligatorio | Descripcion |
+  |---|---|---|---|
+  | `estado` | query | no | `RECIBIDA`, `APROBADA`, `RECHAZADA` o `DEVUELTA` |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | empleado | entorno `aws-backoffice` |
+  | 400 | estado inexistente | `estado = PERDIDA` |
+  | 403 | token valido de un NO empleado: lo da Spring | entorno `aws` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+examples:
+  - name: 403 no es empleado
+    response:
+      status: 403
+      statusText: Forbidden

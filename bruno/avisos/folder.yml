@@ -1,0 +1,37 @@
+info:
+  name: avisos
+  type: folder
+  seq: 3
+  description: Activar y desactivar los avisos por correo (el consentimiento)
+
+request:
+  auth: inherit
+
+docs: |
+  # avisos
+
+  Los avisos por correo de la biblioteca: comprobante al pedir, resolucion
+  del empleado, recordatorio antes del vencimiento, devolucion registrada y
+  "volvio el libro que esperabas".
+
+  ## Como viaja un aviso
+
+  1. La accion (crear, aprobar, cargar stock...) guarda su cambio y, en la
+     MISMA transaccion, un evento en la bandeja de salida (outbox).
+  2. Un proceso aparte lo publica en el exchange topic `biblioteca.eventos`.
+  3. Un consumidor lo convierte en un correo y lo deja en el exchange direct
+     `correo`, carril `transaccional` o `masivo`.
+  4. `EnviadorSmtp` lo manda al proveedor. Si falla, reintenta con espera
+     (`correo.espera`, TTL + DLX) y al tercer fallo lo aparta en
+     `correo.fallidos` (DLQ).
+
+  La respuesta HTTP **no espera** al correo: por eso un SMTP caido nunca
+  convierte una solicitud en un error.
+
+  ## Consentimiento
+
+  Sin activar los avisos no sale ningun correo. La direccion **no** la manda
+  el cliente: el backend la lee de Cognito (email verificado) por el `sub` del
+  token. Por eso con un cliente M2M (`aws`, `aws-backoffice`) activar
+  responde **409**: no hay un usuario de Cognito detras. El caso feliz se ve
+  en el navegador.

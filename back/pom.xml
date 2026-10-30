@@ -18,14 +18,29 @@
   <description>API interna de la Biblioteca Duoc: catalogo de libros y solicitudes de prestamo</description>
 
   <properties>
-    <!-- 21 para que coincida con el runtime "java21" de la Lambda (aws/backend.yaml). -->
+    <!-- 21 para que coincida con la imagen amazoncorretto:21 de la EC2 (aws/backend.yaml). -->
     <java.version>21</java.version>
+    <aws-sdk.version>2.57.5</aws-sdk.version>
+    <greenmail.version>2.1.15</greenmail.version>
   </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Versiones alineadas de todos los clientes del AWS SDK v2. -->
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${aws-sdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <dependencies>
     <!-- Spring MVC + Tomcat embebido. En Spring Boot 4 el starter se llama
-         "webmvc"; en Boot 3 era "web". Es lo unico que necesita el Lambda Web
-         Adapter: un servidor HTTP escuchando en un puerto. -->
+         "webmvc"; en Boot 3 era "web". El NLB de aws/backend.yaml le reenvia
+         el trafico de API Gateway al puerto 8080. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-webmvc</artifactId>
@@ -39,10 +54,10 @@
     </dependency>
 
     <!-- SEGUNDA VALIDACION DEL JWT (Defense in Depth).
-         API Gateway ya valida el token antes de invocar la Lambda. Estas dos
+         API Gateway ya valida el token antes de reenviar la peticion. Estas dos
          dependencias hacen que Spring lo vuelva a validar por su cuenta, de
-         modo que una llamada DIRECTA a la funcion (por su Function URL, sin
-         pasar por el gateway) tambien sea rechazada. Ver config/SecurityConfig. -->
+         modo que una llamada que llegue a la EC2 por otro camino (la VPN, por
+         ejemplo) tambien sea rechazada. Ver config/SecurityConfig. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security</artifactId>
@@ -53,7 +68,7 @@
     </dependency>
 
     <!-- PERSISTENCIA. JDBC a secas (JdbcClient), no JPA: Hibernate anade
-         segundos al arranque en frio de la Lambda y aqui no aporta nada, porque
+         segundos al arranque y aqui no aporta nada, porque
          el modelo ya son records inmutables y las consultas caben en SQL. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -66,7 +81,7 @@
     </dependency>
 
     <!-- Flyway crea el esquema, el rol de la aplicacion y SIEMBRA el catalogo
-         (src/main/resources/db/migration). Corre dentro de la propia Lambda al
+         (src/main/resources/db/migration). Corre dentro de la propia aplicacion al
          arrancar: la base es privada y no hay otra maquina en su red. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -75,6 +90,27 @@
     <dependency>
       <groupId>org.flywaydb</groupId>
       <artifactId>flyway-database-postgresql</artifactId>
+    </dependency>
+
+    <!-- MENSAJERIA. Cliente AMQP de RabbitMQ (RabbitTemplate, @RabbitListener).
+         El broker corre en la misma EC2 que la aplicacion. Ver avisos/. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-amqp</artifactId>
+    </dependency>
+
+    <!-- Envio de correo por SMTP (JavaMailSender). El proveedor se elige al
+         desplegar: host, puerto, usuario y contrasena llegan por variables. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>
+
+    <!-- Para leer el email VERIFICADO de un usuario desde Cognito al activar
+         los avisos. El correo nunca lo escribe el usuario. -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>cognitoidentityprovider</artifactId>
     </dependency>
 
     <dependency>
@@ -94,6 +130,24 @@
       <artifactId>testcontainers-postgresql</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Un RabbitMQ real en Docker, igual que el Postgres. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-rabbitmq</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Servidor SMTP en memoria: recibe los correos de los tests. -->
+    <dependency>
+      <groupId>com.icegreen</groupId>
+      <artifactId>greenmail</artifactId>
+      <version>${greenmail.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.awaitility</groupId>
+      <artifactId>awaitility</artifactId>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.springframework.security</groupId>
       <artifactId>spring-security-test</artifactId>
@@ -104,7 +158,7 @@
   <build>
     <plugins>
       <!-- Genera el "fat jar" ejecutable: el MISMO artefacto que corre con
-           "java -jar" en local y dentro de la Lambda, sin cambiar una linea. -->
+           "java -jar" en cualquier maquina y dentro del contenedor de la EC2. -->
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>

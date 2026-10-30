@@ -30,5 +30,7 @@ bruno/.env
 
 # ---- Local / temporal ----
 aws/.local/
+# Variables de los scripts (SMTP_PASSWORD incluida). Plantilla: aws/.env.example
+aws/.env
 *.log
 .DS_Store

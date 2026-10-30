@@ -1,0 +1,69 @@
+<section class="panel">
+  <h1>Bandeja de solicitudes</h1>
+  <p class="tenue">
+    Aprobar descuenta el stock; rechazar exige un motivo; la devolucion lo repone.
+    El estudiante recibe cada resolucion por correo, si activo los avisos.
+  </p>
+
+  <form class="filtros" (ngSubmit)="cargar()">
+    <div class="campo">
+      <label for="estado">Estado</label>
+      <select id="estado" name="estado" [(ngModel)]="filtro" (change)="cargar()">
+        <option value="">Todos</option>
+        @for (e of estados; track e) {
+          <option [value]="e">{{ e }}</option>
+        }
+      </select>
+    </div>
+    <div class="campo acciones">
+      <button type="submit" class="secundario">Recargar</button>
+    </div>
+  </form>
+</section>
+
+@if (exito()) { <p class="exito">{{ exito() }}</p> }
+@if (error()) { <p class="fallo">{{ error() }}</p> }
+@if (cargando()) { <p class="tenue">Cargando…</p> }
+
+@if (!cargando() && lista().length === 0 && !error()) {
+  <p class="aviso">No hay solicitudes en este estado.</p>
+}
+
+@for (s of lista(); track s.id) {
+  <article class="panel solicitud">
+    <header>
+      <h3>{{ s.id }}</h3>
+      <span class="etiqueta" [class.si]="s.estado === 'APROBADA'" [class.no]="s.estado === 'RECHAZADA'">{{ s.estado }}</span>
+    </header>
+    <p class="tenue">
+      {{ s.dias }} dias · retiro en {{ s.sede }} · creada {{ s.creadaEn | date: 'dd-MM-yyyy HH:mm' }}
+      @if (s.venceEn) { · vence {{ s.venceEn | date: 'dd-MM-yyyy HH:mm' }} }
+    </p>
+    <p>{{ s.motivo }}</p>
+    @if (s.motivoRechazo) { <p class="tenue">Motivo del rechazo: {{ s.motivoRechazo }}</p> }
+    <ul>
+      @for (linea of s.lineas; track linea.libroId) {
+        <li>{{ linea.cantidad }} x {{ linea.titulo }} <span class="tenue">({{ linea.libroId }})</span></li>
+      }
+    </ul>
+
+    @if (s.estado === 'RECIBIDA') {
+      @if (rechazando() === s.id) {
+        <form (ngSubmit)="rechazar(s)">
+          <div class="campo campo-motivo">
+            <label [for]="'motivo-' + s.id">Motivo del rechazo (lo lee el estudiante)</label>
+            <textarea [id]="'motivo-' + s.id" name="motivo" rows="2" maxlength="300" [(ngModel)]="motivo" required></textarea>
+          </div>
+          <button type="submit" [disabled]="!motivo.trim()">Confirmar rechazo</button>
+          <button type="button" class="sutil" (click)="rechazando.set('')">Cancelar</button>
+        </form>
+      } @else {
+        <button type="button" (click)="aprobar(s)">Aprobar</button>
+        <button type="button" class="sutil" (click)="abrirRechazo(s)">Rechazar</button>
+      }
+    }
+    @if (s.estado === 'APROBADA') {
+      <button type="button" class="secundario" (click)="devolver(s)">Registrar devolucion</button>
+    }
+  </article>
+}

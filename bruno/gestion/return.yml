@@ -1,0 +1,51 @@
+info:
+  name: return
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{BASE_URL}}/api/gestion/solicitudes/:id/devolucion"
+  params:
+    - name: id
+      value: "{{solicitudCreada}}"
+      type: path
+      description: Solicitud APROBADA cuyos libros volvieron. Por defecto, la de solicitudes/create.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_GESTION"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("queda DEVUELTA", function () {
+            expect(res.getBody().estado).to.equal("DEVUELTA");
+            expect(res.getBody().devueltaEn).to.be.a("string");
+          });
+        }
+
+docs: |
+  # Registrar una devolucion
+
+  `POST /api/gestion/solicitudes/{id}/devolucion`, sin cuerpo.
+
+  `APROBADA -> DEVUELTA` y repone el stock. Si algun libro estaba en 0, se
+  publica `stock.repuesto` y quienes lo esperaban reciben su "avisame". El
+  recordatorio de vencimiento, si aun no salio, ya no saldra: el programador
+  solo mira prestamos APROBADOS, y el consumidor vuelve a comprobar el estado.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | devuelta | entorno `aws-backoffice`, despues de `approve` |
+  | 404 | no existe | `id = SOL-9999` |
+  | 409 | no estaba APROBADA | ejecutarla dos veces |
+  | 403 | el token no es de empleado | entorno `aws` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |

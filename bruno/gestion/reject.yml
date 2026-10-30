@@ -1,0 +1,66 @@
+info:
+  name: reject
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{BASE_URL}}/api/gestion/solicitudes/:id/rechazo"
+  params:
+    - name: id
+      value: "{{solicitudCreada}}"
+      type: path
+      description: Solicitud RECIBIDA a rechazar. Por defecto, la de solicitudes/create.
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      { "motivo": "Tienes un prestamo atrasado; regularizalo en el meson" }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        // En bru run llega DESPUES de approve y return: la solicitud ya esta
+        // DEVUELTA y el empleado recibe 409. Ver la documentacion.
+        const gestion = Number(bru.getEnvVar("ESPERADO_GESTION"));
+        const esperado = gestion === 200 ? 409 : gestion;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Rechazar una solicitud
+
+  `POST /api/gestion/solicitudes/{id}/rechazo` con `{"motivo": "..."}`.
+  `RECIBIDA -> RECHAZADA`; el motivo le llega al estudiante por correo.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | rechazada | `solicitudes/create` y luego esta, sola |
+  | 400 | motivo vacio | cuerpo `{"motivo": ""}` |
+  | 404 | no existe | `id = SOL-9999` |
+  | 409 | ya no esta RECIBIDA | `bru run` (llega despues de approve/return) |
+  | 403 | el token no es de empleado | entorno `aws` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+examples:
+  - name: 400 sin motivo
+    response:
+      status: 400
+      statusText: Bad Request
+      body:
+        type: json
+        data: |-
+          {
+            "status": 400,
+            "error": "Bad Request",
+            "mensaje": "La solicitud no es valida",
+            "detalles": { "motivo": "hay que explicar al estudiante por que se rechaza" }
+          }

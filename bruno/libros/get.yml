@@ -60,7 +60,7 @@ docs: |
   **Lo genera Spring**, no la infraestructura. API Gateway no puede producirlo:
   una ruta que no conoce la contesta con 403 *Missing Authentication Token*. De
   modo que recibir un 404 con cuerpo JSON demuestra que la peticion atraveso el
-  authorizer, llego a la Lambda, arranco Spring y entro en el controlador. Es la
+  authorizer, cruzo el VPC Link hasta la EC2 y entro en el controlador de Spring. Es la
   prueba mas barata de que la cadena entera funciona.
 
   ## Detalle

@@ -1,0 +1,61 @@
+info:
+  name: activate
+  type: http
+  seq: 2
+
+http:
+  method: PUT
+  url: "{{BASE_URL}}/api/avisos/correo"
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        // Las credenciales de Bruno son clientes M2M: no tienen email en
+        // Cognito, asi que la respuesta correcta es 409. El 200 se ve en el
+        // navegador, con un usuario real.
+        const lectura = Number(bru.getEnvVar("ESPERADO_LECTURA"));
+        const esperado = lectura === 200 ? 409 : lectura;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Activar los avisos por correo
+
+  `PUT /api/avisos/correo`, **sin cuerpo**. El backend busca en Cognito el
+  email verificado del `sub` del token (`cognito-idp:ListUsers`, con el perfil
+  de la EC2) y lo guarda. La primera vez publica `aviso.activado`, que manda
+  un correo de bienvenida.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | usuario de Cognito con email verificado | solo desde el navegador ("Mis solicitudes") |
+  | 409 | la credencial no es un usuario de Cognito (M2M) | entornos `aws` y `aws-backoffice` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+examples:
+  - name: 200 activados
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: '{ "activo": true, "email": "alumno@duoc.cl" }'
+  - name: 409 cliente M2M
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "status": 409,
+            "error": "Conflict",
+            "message": "Esta cuenta no tiene un email verificado en Cognito",
+            "path": "/api/avisos/correo"
+          }
