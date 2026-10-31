@@ -22,7 +22,7 @@ import jakarta.validation.constraints.Size;
  *
  * @param items   libros pedidos; al menos uno
  * @param dias    dias de prestamo, entre 1 y 30
- * @param motivo  para que se necesitan; minimo 10 caracteres para que sea util
+ * @param motivo  para que se necesitan; opcional (si no viene, queda vacio)
  * @param sede    donde se retiran
  */
 public record NuevaSolicitud(
@@ -35,10 +35,14 @@ public record NuevaSolicitud(
         @Max(value = 30, message = "el prestamo maximo es de 30 dias")
         int dias,
 
-        @NotNull(message = "el motivo es obligatorio")
-        @Size(min = 10, max = 300, message = "el motivo debe tener entre 10 y 300 caracteres")
+        @Size(max = 300, message = "el motivo no puede superar 300 caracteres")
         String motivo,
 
         @NotNull(message = "hay que indicar la sede de retiro")
         Sede sede) {
+
+    /** Sin motivo se guarda "" (la columna es NOT NULL), y nunca con espacios sobrantes. */
+    public NuevaSolicitud {
+        motivo = motivo == null ? "" : motivo.strip();
+    }
 }

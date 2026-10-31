@@ -76,9 +76,19 @@ class SolicitudControllerTest {
     }
 
     @Test
-    @DisplayName("un motivo demasiado corto responde 400 diciendo que campo fallo")
-    void motivoCorto() throws Exception {
-        String invalida = VALIDA.replace("Material de apoyo para el proyecto de titulo", "corto");
+    @DisplayName("el motivo es opcional: sin el responde 201 con motivo vacio")
+    void sinMotivo() throws Exception {
+        String sinMotivo = VALIDA.replace("\"motivo\": \"Material de apoyo para el proyecto de titulo\",", "");
+
+        mvc.perform(post("/api/solicitudes").contentType(MediaType.APPLICATION_JSON).content(sinMotivo).with(comoAlumno()))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.motivo").value(""));
+    }
+
+    @Test
+    @DisplayName("un motivo de mas de 300 caracteres responde 400 diciendo que campo fallo")
+    void motivoLargo() throws Exception {
+        String invalida = VALIDA.replace("Material de apoyo para el proyecto de titulo", "x".repeat(301));
 
         mvc.perform(post("/api/solicitudes").contentType(MediaType.APPLICATION_JSON).content(invalida).with(comoAlumno()))
                 .andExpect(status().isBadRequest())

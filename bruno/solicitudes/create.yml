@@ -106,10 +106,10 @@ docs: |
 
   Pegalos en la pestana *Body* para reproducir cada caso.
 
-  **400 — motivo corto y demasiados dias**
+  **400 — demasiados dias** (el motivo es opcional; solo falla si pasa de 300 caracteres)
   ```json
   { "items": [ { "libroId": "L-001", "cantidad": 1 } ],
-    "dias": 90, "motivo": "corto", "sede": "SAN_JOAQUIN" }
+    "dias": 90, "sede": "SAN_JOAQUIN" }
   ```
 
   **400 — sede inexistente** (el enum no deserializa)
@@ -177,8 +177,7 @@ examples:
             "error": "Bad Request",
             "mensaje": "La solicitud no es valida",
             "detalles": {
-              "dias": "el prestamo maximo es de 30 dias",
-              "motivo": "el motivo debe tener entre 10 y 300 caracteres"
+              "dias": "el prestamo maximo es de 30 dias"
             }
           }
   - name: 409 sin ejemplares

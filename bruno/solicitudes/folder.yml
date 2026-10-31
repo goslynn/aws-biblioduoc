@@ -11,7 +11,7 @@ docs: |
   # solicitudes
 
   Una solicitud pide **uno o varios** libros del catalogo, por un numero de
-  dias, con un motivo y una sede de retiro.
+  dias, con una sede de retiro y un motivo opcional.
 
   ## Modelo de entrada (POST)
 
@@ -31,7 +31,7 @@ docs: |
   | al menos 1 item, maximo 5 titulos | 400 |
   | `cantidad` entre 1 y 3 por titulo | 400 |
   | `dias` entre 1 y 30 | 400 |
-  | `motivo` entre 10 y 300 caracteres | 400 |
+  | `motivo` (opcional) de 300 caracteres como maximo | 400 |
   | `sede` debe ser una de las cinco | 400 |
   | el `libroId` debe existir | 404 |
   | el libro debe tener ejemplares | 409 |

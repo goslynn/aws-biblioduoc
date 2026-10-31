@@ -88,7 +88,7 @@ src/test/java/cl/duoc/biblioteca/
 
 ```sh
 cd back
-./mvnw package          # compila y pasa los 33 tests
+./mvnw package          # compila y pasa los 34 tests
 ./mvnw test
 ./mvnw test -Dtest=AvisosIntegracionTest
 ```
