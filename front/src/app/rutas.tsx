@@ -1,4 +1,4 @@
-import { createHashRouter, redirect, type RouteObject } from 'react-router';
+import { createBrowserRouter, redirect, type RouteObject } from 'react-router';
 
 import { App } from './app';
 import { requiereEmpleado, requiereSesion } from './auth/guardas';
@@ -69,12 +69,11 @@ const hijas: RouteObject[] = [
 ];
 
 /**
- * createHashRouter: las rutas viven detras de "#" (…/index.html#/catalogo).
+ * createBrowserRouter: rutas limpias (/catalogo, sin "#").
  *
- * El sitio se sirve desde el endpoint REST de S3, que devuelve los objetos que
- * existen y nada mas: si la ruta fuera /catalogo, S3 respondaria 404 al
- * recargar la pagina. El "website endpoint" de S3 si sabe redirigir a
- * index.html, pero es HTTP puro y Cognito rechaza callbacks sin TLS. Con
- * CloudFront delante se podria volver a rutas limpias.
+ * Funciona porque Caddy (front/Caddyfile) devuelve index.html para cualquier
+ * ruta que no sea un archivo: recargar en /gestion/stock no da 404, llega
+ * index.html y React Router pinta la vista. Cuando el sitio estaba en el
+ * endpoint REST de S3 eso no era posible, y por eso las rutas llevaban "#".
  */
-export const router = createHashRouter([{ path: '/', Component: App, children: hijas }]);
+export const router = createBrowserRouter([{ path: '/', Component: App, children: hijas }]);

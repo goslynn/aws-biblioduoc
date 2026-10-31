@@ -5,10 +5,19 @@
 #
 #  QUE HACE, EN TRES PASOS
 #    1. GENERA   front/src/app/aws-config.ts a partir de los Outputs de los
-#                stacks (ids de Cognito, dominio de Managed Login, URL de la
-#                API), y front/src/app/diagnostico/rutas.ts segun DEBUG.
+#                stacks (ids de Cognito, dominio de Managed Login, URL del
+#                sitio), y front/src/app/diagnostico/rutas.ts segun DEBUG.
 #    2. COMPILA  npm ci + tsc + vite build  ->  front/dist/
-#    3. PUBLICA  aws s3 sync --delete al bucket del sitio
+#    3. PUBLICA  empaqueta dist/ + front/Caddyfile + sitio.env en un .tar.gz,
+#                lo sube al bucket de artefactos (versionado) y reinicia Caddy
+#                en la EC2 de web.yaml por SSM, con esa version exacta.
+#
+#  QUE VA EN sitio.env, Y POR QUE NO EN EL STACK
+#    La API (host y stage, para el proxy de /api) y el dominio de Managed
+#    Login (para la CSP). Son Outputs de api.yaml y cognito.yaml, que se
+#    despliegan DESPUES que web.yaml y dependen de el (callbacks, CORS): si
+#    web.yaml los recibiera como parametros habria un ciclo. Viajando en el
+#    artefacto, cada publicacion lleva los valores vigentes.
 #
 #  POR QUE LA CONFIGURACION SE GENERA Y NO SE VERSIONA
 #    Porque son identificadores de UNA cuenta AWS concreta: el id del User
@@ -30,7 +39,7 @@
 #
 #    Lo que se genera es la RUTA, no un if: con DEBUG=false el archivo trae una
 #    lista vacia, nadie importa el componente y Vite ni lo empaqueta. No queda
-#    chunk que subir al bucket, asi que la pantalla no llega al sitio ni como
+#    chunk que empaquetar, asi que la pantalla no llega al sitio ni como
 #    codigo muerto descargable. Medido en dist/ (ver front/README.md).
 #
 #  USO
@@ -63,7 +72,6 @@ requiere aws
 cuenta_aws >/dev/null
 
 log "Leyendo los Outputs de los stacks"
-SITE_BUCKET="$(output_obligatorio "$STACK_WEB" SiteBucketName)"
 SITE_URL="$(output_obligatorio "$STACK_WEB" SiteUrl)"
 API_ENDPOINT="$(output_obligatorio "$STACK_API" ApiEndpoint)"
 USER_POOL_ID="$(output_obligatorio "$STACK_COGNITO" UserPoolId)"
@@ -87,7 +95,6 @@ export const awsConfig = {
   hostedUiDomain: '${HOSTED_UI_DOMINIO}',
   scope: '${SCOPE_COMPLETO}',
   redirectUrl: '${SITE_URL}',
-  apiBaseUrl: '${API_ENDPOINT}',
   debug: ${DEBUG},
 };
 EOF
@@ -128,7 +135,7 @@ fi
 
 info "userPool  ${USER_POOL_ID}"
 info "cliente   ${SPA_CLIENT_ID}"
-info "api       ${API_ENDPOINT}"
+info "api       ${API_ENDPOINT}  (por el proxy /api del sitio)"
 info "redirect  ${SITE_URL}"
 if [ "$DEBUG" = "true" ]; then
   info "debug     true  -> se publica /diagnostico (ensena el access token)"
@@ -158,39 +165,76 @@ SALIDA="${FRONT}/dist"
 [ -d "$SALIDA" ] || die "no encuentro la salida del build en ${SALIDA}"
 
 # --- 3. Publicar ---------------------------------------------------------------
-log "Publicando en s3://${SITE_BUCKET}"
-# --delete borra del bucket lo que ya no existe en dist/: sin eso se acumulan
-# los bundles con hash de despliegues anteriores.
-aws s3 sync "$SALIDA" "s3://${SITE_BUCKET}" \
-  --delete \
-  --region "$AWS_REGION" \
-  --only-show-errors
+requiere jq tar
+ARTIFACTS_BUCKET="$(output_obligatorio "$STACK_ARTIFACTS" ArtifactsBucketName)"
+OBJECT_KEY="$(output_obligatorio "$STACK_WEB" SiteObjectKey)"
+INSTANCE_ID="$(output_obligatorio "$STACK_WEB" InstanceId)"
+LOG_GROUP="$(output_obligatorio "$STACK_WEB" LogGroupName)"
 
-# index.html sin cache: es el que apunta a los bundles nuevos. Los bundles si
-# se cachean porque su nombre lleva un hash del contenido.
-aws s3 cp "${SALIDA}/index.html" "s3://${SITE_BUCKET}/index.html" \
-  --cache-control "no-cache, must-revalidate" \
-  --content-type "text/html" \
+# ApiEndpoint es https://<host>/<stage>: Caddy necesita las dos partes por
+# separado (el host para conectarse, el stage para reescribir la ruta).
+API_SIN_ESQUEMA="${API_ENDPOINT#https://}"
+API_HOST="${API_SIN_ESQUEMA%%/*}"
+API_STAGE="${API_SIN_ESQUEMA#*/}"
+
+log "Empaquetando el sitio"
+PAQUETE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PAQUETE_DIR"' EXIT
+cp -r "$SALIDA" "${PAQUETE_DIR}/srv"
+cp "${FRONT}/Caddyfile" "${PAQUETE_DIR}/Caddyfile"
+cat > "${PAQUETE_DIR}/sitio.env" <<EOF
+API_HOST=${API_HOST}
+API_STAGE=${API_STAGE}
+COGNITO_HOST=${HOSTED_UI_DOMINIO}
+EOF
+tar -czf "${PAQUETE_DIR}/sitio.tar.gz" -C "$PAQUETE_DIR" srv Caddyfile sitio.env
+
+log "Subiendo a s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}"
+# put-object y no "s3 cp": devuelve el VersionId, que es lo que la EC2 baja
+# exactamente (como el jar del backend).
+VERSION_ID="$(aws s3api put-object \
+  --bucket "$ARTIFACTS_BUCKET" \
+  --key "$OBJECT_KEY" \
+  --body "${PAQUETE_DIR}/sitio.tar.gz" \
   --region "$AWS_REGION" \
-  --only-show-errors
+  --query VersionId --output text)"
+info "VersionId ${VERSION_ID}"
+
+log "Reiniciando Caddy en ${INSTANCE_ID} (SSM Run Command)"
+COMANDOS="$(jq -nc --arg v "$VERSION_ID" \
+  '{commands: ["echo \($v) > /etc/biblioteca/version", "systemctl restart biblioteca-web"]}')"
+COMMAND_ID="$(aws ssm send-command \
+  --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript \
+  --comment "biblioteca: publicar sitio ${VERSION_ID}" \
+  --parameters "$COMANDOS" \
+  --region "$AWS_REGION" \
+  --query Command.CommandId --output text)" \
+  || die "SSM no acepto el comando. ¿Esta la instancia encendida? (el lab la detiene al cerrar la sesion)"
+aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --region "$AWS_REGION" \
+  || die "el reinicio fallo: aws ssm get-command-invocation --command-id ${COMMAND_ID} --instance-id ${INSTANCE_ID}"
 
 log "Sitio publicado"
 cat <<EOF
     Abrelo en el navegador:
         ${SITE_URL}
 
+    Logs de Caddy (accesos y certificado):
+        aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}
+
     Recorrido de comprobacion (DevTools abierto, pestana Network):
       1. "Iniciar sesion" -> pantalla de Cognito, en castellano y con la
          marca de la Biblioteca -> vuelve al sitio
-      2. Catalogo: buscar y filtrar
+      2. Catalogo: buscar y filtrar (las peticiones van a /api del MISMO origen)
       3. Solicitar: enviar el formulario -> 201
       4. Mis solicitudes: aparece lo enviado
-      5. En Network: ni un solo error de CORS, y el Bearer en cada peticion
+      5. En Network: ni un OPTIONS, ni un error de CORS ni de CSP, y el Bearer
+         en cada peticion
 EOF
 
 if [ "$DEBUG" = "true" ]; then
   cat <<EOF
-      6. Diagnostico: el access token, su payload y la prueba sin interceptor
+      6. Diagnostico: el access token, su payload y la prueba sin el cliente HTTP
          (solo esta porque se publico con DEBUG=true; no dejes el sitio asi)
 EOF
 fi

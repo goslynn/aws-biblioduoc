@@ -7,10 +7,11 @@ por correo** de cada paso. El personal de biblioteca (**empleados**) aprueba o
 rechaza las solicitudes, registra devoluciones y carga stock.
 
 ```
-React en S3    ──▶  API Gateway (REST + Cognito)  ──VPC Link──▶  NLB interno
-      │                        │                                    │ :80 → :8080
-   Amplify Auth          authorizer + scopes             ┌── EC2 (subred publica, SG cerrado) ──┐
-   (code + PKCE)          + CORS + stage                 │  Spring Boot: API, 2.ª validacion    │
+Navegador ─HTTPS─▶ Caddy (EC2, <ip>.sslip.io, Let's Encrypt)
+      │              │ React compilado + /api/* ──▶  API Gateway (REST + Cognito)  ──VPC Link──▶  NLB interno
+      │                                                       │                                    │ :80 → :8080
+   Amplify Auth                                         authorizer + scopes             ┌── EC2 (subred publica, SG cerrado) ──┐
+   (code + PKCE)                                         + CORS + stage                 │  Spring Boot: API, 2.ª validacion    │
       │                                                  │   del JWT, RBAC, consumidores        │
       │                                                  │      │ AMQP (red de Docker)          │
       │                                                  │  RabbitMQ 4.1 ── SMTP 587 ──▶ correo │
@@ -30,7 +31,7 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 | Directorio | Que contiene |
 |---|---|
 | `back/` | Backend Spring Boot 4.1 (Java 21): API REST, RBAC, productores y consumidores de RabbitMQ, envio de correo. Tiene su propio [README](back/README.md) |
-| `front/` | Frontend React 19 (Vite) con AWS Amplify, publicado como sitio estatico en S3. Tiene su propio [README](front/README.md) |
+| `front/` | Frontend React 19 (Vite) con AWS Amplify, servido por Caddy en una EC2 con HTTPS (`front/Caddyfile`). Tiene su propio [README](front/README.md) |
 | `aws/` | Las siete plantillas de CloudFormation, los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
 | `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa. Tiene su propio [README](bruno/README.md) |
 
@@ -306,6 +307,7 @@ Auth 6. Detalle en [`front/README.md`](front/README.md).
 | Servicios | `libros`, `solicitudes`, `avisos`, `gestion` | Encapsulan URL y llamadas; los componentes no saben de HTTP |
 | Gestion | `front/src/app/gestion/` | Bandeja (aprobar, rechazar, devolver) y carga de stock |
 | Configuracion AWS | `aws-config.ts` | **Generada** por el pipeline; no se versiona |
+| Servidor | `front/Caddyfile` | HTTPS, cabeceras de seguridad, `/api` al gateway y rutas limpias (ver abajo) |
 | Vista de diagnostico | `diagnostico/` | **Opt-in**: solo se empaqueta con `DEBUG=true` (ver abajo) |
 
 ### Guarda y cliente HTTP no son lo mismo
@@ -342,15 +344,15 @@ DEBUG=true ./aws/pipeline/publish-web.sh      # publica ademas /diagnostico
 **Apagada no es "escondida": es que no existe.** Lo que la variable genera es
 la RUTA (`front/src/app/diagnostico/rutas.ts`), no un `if`. Con `DEBUG=false`
 esa lista llega vacia, nadie importa el componente, Vite no lo empaqueta y en
-`dist/` no queda ningun chunk que subir al bucket. Medido:
+`dist/` no queda ningun chunk que publicar. Medido:
 
 | `DEBUG` | Chunk en `dist/` | Texto de la vista en `dist/` |
 |---|---|---|
 | `false` | ninguno | cero coincidencias |
 | `true` | `assets/diagnostico-*.js` · 3,75 kB | solo en ese chunk |
 
-Un `if` sobre un flag habria dejado el componente compilado y subido al
-bucket: sin enlace y sin ruta, pero descargable. El token sigue viviendo en el
+Un `if` sobre un flag habria dejado el componente compilado y publicado en el
+sitio: sin enlace y sin ruta, pero descargable. El token sigue viviendo en el
 navegador (lo guarda Amplify, y con DevTools se ve): lo que se quita es que la
 aplicacion lo publique en pantalla por su cuenta.
 
@@ -360,13 +362,32 @@ Amplify, y eso ocurre en exactamente dos sitios, `auth/http.ts` y esta vista.
 (`refrescar()` mira el payload del access token para saber si hay sesion y si
 es empleado, y lo descarta.)
 
-### Por que las rutas llevan `#`
+### Donde se sirve: Caddy en una EC2, y no un bucket S3
 
-El sitio se sirve por el **endpoint REST** de S3, que devuelve los objetos que
-existen y nada mas: con rutas limpias, recargar en `/catalogo` daria 404. El
-*website endpoint* de S3 si sabe redirigir a `index.html`, pero es HTTP puro y
-Cognito **rechaza callbacks sin TLS**. Con CloudFront delante se podria volver a
-rutas limpias; queda como evolucion.
+Antes el sitio vivia en el endpoint REST de un bucket S3. Funcionaba, pero no
+dejaba poner cabeceras de seguridad, ni rutas limpias (recargar `/catalogo`
+daba 404, por eso las rutas llevaban `#`), ni un dominio propio con su
+certificado. Lo que lo arreglaria sin servidor es CloudFront, y el lab lo
+**deniega** (`cloudfront:CreateDistribution`, medido). Ahora lo sirve **Caddy**
+en Docker sobre una EC2 propia (`aws/web.yaml`):
+
+* **HTTPS sin dominio propio.** La EC2 tiene una IP elastica y el sitio se
+  llama `<ip>.sslip.io`, un DNS publico que resuelve ese nombre a esa IP. Caddy
+  pide el certificado a Let's Encrypt y lo renueva solo. Cuando haya dominio,
+  se apunta su registro A a la IP y se despliega con `SITE_DOMAIN=...`
+  (`aws/README.md`).
+* **La API en el mismo origen.** El frontend llama a `/api/...` y Caddy lo
+  reenvia a API Gateway. Para el navegador no hay otro origen: ni preflight ni
+  CORS. Las tres piezas de CORS (§4 de `CLAUDE.md`, `api.yaml`) **se quedan**,
+  con el origen nuevo, para cualquier cliente que llame al gateway directo.
+* **Cabeceras de seguridad**: CSP (el JavaScript solo puede hablar con el
+  sitio y con Cognito), HSTS, `X-Frame-Options`, `nosniff`.
+* **Rutas limpias**: cualquier ruta que no sea un archivo devuelve
+  `index.html`, asi que `createBrowserRouter` sustituye a `createHashRouter`.
+
+`publish-web.sh` empaqueta `dist/`, el `Caddyfile` y los valores de la API y
+de Cognito en un `.tar.gz` versionado en el bucket de artefactos, y reinicia
+Caddy por SSM con esa version, igual que hace `build-backend.sh` con el jar.
 
 ---
 
@@ -416,7 +437,8 @@ Se declaran aqui en lugar de esconderlas.
 | Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql y ver el panel de RabbitMQ. Usa la subred publica del proyecto; las subredes de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
 | Frontend en **Angular** | **React 19 + Vite** | Decision del usuario. Mismas vistas, misma integracion con Cognito (Amplify, code + PKCE) y mismo contrato con la API; el interceptor de `HttpClient` pasa a ser un cliente HTTP propio (`auth/http.ts`) y los Guards, `loader` de React Router |
 | **Hosted UI** clasica de Cognito | **Managed Login** con marca propia y en castellano | La clasica solo existe en ingles y su logo no se puede poner desde CloudFormation. Exige el plan **Essentials** del User Pool, que ya era el de por defecto (medido) |
-| `ng serve` en `localhost:4200` | **Sitio publicado en S3** | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |
+| `ng serve` en `localhost:4200` | **Sitio publicado** (hoy en Caddy, ver la fila siguiente) | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |
+| Frontend como sitio estatico en **S3** | **Caddy en Docker sobre una EC2** con IP elastica, HTTPS de Let's Encrypt en `<ip>.sslip.io` y proxy de `/api` | Decision del usuario: cabeceras de seguridad, rutas limpias y un dominio propio futuro, que S3 sin CloudFront no permite (CloudFront esta **denegado** en el lab, medido). Es la unica instancia que acepta trafico de Internet (80 y 443, su propio security group); la de la app sigue cerrada. Costo: una EC2 t3.micro y una IP elastica, que se cobran aunque el lab este apagado |
 
 ---
 
@@ -431,7 +453,7 @@ Se declaran aqui en lugar de esconderlas.
 | Node.js + npm | compilar el frontend | `node -v` |
 | `python3`, `jq` | leer JSON en los scripts | `python3 --version` |
 | Bruno (`bru`) | pruebas HTTP versionadas | `bru --version` |
-| Navegador con DevTools | diagnostico de CORS y del preflight | — |
+| Navegador con DevTools | recorrido del sitio: Network (Bearer, `/api` en el mismo origen) y consola (CSP) | — |
 
 Las credenciales del Learner Lab caducan cada ~4 horas y son la causa numero
 uno de errores raros. `awsacademy start` las refresca.

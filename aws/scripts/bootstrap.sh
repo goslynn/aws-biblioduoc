@@ -5,14 +5,16 @@
 #
 #  QUE HACE, Y EN QUE ORDEN (el orden no es decorativo)
 #
-#    0. Comprueba herramientas y credenciales, y CALCULA la URL del sitio.
-#    1. artifacts + web + cognito + network -> en paralelo: no dependen de nadie
-#    1b. database                        -> PostgreSQL privado (~10 min), dentro
-#                                           de la red de 1
+#    0. Comprueba herramientas y credenciales.
+#    1. artifacts + network              -> en paralelo: no dependen de nadie
+#    1b. web + database                  -> en paralelo, los dos dentro de la
+#                                           red de 1: el servidor del sitio
+#                                           (IP elastica, Caddy) y PostgreSQL
+#                                           privado (~10 min la primera vez)
+#    1c. cognito                         -> recibe la URL REAL del sitio (Output
+#                                           SiteUrl de web) para los callbacks
 #    2. pipeline/build-backend.sh        -> compila, sube el jar y crea la EC2
-#                                           con RabbitMQ y el NLB (necesita 1 y
-#                                           1b: bucket, issuer, origen, subredes,
-#                                           base)
+#                                           con RabbitMQ y el NLB
 #    3. api                              -> necesita el pool y el NLB (VPC Link)
 #    4. pipeline/api-deploy.sh           -> publica la API en el stage
 #    5. usuarios de demostracion         -> un estudiante y un EMPLEADO (en el
@@ -20,15 +22,15 @@
 #                                           para el caso "token sin el custom
 #                                           scope"
 #    6. pipeline/bruno-env.sh            -> entornos de prueba con tokens reales
-#    7. pipeline/publish-web.sh          -> configura, compila y sube el frontend
+#    7. pipeline/publish-web.sh          -> configura, compila, empaqueta y
+#                                           publica el frontend en el servidor
 #
-#  >>> COMO SE ROMPE EL CICLO APARENTE <<<
-#    Cognito necesita la URL del frontend (lista blanca de callbacks) y el
-#    frontend necesita los datos de Cognito. Parece un huevo y una gallina.
-#    Se rompe en el paso 0: el bucket del sitio SIEMPRE se llama
-#    "<proyecto>-web-<AccountId>", asi que la URL se puede calcular con un solo
-#    "sts get-caller-identity", antes de que el bucket exista. Cero despliegues
-#    dobles.
+#  >>> POR QUE NO HAY CICLO ENTRE COGNITO Y EL SITIO <<<
+#    Cognito necesita la URL del sitio (lista blanca de callbacks) y el sitio
+#    necesita los datos de Cognito. Pero el stack web solo crea la MAQUINA y
+#    su nombre (<ip-elastica>.sslip.io, o SITE_DOMAIN): los datos de Cognito
+#    y de la API llegan despues, dentro del artefacto que publica el paso 7.
+#    Asi que el orden es simplemente web -> cognito -> ... -> publish-web.
 #
 #  ES IDEMPOTENTE: se puede volver a ejecutar tantas veces como haga falta.
 #
@@ -44,6 +46,9 @@
 #    PROJECT_NAME (biblioteca)  AWS_REGION (us-east-1)  STAGE_NAME (test)
 #    DEMO_USER (alumno@duoc.cl) DEMO_EMPLOYEE (empleado@duoc.cl)
 #    SKIP_WEB (false, para no compilar el frontend)
+#    SITE_DOMAIN (vacio): dominio propio del sitio. Vacio = <ip>.sslip.io.
+#      Antes, su registro A tiene que apuntar a la IP elastica (Output
+#      SitePublicIp de biblioteca-web); ver aws/README.md.
 #    DEBUG (false): la hereda publish-web.sh y publica la vista /diagnostico,
 #      que ensena el access token en claro. Solo para explicar la arquitectura.
 #
@@ -57,6 +62,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_comun.sh"
 DEMO_USER="${DEMO_USER:-alumno@duoc.cl}"
 DEMO_EMPLOYEE="${DEMO_EMPLOYEE:-empleado@duoc.cl}"
 SKIP_WEB="${SKIP_WEB:-false}"
+SITE_DOMAIN="${SITE_DOMAIN:-}"
 
 # ------------------------------------------------------------------ paso 0 ----
 log "Comprobando el entorno"
@@ -65,45 +71,19 @@ requiere aws curl jq python3
 
 ACCOUNT_ID="$(cuenta_aws)"
 
-# La URL del sitio, calculada ANTES de que exista el bucket. Ver la cabecera.
-SITE_ORIGIN="https://${PROJECT_NAME}-web-${ACCOUNT_ID}.s3.${AWS_REGION}.amazonaws.com"
-SITE_URL="${SITE_ORIGIN}/index.html"
-
 info "cuenta   ${ACCOUNT_ID}"
 info "region   ${AWS_REGION}"
 info "proyecto ${PROJECT_NAME}"
-info "sitio    ${SITE_URL}  (calculado, todavia no existe)"
+info "dominio  ${SITE_DOMAIN:-(ninguno: <ip-elastica>.sslip.io)}"
 
 mkdir -p "$LOCAL_DIR"
 
 # ------------------------------------------------------------------ paso 1 ----
-# Los tres stacks independientes van en paralelo. Cada uno escribe su salida en
-# un archivo para que, si uno falla, se pueda mostrar SU log y no una mezcla.
-log "Desplegando los stacks independientes (artefactos, sitio, Cognito, red)"
+# Los stacks independientes van en paralelo. Cada uno escribe su salida en un
+# archivo para que, si uno falla, se pueda mostrar SU log y no una mezcla.
+log "Desplegando los stacks independientes (artefactos, red)"
 TMP_LOGS="$(mktemp -d)"
 trap 'rm -rf "$TMP_LOGS"' EXIT
-
-despliega_stack artifacts.yaml "$STACK_ARTIFACTS" \
-  "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/artifacts" 2>&1 &
-PID_ARTIFACTS=$!
-
-despliega_stack web.yaml "$STACK_WEB" \
-  "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/web" 2>&1 &
-PID_WEB=$!
-
-# El logo y el favicon de las pantallas de login viajan en base64: los SVG de
-# aws/marca/ son la fuente, y el recurso ManagedLoginBranding los quiere asi.
-despliega_stack cognito.yaml "$STACK_COGNITO" \
-  "ProjectName=${PROJECT_NAME}" \
-  "CallbackUrls=${SITE_URL}" \
-  "LogoutUrls=${SITE_URL}" \
-  "LogoLoginSvg=$(base64 -w0 "${ROOT}/aws/marca/logo-login.svg")" \
-  "FaviconLoginSvg=$(base64 -w0 "${ROOT}/aws/marca/favicon-login.svg")" > "${TMP_LOGS}/cognito" 2>&1 &
-PID_COGNITO=$!
-
-despliega_stack network.yaml "$STACK_NETWORK" \
-  "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/network" 2>&1 &
-PID_NETWORK=$!
 
 FALLO=0
 espera() {
@@ -117,24 +97,59 @@ espera() {
     por_que_fallo "$stack" >&2
   fi
 }
+
+despliega_stack artifacts.yaml "$STACK_ARTIFACTS" \
+  "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/artifacts" 2>&1 &
+PID_ARTIFACTS=$!
+
+despliega_stack network.yaml "$STACK_NETWORK" \
+  "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/network" 2>&1 &
+PID_NETWORK=$!
+
 espera "$PID_ARTIFACTS" artifacts "$STACK_ARTIFACTS"
-espera "$PID_WEB"       web       "$STACK_WEB"
-espera "$PID_COGNITO"   cognito   "$STACK_COGNITO"
 espera "$PID_NETWORK"   network   "$STACK_NETWORK"
 [ "$FALLO" -eq 0 ] || die "no se pudieron crear los stacks base"
 
 # ----------------------------------------------------------------- paso 1b ----
-# La base va despues de la red porque vive en sus subredes. Es el paso mas
-# lento de todo el bootstrap: RDS tarda unos 10 minutos en crear la instancia.
-# Si ya existe y no cambio nada, es instantaneo.
-log "Base de datos PostgreSQL (privada)"
+# El servidor del sitio y la base, en paralelo: los dos viven en la red de 1.
+# La base es el paso mas lento de todo el bootstrap: RDS tarda unos 10
+# minutos en crear la instancia. Si ya existe y no cambio nada, es instantaneo.
+log "Servidor del sitio (Caddy) y base de datos PostgreSQL (privada)"
 info "si es la primera vez, RDS tarda ~10 minutos en crear la instancia"
+
+despliega_stack web.yaml "$STACK_WEB" \
+  "ProjectName=${PROJECT_NAME}" \
+  "SiteDomain=${SITE_DOMAIN}" \
+  "VpcId=$(output_obligatorio "$STACK_NETWORK" VpcId)" \
+  "PublicSubnetId=$(output_obligatorio "$STACK_NETWORK" PublicSubnetId)" \
+  "ArtifactsBucketName=$(output_obligatorio "$STACK_ARTIFACTS" ArtifactsBucketName)" > "${TMP_LOGS}/web" 2>&1 &
+PID_WEB=$!
+
 despliega_stack database.yaml "$STACK_DATABASE" \
   "ProjectName=${PROJECT_NAME}" \
   "PrivateSubnetIds=$(output_obligatorio "$STACK_NETWORK" PrivateSubnetIds)" \
-  "DatabaseSecurityGroupId=$(output_obligatorio "$STACK_NETWORK" DatabaseSecurityGroupId)" \
-  || { por_que_fallo "$STACK_DATABASE"; die "fallo el despliegue de la base de datos"; }
+  "DatabaseSecurityGroupId=$(output_obligatorio "$STACK_NETWORK" DatabaseSecurityGroupId)" > "${TMP_LOGS}/database" 2>&1 &
+PID_DATABASE=$!
 
+espera "$PID_WEB"      web      "$STACK_WEB"
+espera "$PID_DATABASE" database "$STACK_DATABASE"
+[ "$FALLO" -eq 0 ] || die "no se pudieron crear el servidor del sitio o la base"
+
+SITE_URL="$(output_obligatorio "$STACK_WEB" SiteUrl)"
+info "sitio    ${SITE_URL}"
+
+# ----------------------------------------------------------------- paso 1c ----
+# Cognito, con la URL REAL del sitio como callback y logout.
+# El logo y el favicon de las pantallas de login viajan en base64: los SVG de
+# aws/marca/ son la fuente, y el recurso ManagedLoginBranding los quiere asi.
+log "Cognito (callbacks hacia ${SITE_URL})"
+despliega_stack cognito.yaml "$STACK_COGNITO" \
+  "ProjectName=${PROJECT_NAME}" \
+  "CallbackUrls=${SITE_URL}" \
+  "LogoutUrls=${SITE_URL}" \
+  "LogoLoginSvg=$(base64 -w0 "${ROOT}/aws/marca/logo-login.svg")" \
+  "FaviconLoginSvg=$(base64 -w0 "${ROOT}/aws/marca/favicon-login.svg")" \
+  || { por_que_fallo "$STACK_COGNITO"; die "fallo el despliegue de Cognito"; }
 
 # ------------------------------------------------------------------ paso 2 ----
 log "Backend: compilar, publicar y desplegar (EC2 + RabbitMQ + NLB)"
@@ -148,7 +163,7 @@ SCOPE_COMPLETO="$(output_obligatorio "$STACK_COGNITO" ScopeCompleto)"
 SCOPE_GESTION="$(output_obligatorio "$STACK_COGNITO" ScopeGestion)"
 NLB_ARN="$(output_obligatorio "$STACK_BACKEND" NlbArn)"
 NLB_DNS="$(output_obligatorio "$STACK_BACKEND" NlbDnsName)"
-SITE_ORIGIN_REAL="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
+SITE_ORIGIN="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
 
 despliega_stack api.yaml "$STACK_API" \
   "ProjectName=${PROJECT_NAME}" \
@@ -157,7 +172,7 @@ despliega_stack api.yaml "$STACK_API" \
   "NlbDnsName=${NLB_DNS}" \
   "RequiredScope=${SCOPE_COMPLETO}" \
   "ManagementScope=${SCOPE_GESTION}" \
-  "AllowOrigin=${SITE_ORIGIN_REAL}" \
+  "AllowOrigin=${SITE_ORIGIN}" \
   "StageName=${STAGE_NAME}" \
   || { por_que_fallo "$STACK_API"; die "fallo el despliegue de la API"; }
 

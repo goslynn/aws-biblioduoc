@@ -40,7 +40,7 @@ Pipelines parciales, cuando ya hay stacks desplegados:
 ```sh
 ./aws/pipeline/build-backend.sh    # cambiaste codigo Java (mvnw package -> jar a S3 -> stack -> reinicio por SSM)
 ./aws/pipeline/api-deploy.sh       # cambiaste rutas, metodos o scopes en api.yaml
-./aws/pipeline/publish-web.sh      # cambiaste el frontend (config + tsc + vite build + s3 sync)
+./aws/pipeline/publish-web.sh      # cambiaste el frontend o el Caddyfile (config + build + .tar.gz + reinicio de Caddy por SSM)
 ./aws/pipeline/bruno-env.sh        # los tokens caducaron (60 min)
 
 SKIP_TESTS=true ./aws/pipeline/build-backend.sh
@@ -52,6 +52,9 @@ REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh   # recordatorio a los ~2
 
 Variables comunes a todos los scripts: `PROJECT_NAME` (biblioteca),
 `AWS_REGION` (us-east-1), `STAGE_NAME` (test), `DEMO_USER`, `DEMO_EMPLOYEE`.
+`SITE_DOMAIN` (vacio = `<ip-elastica>.sslip.io`) lo usa `bootstrap.sh` para el
+dominio propio del sitio; va en `aws/.env`, o el siguiente bootstrap vuelve a
+sslip.io.
 
 **Un cambio en `api.yaml` no llega al stage solo**: `AWS::ApiGateway::Deployment`
 es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
@@ -115,7 +118,8 @@ destino sano (la app arrancando o caida): `aws elbv2 describe-target-health`.
 ## Arquitectura
 
 ```
-React (S3, endpoint REST)    ──▶  API Gateway REST (authorizer Cognito + scopes)
+Navegador ─HTTPS─▶ Caddy (EC2, IP elastica, <ip>.sslip.io, Let's Encrypt)
+                   React compilado + /api/* ──▶  API Gateway REST (authorizer Cognito + scopes)
                                           │ HTTP_PROXY por VPC Link
                                           ▼
                               NLB interno (subredes privadas)
@@ -149,8 +153,8 @@ con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
 | Plantilla | Stack | Depende de |
 |---|---|---|
 | `aws/artifacts.yaml` | `biblioteca-artifacts` | — |
-| `aws/web.yaml` | `biblioteca-web` | — |
-| `aws/cognito.yaml` | `biblioteca-cognito` | — (recibe la URL del sitio *calculada*) |
+| `aws/web.yaml` | `biblioteca-web` | network, artifacts |
+| `aws/cognito.yaml` | `biblioteca-cognito` | web (la URL del sitio) |
 | `aws/network.yaml` | `biblioteca-network` | — |
 | `aws/database.yaml` | `biblioteca-database` | network |
 | `aws/backend.yaml` | `biblioteca-backend` | artifacts, cognito, web, network, database + jar subido |
@@ -158,8 +162,10 @@ con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
 | `aws/vpn.yaml` (opcional) | `biblioteca-vpn` | network, database (+ backend para el panel); lo crea `vpn-up.sh`, no el bootstrap |
 
 El ciclo aparente (Cognito necesita la URL del frontend; el frontend necesita
-Cognito) se rompe **calculando** `https://<proyecto>-web-<AccountId>.s3.<region>.amazonaws.com`
-con un `sts get-caller-identity` antes de que el bucket exista.
+Cognito) no existe: `web.yaml` solo crea la maquina y su nombre, y los valores
+de Cognito y de la API llegan **dentro del artefacto** que publica
+`publish-web.sh` (`aws-config.ts` en el bundle; host/stage de la API y dominio
+de Cognito en `sitio.env`). Orden: web → cognito → ... → publish-web.
 
 `aws/README.md` §3 tiene el contrato completo de entradas y salidas de cada
 stack: **leelo antes de cambiar un parametro**, porque cada Output alimenta a
@@ -194,8 +200,11 @@ Codigos **medidos** contra el despliegue real (no supuestos):
 
 ### CORS: tres piezas, tres responsables
 
-Con integracion `HTTP_PROXY`, API Gateway **no anade** cabeceras a la respuesta
-real. El reparto es fijo:
+Desde el sitio **no hay CORS**: el navegador llama a `/api/*` en su propio
+origen y Caddy lo reenvia al gateway (`front/Caddyfile`). Las tres piezas se
+mantienen, con `SiteOrigin` como origen, para cualquier cliente de navegador
+que llame a API Gateway directamente. Con integracion `HTTP_PROXY`, API Gateway
+**no anade** cabeceras a la respuesta real. El reparto es fijo:
 
 1. preflight `OPTIONS` → API Gateway, integracion MOCK, `AuthorizationType: NONE`;
 2. cabecera del 200 → **Spring** (`corsConfigurationSource`, origen exacto desde `BIBLIOTECA_ORIGEN`);
@@ -224,7 +233,14 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   mas.
 * **Toda llamada a la API pasa por `auth/http.ts`**, que pone el `Bearer`. Un
   `fetch` suelto en un componente sale sin token (401); la unica excepcion
-  declarada es la vista de diagnostico.
+  declarada es la vista de diagnostico. Las rutas son relativas (`/api/...`):
+  en el frontend no hay URL de la API, la conoce solo Caddy.
+* **El frontend lo sirve Caddy (`front/Caddyfile`), no un bucket.** Ahi viven
+  HTTPS, las cabeceras de seguridad (CSP con `connect-src` acotado al sitio y a
+  Cognito), el proxy de `/api` y el `try_files` de las rutas limpias. Viaja en
+  el artefacto del sitio: se cambia publicando, sin tocar la instancia. La
+  configuracion de la EC2 va en SSM (`/<proyecto>/web/sitio.env`), no en el
+  UserData.
 * **Las pantallas de login y registro son de Cognito (Managed Login v2), no del
   frontend.** Un formulario propio usaria `InitiateAuth` (SRP), que no emite
   custom scopes: 401 en toda la API. La marca vive en `LoginBranding`
@@ -244,12 +260,15 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   Spring. Un `/v2` seria otra clase y convivirian.
 * **Toda desviacion se declara**, no se esconde: README §7 (canon de la guia,
   EC2 en subred publica, SMTP externo, JWKS fijado al desplegar, contrasenas
-  como variables del contenedor, backoffice como empleado en Bruno, VPN).
+  como variables del contenedor, backoffice como empleado en Bruno, VPN,
+  React, Managed Login, frontend en Caddy sobre EC2).
 * **La base no se expone.** Nada de `PubliclyAccessible: true`, NAT ni
   bastion. RDS vive en las subredes PRIVADAS, que no tienen ruta a Internet: la
   unica via permanente es el SG de la EC2 de la app. La subred PUBLICA de
   `network.yaml` (con el unico IGW de la VPC) es solo para la EC2 de la app
-  —cuyo SG no acepta nada desde Internet— y el servidor de la VPN opcional. No
+  —cuyo SG no acepta nada desde Internet—, el servidor web de `web.yaml`
+  —el unico que acepta 80 y 443 desde Internet, con su propio SG— y el
+  servidor de la VPN opcional. No
   anadas rutas a Internet a las privadas ni puertos abiertos a `0.0.0.0/0`. El
   seed y el esquema son migraciones Flyway
   (`back/src/main/resources/db/migration`) que aplica la propia app al arrancar.
@@ -282,9 +301,16 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   tiene pantalla de login**: `/login` da error. El logo (`FORM_LOGO`) tiene que
   tener proporcion entre 1:1 y 4:1 o el recurso falla al crearse; los colores
   van en RGBA hexadecimal sin `#` (`0f6b5cff`).
-* **Rutas con `#` (`createHashRouter`)**: el endpoint REST de S3 no redirige a
-  `index.html`, y el *website endpoint* es HTTP puro, que Cognito rechaza como
-  callback.
+* **Rutas limpias (`createBrowserRouter`) dependen del `try_files` del
+  `Caddyfile`**: sin el, recargar `/catalogo` da 404. Y el proxy de `/api`
+  necesita `header_up Host {upstream_hostport}`: con el `Host` del sitio, API
+  Gateway responde 403.
+* **CloudFront esta denegado en el lab** (medido): por eso el sitio no es un
+  bucket con CloudFront delante, sino Caddy en una EC2. HTTPS sin dominio
+  propio sale de `<ip-elastica>.sslip.io` + Let's Encrypt; el certificado vive
+  en el volumen `caddy-datos` (no lo borres: Let's Encrypt limita emisiones).
+* **Las descripciones de reglas de un security group no admiten apostrofos**
+  (`Let's` hace fallar el recurso con *Invalid rule description*).
 * **`admin-initiate-auth` no emite custom scopes.** El token bueno solo sale de
   los App Clients M2M (`client_credentials`) o del flujo del navegador. Esa
   limitacion da gratis los casos 401 de la matriz, y es por lo que en Bruno el

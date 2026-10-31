@@ -1,7 +1,5 @@
 import { fetchAuthSession } from 'aws-amplify/auth';
 
-import { awsConfig } from '../aws-config';
-
 /**
  * Una respuesta que no es 2xx, o ninguna respuesta (status 0: red o CORS).
  * "cuerpo" es el JSON de error del backend o del gateway, si lo habia.
@@ -38,9 +36,13 @@ type Parametros = Record<string, string | undefined>;
  *
  * Que el token se pida a Amplify en CADA peticion no cuesta nada: Amplify lo
  * tiene en memoria y solo vuelve a Cognito cuando hay que refrescarlo.
+ *
+ * Las rutas son relativas al propio sitio (/api/libros): Caddy las reenvia a
+ * API Gateway (front/Caddyfile). Para el navegador es el MISMO origen, asi
+ * que no hay preflight ni CORS de por medio.
  */
 async function peticion<T>(metodo: string, ruta: string, opciones: { params?: Parametros; cuerpo?: unknown } = {}): Promise<T> {
-  const url = new URL(`${awsConfig.apiBaseUrl}${ruta}`);
+  const url = new URL(ruta, window.location.origin);
   for (const [clave, valor] of Object.entries(opciones.params ?? {})) {
     if (valor !== undefined) {
       url.searchParams.set(clave, valor);
@@ -64,8 +66,8 @@ async function peticion<T>(metodo: string, ruta: string, opciones: { params?: Pa
       body: opciones.cuerpo === undefined ? undefined : JSON.stringify(opciones.cuerpo),
     });
   } catch {
-    // fetch solo se rechaza si NO hubo respuesta: red caida o, casi siempre,
-    // una respuesta sin las cabeceras CORS que el navegador se niega a leer.
+    // fetch solo se rechaza si NO hubo respuesta: red caida, o una peticion
+    // que el navegador corto (CORS, o la CSP del Caddyfile).
     throw new ErrorHttp(0);
   }
 

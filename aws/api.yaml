@@ -100,7 +100,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      --parameter-overrides \
 #        ProjectName=biblioteca UserPoolArn=... NlbArn=... NlbDnsName=... \
 #        RequiredScope=biblioteca-api/acceso ManagementScope=biblioteca-api/gestion \
-#        AllowOrigin=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com
+#        AllowOrigin=https://<ip-elastica>.sslip.io
 #    ...y despues, SIEMPRE:  ./aws/pipeline/api-deploy.sh
 # ==============================================================================
 

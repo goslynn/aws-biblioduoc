@@ -7,8 +7,9 @@ cuenta de **AWS Academy Learner Lab**.
 Aqui no hay clics de consola ni comandos imperativos que creen recursos: si
 algo existe en AWS, esta declarado en un `.yaml` de este directorio. (Los
 usuarios de demostracion y su grupo son DATOS, no infraestructura: los crea
-`bootstrap.sh` con la CLI. El reinicio de la aplicacion tras subir un jar es un
-paso del pipeline, por SSM Run Command.)
+`bootstrap.sh` con la CLI. El reinicio de la aplicacion tras subir un jar, y
+el del servidor web tras publicar el sitio, son pasos de los pipelines, por SSM
+Run Command.)
 
 ---
 
@@ -16,8 +17,10 @@ paso del pipeline, por SSM Run Command.)
 
 ```
                        ┌──────────────────────────────┐
-  Navegador ──────────▶│  S3  biblioteca-web-<cuenta> │   web.yaml
-                       │  React compilado (HTTPS)     │
+  Navegador ── HTTPS ─▶│  EC2 + Caddy  <ip>.sslip.io  │   web.yaml
+                       │  IP elastica · Let's Encrypt │
+                       │  React compilado, CSP, HSTS  │
+                       │  /api/* ─▶ API Gateway  (③)  │
                        └──────────────┬───────────────┘
                                       │  ① login  (code + PKCE)
                                       ▼
@@ -33,9 +36,10 @@ paso del pipeline, por SSM Run Command.)
                        │   Managed Login + marca      │
                        └──────────────┬───────────────┘
                                       │ ② access_token
-  ③ GET /test/api/libros              ▼
-     Authorization: Bearer   ┌──────────────────────────────┐
-  ──────────────────────────▶│  API Gateway · REST · test   │  api.yaml
+  ③ Caddy: /api/libros         ▼
+     -> /test/api/libros     ┌──────────────────────────────┐
+     Authorization: Bearer   │  API Gateway · REST · test   │  api.yaml
+  ──────────────────────────▶│                              │
                              │   authorizer COGNITO_USER_.. │
                              │   AuthorizationScopes        │
                              │   OPTIONS MOCK + Gateway-    │
@@ -77,7 +81,11 @@ paso del pipeline, por SSM Run Command.)
 |---|---|---|---|
 | Navegador | Managed Login (`/login`, `/signup`) | redireccion HTTP | ninguna (cliente publico + PKCE) |
 | Navegador | `/oauth2/token` | POST form-urlencoded | `code` + `code_verifier`, **sin secreto** |
-| Navegador | API Gateway | `Authorization: Bearer` | `access_token` |
+| Navegador | Caddy (`/api/*`, mismo origen) | `Authorization: Bearer` | `access_token` |
+| Caddy | API Gateway | `reverse_proxy` HTTPS; reescribe `/api/x` a `/<stage>/api/x` | la misma cabecera, intacta: Caddy no anade ni valida nada |
+| Caddy | Let's Encrypt | ACME HTTP-01 por el 80; renueva solo | ninguna |
+| EC2 del sitio | S3 artefactos / SSM | baja el sitio (`web/sitio.tar.gz`) y lee `/biblioteca/web/sitio.env` en cada arranque | perfil de instancia |
+| `publish-web.sh` | EC2 del sitio | SSM Run Command: anota la version y reinicia Caddy | credenciales del lab |
 | API Gateway | Cognito | descarga el JWKS | ninguna (endpoint publico) |
 | API Gateway | NLB → EC2 | `HTTP_PROXY` por el **VPC Link** (PrivateLink) | ninguna: la red; la EC2 no acepta nada desde Internet |
 | EC2 | S3 artefactos | baja el jar en cada arranque | **perfil de instancia** `LabInstanceProfile`, sin claves estaticas |
@@ -104,9 +112,9 @@ En ningun punto del sistema hay una Access Key estatica.
 | Archivo | Stack | Crea | Depende de |
 |---|---|---|---|
 | `artifacts.yaml` | `biblioteca-artifacts` | Bucket privado, versionado, con ciclo de vida de 7 dias | — |
-| `web.yaml` | `biblioteca-web` | Bucket publico del sitio (endpoint REST, HTTPS) | — |
-| `cognito.yaml` | `biblioteca-cognito` | User Pool (plan Essentials), grupo `empleados`, Resource Server + 2 scopes, App Clients SPA, M2M y backoffice, dominio con Managed Login y su marca (`aws/marca/*.svg`) | — |
-| `network.yaml` | `biblioteca-network` | VPC; dos subredes privadas sin ruta (RDS, NLB); una subred publica con IGW (EC2, VPN); security groups App ↔ RDS | — |
+| `web.yaml` | `biblioteca-web` | EC2 con Caddy en Docker (HTTPS de Let's Encrypt, proxy de `/api`), IP elastica, su security group (80/443 desde Internet), parametro SSM de configuracion, LogGroup | `network`, `artifacts` |
+| `cognito.yaml` | `biblioteca-cognito` | User Pool (plan Essentials), grupo `empleados`, Resource Server + 2 scopes, App Clients SPA, M2M y backoffice, dominio con Managed Login y su marca (`aws/marca/*.svg`) | `web` (la URL del sitio) |
+| `network.yaml` | `biblioteca-network` | VPC; dos subredes privadas sin ruta (RDS, NLB); una subred publica con IGW (EC2 de la app, servidor web, VPN); security groups App ↔ RDS | — |
 | `database.yaml` | `biblioteca-database` | RDS PostgreSQL 16 privado y cifrado, parameter group con TLS obligatorio, dos secretos | `network` |
 | `backend.yaml` | `biblioteca-backend` | EC2 con Docker (Spring Boot + RabbitMQ), NLB interno, secretos de RabbitMQ y SMTP, parametro SSM de configuracion, LogGroup | `artifacts`, `cognito`, `web`, `network`, `database`, y el jar ya subido |
 | `api.yaml` | `biblioteca-api` | REST API: recursos, metodos, authorizer, scopes, CORS, VPC Link, stage | `cognito`, `backend`, `web` |
@@ -117,13 +125,13 @@ En ningun punto del sistema hay una Access Key estatica.
 | Archivo | Que hace |
 |---|---|
 | `scripts/bootstrap.sh` | Levanta todo en orden de dependencia. Idempotente. Es el unico que necesitas a diario |
-| `scripts/teardown.sh` | Borra todo en orden inverso, vaciando los buckets primero. Pide confirmacion |
+| `scripts/teardown.sh` | Borra todo en orden inverso, vaciando el bucket de artefactos primero. Pide confirmacion |
 | `scripts/vpn-up.sh` | Opcional. Llaves del equipo → stack `vpn` → interfaz WireGuard local (sudo) → datos de conexion para DataGrip/psql y el panel de RabbitMQ. Idempotente |
 | `scripts/vpn-down.sh` | Baja la interfaz local, borra el stack `vpn` y los archivos locales con secretos |
 | `scripts/_comun.sh` | No se ejecuta solo: funciones compartidas (mensajes, requisitos, lectura de Outputs) |
 | `pipeline/build-backend.sh` | `mvnw package` → JWKS de Cognito → jar a S3 → stack del backend → (si ya existia) reinicio por SSM → espera al health check del NLB |
 | `pipeline/api-deploy.sh` | `create-deployment` al stage. **Imprescindible tras cada cambio de la API** |
-| `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `tsc` + `vite build` → `s3 sync` |
+| `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `tsc` + `vite build` → `.tar.gz` con `dist/`, `front/Caddyfile` y la API/Cognito → bucket de artefactos → reinicio de Caddy por SSM |
 | `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno |
 
 Ningun script prueba la API. Eso es trabajo de Bruno y del navegador.
@@ -142,10 +150,14 @@ artifacts.yaml
   sale  : ArtifactsBucketName ───────────────▶ build-backend.sh, backend.yaml
 
 web.yaml
-  entra : ProjectName
-  sale  : SiteBucketName ────────────────────▶ publish-web.sh
-          SiteOrigin ────────────────────────▶ api.yaml (CORS), backend.yaml
-          SiteUrl ───────────────────────────▶ cognito.yaml (callbacks), navegador
+  entra : ProjectName, SiteDomain (vacio = <ip>.sslip.io), VpcId y
+          PublicSubnetId (network), ArtifactsBucketName (artifacts),
+          InstanceType, SiteObjectKey
+  sale  : SiteOrigin ────────────────────────▶ api.yaml (CORS), backend.yaml
+          SiteUrl ───────────────────────────▶ cognito.yaml (callbacks), publish-web.sh, navegador
+          InstanceId, SiteObjectKey ─────────▶ publish-web.sh
+          SitePublicIp ──────────────────────▶ el registro A del dominio propio
+          SiteHost, LogGroupName ────────────▶ informativos
 
 cognito.yaml
   entra : ProjectName, CallbackUrls, LogoutUrls, ResourceServerId, ScopeName,
@@ -213,15 +225,22 @@ Por eso no lleva configuracion: `backend.yaml` la escribe en el parametro de SSM
 los secretos en Secrets Manager y lanza el contenedor. Cambiar un parametro del
 stack y reiniciar el servicio basta; `build-backend.sh` lo hace solo.
 
-### El ciclo aparente, y como se rompe
+### El ciclo aparente, y por que no existe
 
 Cognito necesita la URL del frontend (lista blanca de callbacks) y el frontend
 necesita los datos de Cognito. Parece un huevo y una gallina.
 
-Se rompe **calculando el nombre del bucket antes de crearlo**: `web.yaml` lo
-llama siempre `biblioteca-web-<AccountId>`, asi que `bootstrap.sh` deduce la URL
-con un solo `sts get-caller-identity` y se la pasa a `cognito.yaml` en el mismo
-despliegue. Cero despliegues dobles.
+No lo es, porque `web.yaml` solo crea la **maquina y su nombre**
+(`<ip-elastica>.sslip.io`, o `SiteDomain`), y para eso no necesita nada de
+Cognito ni de la API. Los valores de Cognito y de la API llegan despues,
+**dentro del artefacto** que publica `publish-web.sh` (`aws-config.ts` en el
+bundle; host y stage de la API y dominio de Cognito en `sitio.env`). El orden
+es simplemente `web` → `cognito` → ... → `publish-web.sh`. Cero despliegues
+dobles.
+
+El servidor web lee `/biblioteca/web/sitio.env` (SSM: host, region y de donde
+bajar el sitio) en cada arranque del servicio `biblioteca-web`, igual que el
+backend lee el suyo.
 
 ---
 
@@ -245,22 +264,25 @@ contrasena va a Secrets Manager (`NoEcho`): no queda en ningun Output ni log.
 
 Orden que sigue, y por que:
 
-1. `artifacts`, `web`, `cognito` y `network` **en paralelo**: no dependen de
-   nadie.
-2. `database`: vive en las subredes de `network`. La primera vez tarda ~10
-   minutos (crear la instancia RDS).
-3. `build-backend.sh`: necesita el bucket (1), el issuer, los scopes y el pool
+1. `artifacts` y `network` **en paralelo**: no dependen de nadie.
+2. `web` y `database` **en paralelo**: viven en las subredes de `network`.
+   `web` crea la IP elastica, la EC2 de Caddy y espera a que escuche (el
+   certificado lo pide Caddy en segundo plano). `database` tarda ~10 minutos
+   la primera vez (crear la instancia RDS).
+3. `cognito`: con la URL real del sitio (Output `SiteUrl`) como callback.
+4. `build-backend.sh`: necesita el bucket (1), el issuer, los scopes y el pool
    (Cognito), el origen del sitio (web), las subredes y el security group
    (network) y el endpoint y los secretos (database). Descarga el JWKS de
    Cognito. La primera vez la EC2 instala Docker, baja las imagenes y arranca:
    CloudFormation **espera a que `/health` responda** (CreationPolicy).
-4. `api`: necesita el ARN del pool y el NLB. La primera vez el **VPC Link**
+5. `api`: necesita el ARN del pool y el NLB. La primera vez el **VPC Link**
    tarda varios minutos en quedar disponible.
-5. `api-deploy.sh`: publica al stage.
-6. Usuarios de demostracion (estudiante y empleado, este en el grupo), con
+6. `api-deploy.sh`: publica al stage.
+7. Usuarios de demostracion (estudiante y empleado, este en el grupo), con
    contrasenas aleatorias.
-7. `bruno-env.sh`: entornos de prueba con tokens reales.
-8. `publish-web.sh`: configura, compila y sube el frontend.
+8. `bruno-env.sh`: entornos de prueba con tokens reales.
+9. `publish-web.sh`: configura, compila, empaqueta y publica el frontend en el
+   servidor.
 
 El primer arranque de la aplicacion aplica las migraciones de Flyway (esquema,
 rol `biblioteca_app`, seed del catalogo, y V3) y declara la topologia de
@@ -275,7 +297,8 @@ RabbitMQ. Se ve en `aws logs tail /biblioteca/backend`.
 | `STAGE_NAME` | `test` | Stage de API Gateway |
 | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | — (obligatorias la 1.ª vez) | Proveedor de correo |
 | `REMINDER_LEAD` | `PT24H` | Antelacion del recordatorio. Para una demo, `PT23H58M`: un prestamo de 1 dia avisa a los 2 min |
-| `INSTANCE_TYPE` | `t3.medium` | Tamano de la EC2 |
+| `INSTANCE_TYPE` | `t3.medium` | Tamano de la EC2 de la app |
+| `SITE_DOMAIN` | vacio (`<ip>.sslip.io`) | Dominio propio del sitio; ver *Dominio propio* |
 | `DEMO_USER` | `alumno@duoc.cl` | Estudiante de demostracion |
 | `DEMO_EMPLOYEE` | `empleado@duoc.cl` | Empleado de demostracion (grupo `empleados`) |
 | `SKIP_WEB` | `false` | No compilar ni subir el frontend |
@@ -295,6 +318,27 @@ DEBUG=true ./aws/pipeline/publish-web.sh   # + la vista /diagnostico (no entrega
 ./aws/pipeline/bruno-env.sh        # los tokens caducaron (60 min)
 REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh   # recordatorios rapidos para la demo
 ```
+
+### Dominio propio
+
+Mientras no haya dominio, el sitio vive en `https://<ip-elastica>.sslip.io/`.
+sslip.io es un DNS publico que resuelve cualquier nombre con una IP dentro a
+esa IP; como la IP es elastica, el nombre no cambia aunque el lab detenga la
+instancia. Para pasar a un dominio propio:
+
+1. En tu proveedor DNS, un registro **A** de `biblioteca.midominio.cl` a la IP
+   elastica (Output `SitePublicIp` de `biblioteca-web`). El lab no deja
+   registrar dominios en Route 53 (`route53domains:RegisterDomain`,
+   *explicitDeny*, medido); comprarlo fuera y gestionar ahi el DNS es lo normal.
+2. Espera a que resuelva (`dig +short biblioteca.midominio.cl`).
+3. Pon `SITE_DOMAIN=biblioteca.midominio.cl` en `aws/.env` y corre
+   `./aws/scripts/bootstrap.sh`. Cambia el host en SSM, y los Outputs nuevos
+   llegan a los callbacks de Cognito, al CORS del gateway y de Spring y al
+   `aws-config.ts` del frontend en la misma pasada. Caddy pide el certificado
+   del dominio nuevo al reiniciar.
+
+Dejalo en `aws/.env` y no solo en la terminal: cada bootstrap despliega
+`web.yaml` con ese valor, y sin el el sitio volveria a sslip.io.
 
 ### Consultar la base y el panel de RabbitMQ (VPN opcional)
 
@@ -346,16 +390,26 @@ servidor y la tuya cambian, y el script lo reajusta.
 ./aws/scripts/teardown.sh --yes    # sin preguntar
 ```
 
-Vacia los buckets **antes** de borrar los stacks, incluidas todas las versiones
-y los delete markers del bucket versionado: sin eso, CloudFormation deja el
-stack en `DELETE_FAILED`.
+Vacia el bucket de artefactos **antes** de borrar los stacks, incluidas todas
+las versiones y los delete markers: sin eso, CloudFormation deja el stack en
+`DELETE_FAILED`.
 
 Orden: `vpn` (si existe, via `vpn-down.sh`) → `api` → `backend` → `database` →
-`network` → `cognito` → `web` → `artifacts`. La base se borra **sin snapshot**,
+`web` → `network` → `cognito` → `artifacts`. La base se borra **sin snapshot**,
 y la EC2 con su volumen: se pierden los mensajes que quedaran en las colas.
+Borrar `web` libera la IP elastica: el nombre `<ip>.sslip.io` no se recupera.
 
-**Mientras exista, cuesta por hora aunque el lab este apagado**: el NLB (la EC2
-se detiene con el lab; el NLB no). Si no lo vas a usar en dias, desmontalo.
+**Mientras exista, cuesta por hora aunque el lab este apagado**: el NLB y la
+IP elastica (las EC2 se detienen con el lab; esos dos no). Si no lo vas a usar
+en dias, desmontalo.
+
+### Si venias de la version con el sitio en S3
+
+`web.yaml` era un bucket publico y ahora es una EC2. Actualizar encima borra el
+bucket, y CloudFormation no borra un bucket con objetos: vacialo antes
+(`aws s3 rm s3://biblioteca-web-<cuenta> --recursive`) y corre
+`./aws/scripts/bootstrap.sh`, que despliega el servidor y lleva la URL nueva a
+Cognito, al CORS y al frontend.
 
 ### Si venias de la version con Lambda
 
@@ -447,11 +501,14 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 3. **SES: `explicitDeny`.** El correo sale por un proveedor SMTP externo, y la
    EC2 necesita salida a Internet (subred publica; ver README raiz §7).
 4. **Region `us-east-1`**, casi todo lo demas esta bloqueado.
-5. **Las credenciales caducan cada ~4 horas.** Es la causa numero uno de fallos
+5. **CloudFront: denegado** (`cloudfront:CreateDistribution`, *implicitDeny*,
+   medido). Por eso el sitio lo sirve Caddy en una EC2 y no un bucket con
+   CloudFront delante (README raiz §7).
+6. **Las credenciales caducan cada ~4 horas.** Es la causa numero uno de fallos
    inexplicables. `awsacademy start`.
-6. **Los nombres globales llevan `${AWS::AccountId}`**: los buckets y el dominio
+7. **Los nombres globales llevan `${AWS::AccountId}`**: los buckets y el dominio
    de Cognito son unicos en todo AWS, no solo en tu cuenta.
-7. **RDS y EC2 solo en clases pequenas.** Al cerrar la sesion del lab, AWS
+8. **RDS y EC2 solo en clases pequenas.** Al cerrar la sesion del lab, AWS
    Academy **detiene** RDS y la EC2; al reabrirla tardan unos minutos en volver
    (los servicios de systemd arrancan solos los contenedores).
 
@@ -484,8 +541,14 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 | Un 404 de Spring llega al cliente como **403 con cuerpo vacio** | El reenvio interno a `/error` vuelve a pasar por Spring Security y cae en el `denyAll()`. **Los tests de MockMvc no lo detectan** | `.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()` en `SecurityConfig` (ya esta) |
 | Un token valido sin el scope devuelve **401 y no 403** | No es un fallo: el authorizer `COGNITO_USER_POOLS` responde asi. **Medido** | Es el comportamiento real; el 403 por autorizacion lo da Spring |
 | Un 403 donde esperabas un 404 | API Gateway contesta **403 Missing Authentication Token** a cualquier ruta sin recurso declarado | Antes de mirar el token, comprueba que la ruta exista en `api.yaml` |
-| El sitio en S3 responde 403 | Los cuatro flags de `PublicAccessBlock` bloquean la bucket policy | En `web.yaml` estan los cuatro en `false` a proposito |
-| Cognito rechaza el callback | Solo acepta `https://`, con la unica excepcion de `http://localhost` | Usa el endpoint REST de S3, no el *website endpoint* |
+| Cognito rechaza el callback (`redirect_mismatch`) | Solo acepta `https://` (salvo `http://localhost`), y compara caracter por caracter | El callback es `SiteUrl` con la barra final; si cambiaste `SITE_DOMAIN`, vuelve a correr el bootstrap entero |
+| El sitio responde "Sitio en preparacion" (503) | Todavia no se publico ninguna version: es el Caddyfile provisional del primer arranque | `./aws/pipeline/publish-web.sh` |
+| El navegador avisa de certificado invalido, o no conecta por https | Caddy aun no obtuvo el certificado: el 80 cerrado, el DNS del dominio propio sin apuntar a la IP, o un limite de Let's Encrypt | `aws logs tail /biblioteca/web --follow`: Caddy dice que fallo en la validacion ACME |
+| `web` falla en `SiteSecurityGroup`: *Invalid rule description* | Las descripciones de reglas solo admiten un juego corto de caracteres: un apostrofo (`Let's`) basta | Sin apostrofos ni tildes en esas descripciones |
+| `/api/...` responde **403** desde el sitio pero Bruno da 200 | Caddy reenvia con el `Host` del sitio y API Gateway no sabe que API es | `header_up Host {upstream_hostport}` en `front/Caddyfile` (ya esta) |
+| Una peticion aparece bloqueada en la consola con *Content Security Policy* | El JavaScript intenta hablar con un origen que la CSP no lista | Anadelo a `connect-src` en `front/Caddyfile` y vuelve a publicar |
+| Recargar en `/catalogo` da la portada o 404 | El router no es `createBrowserRouter`, o falta `try_files` | `front/src/app/rutas.tsx` y `front/Caddyfile` |
+| Al actualizar `web`, el bucket viejo queda `DELETE_FAILED` y huerfano | Venias de la version con el sitio en S3 y el bucket tenia objetos | §4, *Si venias de la version con el sitio en S3* |
 | 401 con **todo** token, tambien los recien pedidos, y `kid` desconocido en los logs | Cognito cambio sus claves de firma y el backend tiene el JWKS viejo (se fija al desplegar) | `./aws/pipeline/build-backend.sh` (vuelve a descargarlo) |
 | 500 con `Connection is not available` / `connect timed out` en los logs | RDS todavia arrancando tras reabrir el lab, o detenida | Espera a que `aws rds describe-db-instances` diga `available` |
 | `database` falla con `Cannot find version 16` | RDS no acepto la version mayor sola | Pasa una concreta en `DbEngineVersion` (el comando esta en la descripcion del parametro) |

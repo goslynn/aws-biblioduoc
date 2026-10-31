@@ -1,7 +1,10 @@
 # Frontend · biblioteca-front
 
 Aplicacion **React 19** con **React Router 8** (rutas de datos), compilada con
-**Vite** y con **AWS Amplify Auth 6**, publicada como sitio estatico en S3.
+**Vite** y con **AWS Amplify Auth 6**, servida por **Caddy** (en Docker, en la
+EC2 de `aws/web.yaml`) con HTTPS de Let's Encrypt. Como la sirve Caddy segun
+`Caddyfile`, las rutas son limpias (`/catalogo`) y la API se llama en el mismo
+origen (`/api/...`).
 
 Antes era Angular 22. La migracion conserva las mismas vistas, la misma
 integracion con Cognito (Amplify, code + PKCE) y el mismo contrato con la API.
@@ -13,7 +16,7 @@ Cada pieza de Angular tiene su equivalente:
 | `SesionService` (signal, `providedIn: 'root'`) | almacen de modulo + hook `useSesion()` | `app/auth/sesion.ts` |
 | `authInterceptor` de `HttpClient` | cliente `http` sobre `fetch` | `app/auth/http.ts` |
 | `authGuard` / `empleadoGuard` (`canActivate`) | `requiereSesion` / `requiereEmpleado` (`loader`) | `app/auth/guardas.ts` |
-| `provideRouter(..., withHashLocation())` | `createHashRouter` | `app/rutas.tsx` |
+| `provideRouter(..., withHashLocation())` | `createBrowserRouter` (rutas limpias: ya no hace falta el `#`) | `app/rutas.tsx` |
 | `loadComponent: () => import(...)` | `lazy: () => import(...)` | `app/rutas.tsx` |
 | `title` de la ruta | `handle.titulo`, que aplica `App` | `app/rutas.tsx`, `app/app.tsx` |
 | `SeleccionService` | almacen de modulo + `useSeleccion()` | `app/catalogo/seleccion.ts` |
@@ -27,7 +30,7 @@ Cada pieza de Angular tiene su equivalente:
 El pipeline lo hace todo:
 
 ```sh
-./aws/pipeline/publish-web.sh      # genera la config, compila y sube a S3
+./aws/pipeline/publish-web.sh      # genera la config, compila, empaqueta y reinicia Caddy
 ```
 
 A mano:
@@ -74,21 +77,22 @@ publico. Lo que protege el flujo es PKCE.
 ## 2. Estructura
 
 ```
+Caddyfile                       como se sirve: HTTPS, CSP/HSTS, /api -> API Gateway, rutas limpias
 index.html                      punto de entrada de Vite (<div id="raiz">)
-vite.config.ts                  salida a dist/, base '/' (raiz del bucket)
+vite.config.ts                  salida a dist/, base '/' (raiz del sitio)
 tsconfig.json                   comprueba TODO src/, diagnostico incluido
 src/
 ├── main.tsx                    Amplify.configure() ANTES de montar React
 ├── styles.css
 └── app/
-    ├── rutas.tsx               createHashRouter; /inicio publica, el resto tras una guarda, lazy
+    ├── rutas.tsx               createBrowserRouter; /inicio publica, el resto tras una guarda, lazy
     ├── app.tsx                 marco: cabecera, navegacion, estado de sesion, titulo
     ├── inicio.tsx              portada publica
     ├── almacen.ts              estado compartido fuera de React (useSyncExternalStore)
     ├── formato.ts              fechas como dd-MM-yyyy HH:mm
     ├── auth/
     │   ├── sesion.ts           entrar, registrarse, salir, ¿empleado? (+ hook useSesion)
-    │   ├── http.ts             UNICO cliente de la API: anade el Bearer a toda peticion
+    │   ├── http.ts             UNICO cliente de la API (/api, mismo origen): anade el Bearer
     │   └── guardas.ts          requiereSesion y requiereEmpleado: bloquean la NAVEGACION
     ├── catalogo/               buscador, filtros, seleccion y "avisame cuando vuelva"
     ├── solicitudes/            formulario de prestamo y "mis solicitudes" (con los avisos por correo)
@@ -135,7 +139,7 @@ vacias llenas de 401.
 **`empleado` es solo para pintar.** Sale del claim `cognito:groups` del access
 token y decide si se ven *Bandeja* y *Stock*. Quien decide si se PUEDE es
 Spring, que lee el mismo claim del token ya validado: un estudiante que forzara
-`#/gestion/solicitudes` veria la pantalla y un 403 en cada accion. Tras meter a
+`/gestion/solicitudes` veria la pantalla y un 403 en cada accion. Tras meter a
 alguien en el grupo, tiene que volver a iniciar sesion: el claim va en el token.
 
 **Las pantallas de login y registro son de Cognito, en castellano.** Son
@@ -147,10 +151,14 @@ asi que `sesion.ts` arma la URL de `/signup` con los valores de `aws-config.ts`.
 se olvida, el usuario se registra bien y la API le responde 401 a la primera
 peticion.
 
-**Las rutas llevan `#` (`createHashRouter`).** El sitio se sirve por el
-endpoint REST de S3, que devuelve los objetos que existen y nada mas: con rutas
-limpias, recargar en `/catalogo` daria 404. El *website endpoint* si redirige a
-`index.html`, pero es HTTP puro y Cognito rechaza callbacks sin TLS.
+**La API va por el mismo origen, y las rutas no llevan `#`. Las dos cosas
+las hace el `Caddyfile`.** `/api/*` se reenvia a API Gateway (con el `Host`
+del gateway, o responde 403), asi que `http.ts` pide `/api/libros` al propio
+sitio: ni preflight ni CORS. Cualquier otra ruta que no sea un archivo devuelve
+`index.html`, y por eso `createBrowserRouter` funciona al recargar en
+`/catalogo`. Con el sitio en S3 no se podia: de ahi venia el `#`. La CSP del
+`Caddyfile` solo deja al JavaScript hablar con el sitio y con Cognito; si
+algun dia se llama a otro origen, hay que anadirlo a `connect-src`.
 
 ---
 
@@ -180,18 +188,24 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 7. **Empleado → Stock**: cargar el libro agotado del paso 5 → el estudiante
    recibe "Volvio: ..." y su suscripcion se cierra.
 8. **Empleado → Bandeja → Registrar devolucion** → correo de devolucion.
-9. Con el estudiante, forzar `#/gestion/solicitudes`: redirige al catalogo (la
+9. Con el estudiante, forzar `/gestion/solicitudes`: redirige al catalogo (la
    guarda); y aunque se la saltara, Spring responderia 403.
-10. En Network: **ni un solo error de CORS** (incluidos `PUT` y `DELETE`), y el
-    `Authorization: Bearer` en cada peticion **sin que ningun componente lo
-    haya puesto**.
+10. Recargar (F5) en `/mis-solicitudes`: sigue en la misma vista, sin 404.
+11. En Network: todas las llamadas van a `/api/...` **del mismo origen**, sin
+    ningun `OPTIONS`; el `Authorization: Bearer` en cada peticion **sin que
+    ningun componente lo haya puesto**. En la consola, **ni un aviso de la
+    CSP**. En la respuesta de `/`, las cabeceras `Strict-Transport-Security` y
+    `Content-Security-Policy`, y el candado con un certificado de Let's
+    Encrypt.
 
 Para ver el recordatorio sin esperar dias, despliega con
 `REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh`, pide un prestamo de
 **1 dia** y apruebalo: a los ~2 minutos llega "vence pronto".
 
-Ese ultimo punto es la evidencia de que `auth/http.ts` funciona, y el silencio
-en CORS es la evidencia de que el preflight y los `GatewayResponses` estan bien.
+Ese ultimo punto es la evidencia de que `auth/http.ts` y el proxy del
+`Caddyfile` funcionan. El CORS del gateway sigue configurado (con el origen del
+sitio) para quien llame a API Gateway directamente; desde el sitio ya no
+interviene.
 
 ### El paso que no esta, salvo que se pida
 
@@ -202,5 +216,5 @@ dos llamadas manuales con `fetch` (con cabecera a mano → 200, sin cabecera →
 valida en claro.
 
 Con `DEBUG=false` -- el valor por defecto -- ese enlace no existe, la ruta
-tampoco, el componente ni siquiera se empaqueta y pedir `#/diagnostico` a mano
+tampoco, el componente ni siquiera se empaqueta y pedir `/diagnostico` a mano
 redirige al inicio.

@@ -20,8 +20,8 @@ export const awsConfig = {
   hostedUiDomain: 'biblioteca-000000000000.auth.us-east-1.amazoncognito.com',
   /** Output ScopeCompleto: el mismo literal que exigen API Gateway y Spring */
   scope: 'biblioteca-api/acceso',
-  /** Output SiteUrl de aws/web.yaml: tiene que coincidir con el CallbackURL */
-  redirectUrl: 'https://biblioteca-000000000000.s3.us-east-1.amazonaws.com/index.html',
-  /** Output ApiEndpoint de aws/api.yaml, con el stage incluido */
-  apiBaseUrl: 'https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/test',
+  /** Output SiteUrl de aws/web.yaml: tiene que coincidir con el CallbackURL, barra final incluida */
+  redirectUrl: 'https://203.0.113.10.sslip.io/',
+  // La API no esta aqui: se llama en el MISMO origen (/api/...) y Caddy la
+  // reenvia a API Gateway (front/Caddyfile). Ver auth/http.ts.
 };

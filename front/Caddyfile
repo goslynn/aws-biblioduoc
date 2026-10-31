@@ -1,0 +1,83 @@
+# ==============================================================================
+#  biblioteca / front/Caddyfile   --   Como se sirve el frontend
+# ==============================================================================
+#
+#  Lo empaqueta aws/pipeline/publish-web.sh junto con dist/ y lo usa el
+#  contenedor de Caddy de la EC2 de aws/web.yaml. Cambiarlo es publicar el
+#  sitio otra vez: no hace falta tocar la instancia.
+#
+#  Las {$VARIABLES} las pone el entorno del contenedor, nunca este archivo:
+#    SITIO_HOST   SiteConfig (web.yaml): <ip>.sslip.io o el dominio propio
+#    AWS_REGION   SiteConfig (web.yaml)
+#    API_HOST     Output ApiEndpoint de api.yaml, solo el host  (publish-web.sh)
+#    API_STAGE    Output ApiEndpoint de api.yaml, solo el stage (publish-web.sh)
+#    COGNITO_HOST Output HostedUiDomain de cognito.yaml, sin https:// (publish-web.sh)
+#
+#  QUE HACE
+#    1. HTTPS automatico: con un nombre como direccion, Caddy pide el
+#       certificado a Let's Encrypt, lo renueva antes de que caduque y
+#       redirige http -> https. No hay ninguna linea de TLS aqui, y es a
+#       proposito.
+#    2. /api/* -> API Gateway. El navegador solo habla con este origen, asi que
+#       no hay CORS ni preflight. El token viaja tal cual en Authorization; la
+#       validacion sigue siendo de API Gateway y de Spring.
+#    3. Todo lo demas -> el React compilado. Una ruta que no es un archivo
+#       (/catalogo, /gestion/stock) devuelve index.html y la resuelve React
+#       Router: por eso las rutas ya no necesitan "#".
+#    4. Cabeceras de seguridad en todas las respuestas.
+# ==============================================================================
+
+{
+	# HTTP/3 iria por UDP 443, que el security group no abre: no se anuncia.
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$SITIO_HOST} {
+	encode zstd gzip
+
+	# Registro de accesos a stdout -> CloudWatch (/biblioteca/web). Caddy NO
+	# registra la cabecera Authorization: la redacta por defecto.
+	log
+
+	header {
+		# Solo HTTPS durante un ano, tambien si alguien escribe http://.
+		Strict-Transport-Security "max-age=31536000"
+		# Que puede cargar la pagina. connect-src es la lista corta de a quien
+		# puede llamar el JavaScript: este origen (/api incluido), Managed Login
+		# (canje del code por tokens) y la API de Cognito (refresco y atributos).
+		# Si un fetch nuevo aparece bloqueado en la consola, es aqui.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://{$COGNITO_HOST} https://cognito-idp.{$AWS_REGION}.amazonaws.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+
+	# --- La API: mismo origen, reenviada a API Gateway --------------------------
+	#  /api/libros -> https://<API_HOST>/<API_STAGE>/api/libros
+	#  Host tiene que ser el del gateway: con el del sitio, API Gateway no sabe
+	#  a que API va la peticion y responde 403.
+	handle /api/* {
+		rewrite * /{$API_STAGE}{uri}
+		reverse_proxy https://{$API_HOST} {
+			header_up Host {upstream_hostport}
+		}
+	}
+
+	# --- El sitio -----------------------------------------------------------------
+	handle {
+		root * /srv
+
+		# Los bundles llevan un hash en el nombre: se pueden cachear para
+		# siempre. index.html no: es el que apunta a los bundles nuevos.
+		@bundles path /assets/*
+		header @bundles Cache-Control "public, max-age=31536000, immutable"
+		header ?Cache-Control "no-cache"
+
+		try_files {path} /index.html
+		file_server
+	}
+}

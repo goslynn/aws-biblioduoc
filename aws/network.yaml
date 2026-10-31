@@ -29,6 +29,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    security group no acepta NADA desde Internet. Es una desviacion declarada
 #    (README.md §7).
 #
+#    La usa tambien el servidor del frontend (web.yaml), que SI recibe desde
+#    Internet 80 y 443, con su propio security group: el de la app no cambia.
+#
 #  >>> LO QUE SIGUE SIN HABER <<<
 #    Las subredes PRIVADAS siguen sin ruta a 0.0.0.0/0 y sin NAT. La base vive
 #    ahi, sin IP publica, y solo se le llega desde AppSecurityGroup (y, mientras
@@ -349,7 +352,7 @@ Outputs:
     Value: !Join [",", [!Ref PrivateSubnetA, !Ref PrivateSubnetB]]
 
   PublicSubnetId:
-    Description: La subred publica. La usan la EC2 de backend.yaml y el servidor de vpn.yaml.
+    Description: La subred publica. La usan la EC2 de backend.yaml, el servidor web de web.yaml y el de vpn.yaml.
     Value: !Ref PublicSubnet
 
   AppSecurityGroupId:

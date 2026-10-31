@@ -102,9 +102,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    * client_credentials NO admite openid/email/profile: son scopes de OIDC y
 #      ahi no hay usuario. Solo el custom scope.
 #    * Cognito solo acepta callbacks https, con la unica excepcion de
-#      http://localhost. Por eso el sitio va en el endpoint REST de S3.
+#      http://localhost. Por eso el servidor del sitio (web.yaml) tiene
+#      certificado de Let's Encrypt aunque no haya dominio propio (sslip.io).
 #    * El CallbackURL debe coincidir CARACTER POR CARACTER con el redirect_uri
-#      que manda Amplify, /index.html incluido.
+#      que manda Amplify, barra final incluida (https://<host>/).
 #    * El enlace "Sign up" de Managed Login NO se configura: aparece o no segun
 #      AllowAdminCreateUserOnly. Con true, /signup responde un error de cliente
 #      invalido aunque la URL este bien formada.
@@ -118,9 +119,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      "0f6b5cff" (el ultimo par es la opacidad).
 #
 #  DEPENDE DE
-#    Nada. bootstrap.sh le pasa la URL del sitio calculada a partir del
-#    AccountId, antes incluso de que exista el bucket, y el logo y el favicon
-#    del login en base64 (aws/marca/*.svg).
+#    * web.yaml -> SiteUrl (callbacks y logout). Es lo unico: el sitio no
+#      necesita nada de Cognito para EXISTIR, solo para publicarse, y eso lo
+#      hace despues publish-web.sh.
+#    Ademas, bootstrap.sh le pasa el logo y el favicon del login en base64
+#    (aws/marca/*.svg).
 #
 #  ENTREGA (Outputs)
 #    UserPoolArn    -> api.yaml (el authorizer)
@@ -140,8 +143,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      --stack-name biblioteca-cognito \
 #      --parameter-overrides \
 #        ProjectName=biblioteca \
-#        "CallbackUrls=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com/index.html" \
-#        "LogoutUrls=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com/index.html" \
+#        "CallbackUrls=https://<ip-elastica>.sslip.io/" \
+#        "LogoutUrls=https://<ip-elastica>.sslip.io/" \
 #        "LogoLoginSvg=$(base64 -w0 aws/marca/logo-login.svg)" \
 #        "FaviconLoginSvg=$(base64 -w0 aws/marca/favicon-login.svg)"
 # ==============================================================================
@@ -195,7 +198,7 @@ Parameters:
     Description: >-
       URLs a las que Cognito puede redirigir DESPUES del login. Deben ser https
       (unica excepcion: http://localhost) y coincidir exactamente con el
-      redirect_uri que envia el cliente, /index.html incluido.
+      redirect_uri que envia el cliente, barra final incluida.
 
   LogoutUrls:
     Type: CommaDelimitedList

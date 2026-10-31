@@ -1,61 +1,107 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 # ==============================================================================
-#  biblioteca / web.yaml   --   Hosting del frontend React en S3
+#  biblioteca / web.yaml   --   Servidor del frontend: Caddy en Docker sobre EC2
 # ==============================================================================
 #
 #  QUE HACE
-#    * SiteBucket       -> bucket S3 con el React ya compilado (vite build).
-#    * SiteBucketPolicy -> politica que permite a CUALQUIERA leer los objetos.
-#                          Es un sitio publico: solo contiene HTML, CSS y JS.
+#    * SiteIp + SiteNic + SiteIpAssociation -> una IP ELASTICA (fija) pegada a
+#                          una interfaz de red ANTES de que exista la
+#                          instancia. Es el nombre del sitio: <ip>.sslip.io.
+#    * SiteSecurityGroup -> entra 80 y 443 desde Internet; sale solo 443.
+#    * SiteConfig        -> parametro de SSM con la configuracion de la
+#                          instancia (host del sitio, de donde bajar el sitio).
+#    * SiteLogGroup      -> los logs de Caddy (accesos y certificados).
+#    * SiteInstance      -> Amazon Linux 2023 con Docker y UN contenedor:
+#                            web  (caddy:2.10-alpine)
+#                          que sirve el React compilado, pide y renueva solo el
+#                          certificado de Let's Encrypt, y reenvia /api/* a
+#                          API Gateway.
 #
-#  >>> POR QUE EL ENDPOINT REST Y NO EL "WEBSITE ENDPOINT" <<<
-#    S3 ofrece dos formas de servir un bucket:
+#  >>> POR QUE UN SERVIDOR Y NO EL BUCKET S3 DE ANTES <<<
+#    El endpoint REST de S3 servia el sitio con HTTPS, pero no dejaba poner
+#    cabeceras de seguridad (CSP, HSTS), ni rutas limpias (/catalogo daba 404
+#    al recargar: por eso las rutas llevaban #), ni un dominio propio con su
+#    certificado. Lo unico que lo arreglaria sin servidor es CloudFront, y el
+#    Learner Lab lo deniega (cloudfront:CreateDistribution, implicitDeny,
+#    medido con simulate-principal-policy).
 #
-#      website endpoint  http://<bucket>.s3-website-<region>.amazonaws.com
-#                        Tiene redireccion de errores a index.html... pero es
-#                        HTTP PURO, sin TLS. Cognito RECHAZA cualquier callback
-#                        que no sea https (unica excepcion: http://localhost).
+#  >>> HTTPS SIN DOMINIO PROPIO: sslip.io <<<
+#    Cognito exige https en el callback, y Let's Encrypt solo certifica
+#    NOMBRES. sslip.io es un DNS publico que resuelve cualquier nombre con una
+#    IP dentro a esa IP: 54.1.2.3.sslip.io -> 54.1.2.3. Con una IP elastica,
+#    el nombre es estable y Caddy obtiene un certificado valido para el.
 #
-#      endpoint REST     https://<bucket>.s3.<region>.amazonaws.com/index.html
-#                        HTTPS de verdad, aceptado por Cognito. No reescribe
-#                        rutas desconocidas a index.html.
+#    Cuando haya dominio propio: crea en tu proveedor DNS un registro A que
+#    apunte a la IP elastica (Output SitePublicIp), y vuelve a desplegar con
+#    SITE_DOMAIN=midominio.cl ./aws/scripts/bootstrap.sh. El host cambia en
+#    SiteConfig, y los Outputs SiteOrigin/SiteUrl llevan el nombre nuevo a
+#    Cognito, a la API y al backend en la misma pasada.
 #
-#    Se usa el REST, y por eso el frontend enruta con createHashRouter():
-#    todas las vistas viven en .../index.html#/catalogo y el navegador nunca
-#    le pide a S3 una ruta que no existe como objeto.
+#  >>> POR QUE LA IP SE PEGA A UNA INTERFAZ Y NO A LA INSTANCIA <<<
+#    Un AWS::EC2::EIP con InstanceId se asocia DESPUES de crear la instancia:
+#    en el primer arranque Caddy pediria el certificado para una IP que todavia
+#    no es la suya, y Let's Encrypt fallaria la validacion. Pegandola a una
+#    interfaz (SiteNic) que la instancia usa como eth0, la IP ya es suya desde
+#    el primer segundo. Y como es elastica, no cambia cuando el lab detiene la
+#    instancia.
 #
-#  >>> POR QUE EL NOMBRE ES PREDECIBLE <<<
-#    Hay un ciclo aparente: Cognito necesita la URL del sitio (lista blanca de
-#    callbacks) y el sitio necesita los datos de Cognito. Se rompe aqui: el
-#    bucket se llama SIEMPRE "<proyecto>-web-<AccountId>", asi que bootstrap.sh
-#    calcula la URL con un solo "sts get-caller-identity", ANTES de que el
-#    bucket exista, y se la pasa a cognito.yaml. Cero doble despliegue.
+#  >>> QUE HAY EN LA INSTANCIA Y QUE LLEGA DESPUES <<<
+#    El UserData (solo el PRIMER arranque) instala Docker, deja el script de
+#    arranque y el servicio de systemd biblioteca-web. Cada arranque del
+#    servicio:
+#      1. lee SiteConfig (SSM): el host y de donde bajar el sitio;
+#      2. baja de S3 la version del sitio que dejo publish-web.sh
+#         (/etc/biblioteca/version), un .tar.gz con:
+#            srv/        el React compilado (vite build)
+#            Caddyfile   la configuracion de Caddy (front/Caddyfile)
+#            sitio.env   la API y el dominio de Cognito, de los Outputs
+#      3. lanza Caddy con todo eso.
+#    Antes del primer publish-web.sh no hay sitio: arranca un Caddyfile minimo
+#    que responde 503 "en preparacion", pero que YA obtiene el certificado.
+#
+#    Asi, ningun valor de Cognito ni de la API vive en este stack, y por eso
+#    no hay ciclo: este stack no depende de Cognito, y Cognito recibe de aqui
+#    la URL del sitio (Output SiteUrl).
 #
 #  TRAMPAS
-#    * Para que una bucket policy publica surta efecto hay que APAGAR
-#      BlockPublicPolicy y RestrictPublicBuckets. Con los valores por defecto
-#      (todo en true) la politica se acepta... y no sirve de nada: 403.
-#    * CloudFormation no borra un bucket con objetos: teardown.sh lo vacia.
+#    * El certificado se guarda en el volumen de Docker caddy-datos. Sin el,
+#      cada reinicio pediria uno nuevo y Let's Encrypt limita cuantos emite
+#      por nombre y semana. Recrear la INSTANCIA si pide uno nuevo.
+#    * Let's Encrypt valida por el puerto 80 (HTTP-01): no lo cierres aunque
+#      el sitio sea solo HTTPS; Caddy lo usa ademas para redirigir a https.
+#    * sslip.io es compartido por todo el mundo: si Let's Encrypt aplicara su
+#      limite por dominio, Caddy prueba solo con ZeroSSL. Con dominio propio
+#      el problema desaparece.
+#    * HTTP/3 va por UDP 443, que este security group no abre a proposito:
+#      el Caddyfile lo apaga para no anunciar algo que no llega.
+#    * Cambiar el UserData DETIENE y arranca la instancia y no lo vuelve a
+#      ejecutar: la configuracion vive en SiteConfig y en el artefacto.
 #
 #  DEPENDE DE
-#    Nada.
+#    * network.yaml   -> VpcId, PublicSubnetId
+#    * artifacts.yaml -> ArtifactsBucketName (ahi deja publish-web.sh el sitio)
 #
 #  ENTREGA (Outputs)
-#    SiteBucketName -> aws/pipeline/publish-web.sh (destino del s3 sync)
-#    SiteUrl        -> el navegador
-#    SiteOrigin     -> cognito.yaml (callbacks) y api.yaml (CORS)
+#    SiteOrigin     -> backend.yaml (CORS de Spring) y api.yaml (CORS del gateway)
+#    SiteUrl        -> cognito.yaml (callbacks), publish-web.sh, el navegador
+#    SiteHost       -> informativo
+#    SitePublicIp   -> el registro A del dominio propio, cuando lo haya
+#    InstanceId     -> publish-web.sh (reinicio por SSM con el sitio nuevo)
+#    SiteObjectKey  -> publish-web.sh (donde subir el .tar.gz)
+#    LogGroupName   -> aws logs tail
 #
-#  DESPLIEGUE MANUAL
-#    aws cloudformation deploy \
-#      --template-file aws/web.yaml \
-#      --stack-name biblioteca-web \
-#      --parameter-overrides ProjectName=biblioteca
+#  DESPLIEGUE
+#    Lo hace bootstrap.sh. A mano:
+#      aws cloudformation deploy --template-file aws/web.yaml \
+#        --stack-name biblioteca-web --parameter-overrides \
+#        ProjectName=biblioteca VpcId=<...> PublicSubnetId=<...> \
+#        ArtifactsBucketName=<...>
 # ==============================================================================
 
 Description: >-
-  biblioteca - Bucket S3 publico que sirve el frontend React por su endpoint
-  REST (HTTPS). Sin dependencias.
+  biblioteca - EC2 con Caddy en Docker que sirve el frontend React con HTTPS
+  (Let's Encrypt) y reenvia /api a API Gateway. Depende de network y artifacts.
 
 Parameters:
 
@@ -65,71 +111,309 @@ Parameters:
     AllowedPattern: "^[a-z0-9-]+$"
     Description: Prefijo de nombres. Debe coincidir con el de los demas stacks.
 
+  SiteDomain:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^[a-z0-9.-]+\\.[a-z]{2,}$"
+    ConstraintDescription: Un nombre DNS en minusculas (midominio.cl), o vacio.
+    Description: >-
+      Dominio propio del sitio. Vacio = <ip-elastica>.sslip.io. Antes de
+      ponerlo, su registro A tiene que apuntar a SitePublicIp: si no, Let's
+      Encrypt no puede validarlo y el sitio queda sin certificado.
+
+  InstanceProfileName:
+    Type: String
+    Default: LabInstanceProfile
+    Description: >-
+      Perfil de la instancia. En AWS Academy no se pueden crear roles: se usa
+      el preexistente (LabRole). Le da permiso para leer SiteConfig, bajar el
+      sitio de S3, escribir logs y recibir comandos de SSM.
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+    Description: Caddy sirviendo archivos estaticos cabe de sobra en 1 GiB.
+
+  ImageId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: AMI de la instancia (Amazon Linux 2023, con AWS CLI y agente de SSM).
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Output "VpcId" de network.yaml.
+
+  PublicSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Output "PublicSubnetId" de network.yaml. La unica con salida a Internet.
+
+  ArtifactsBucketName:
+    Type: String
+    Description: Output "ArtifactsBucketName" de artifacts.yaml.
+
+  SiteObjectKey:
+    Type: String
+    Default: web/sitio.tar.gz
+    Description: Ruta del sitio empaquetado dentro del bucket de artefactos.
+
+Conditions:
+  HayDominio: !Not [!Equals [!Ref SiteDomain, ""]]
+
 Resources:
 
-  # ---------------------------------------------------------------------------
-  #  El bucket del sitio.
-  # ---------------------------------------------------------------------------
-  SiteBucket:
-    Type: AWS::S3::Bucket
+  # ===========================================================================
+  #  LA DIRECCION: IP elastica pegada a una interfaz (ver cabecera)
+  # ===========================================================================
+
+  SiteIp:
+    Type: AWS::EC2::EIP
     Properties:
-      # Nombre predecible: es lo que rompe el ciclo con Cognito (ver cabecera).
-      BucketName: !Sub "${ProjectName}-web-${AWS::AccountId}"
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-web"
+        - Key: Project
+          Value: !Ref ProjectName
 
-      # Se apagan los cuatro bloqueos porque este bucket SI debe ser legible
-      # por todo el mundo. Es la diferencia deliberada con artifacts.yaml, que
-      # los tiene los cuatro en true.
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: false
-        BlockPublicPolicy: false
-        IgnorePublicAcls: false
-        RestrictPublicBuckets: false
+  # Lo que se abre a Internet es SOLO esto: 80 (validacion de Let's Encrypt y
+  # redireccion a https) y 443 (el sitio). La salida, solo 443: Let's Encrypt,
+  # API Gateway, S3, SSM, los repositorios de paquetes y el registro de
+  # imagenes van todos por HTTPS.
+  SiteSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Servidor web del frontend (Caddy)
+      VpcId: !Ref VpcId
+      # Ojo: las descripciones de las reglas solo admiten un juego corto de
+      # caracteres (sin apostrofos ni tildes); "Let's" hace fallar el recurso.
+      SecurityGroupIngress:
+        - Description: HTTP (validacion ACME HTTP-01 y redireccion a HTTPS)
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - Description: HTTPS (el sitio)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - Description: HTTPS de salida (ACME, API Gateway, S3, SSM, paquetes, imagenes)
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-web"
+        - Key: Project
+          Value: !Ref ProjectName
 
-      # Se declara aunque el endpoint REST no use la redireccion de errores:
-      # deja el bucket listo si algun dia se pone CloudFront delante, que si la
-      # aprovecha para devolver index.html en las rutas del SPA.
-      WebsiteConfiguration:
-        IndexDocument: index.html
-        ErrorDocument: index.html
-
+  SiteNic:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: !Sub "${ProjectName}-web eth0"
+      SubnetId: !Ref PublicSubnetId
+      GroupSet: [!Ref SiteSecurityGroup]
       Tags:
         - Key: Project
           Value: !Ref ProjectName
 
-  # ---------------------------------------------------------------------------
-  #  Lectura publica de los objetos. Solo s3:GetObject: nadie de fuera puede
-  #  listar el bucket, ni subir, ni borrar. Publicar el JS de un SPA es normal;
-  #  el frontend no guarda ningun secreto (por eso el App Client de Cognito se
-  #  crea SIN client_secret y usa PKCE).
-  # ---------------------------------------------------------------------------
-  SiteBucketPolicy:
-    Type: AWS::S3::BucketPolicy
+  SiteIpAssociation:
+    Type: AWS::EC2::EIPAssociation
     Properties:
-      Bucket: !Ref SiteBucket
-      PolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Sid: LecturaPublicaDelSitio
-            Effect: Allow
-            Principal: "*"
-            Action: "s3:GetObject"
-            Resource: !Sub "${SiteBucket.Arn}/*"
+      AllocationId: !GetAtt SiteIp.AllocationId
+      NetworkInterfaceId: !Ref SiteNic
+
+  # ===========================================================================
+  #  CONFIGURACION Y LOGS
+  # ===========================================================================
+
+  # La leen los scripts de la instancia en CADA arranque del servicio. Cambiar
+  # el dominio cambia este parametro, no la instancia.
+  SiteConfig:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ProjectName}/web/sitio.env"
+      Type: String
+      Description: Configuracion del servidor web (formato VARIABLE=valor).
+      Value: !Sub
+        - |
+          SITIO_HOST=${Host}
+          AWS_REGION=${AWS::Region}
+          ARTEFACTO_BUCKET=${ArtifactsBucketName}
+          ARTEFACTO_KEY=${SiteObjectKey}
+        - Host: !If [HayDominio, !Ref SiteDomain, !Sub "${SiteIp}.sslip.io"]
+      Tags:
+        Project: !Ref ProjectName
+
+  SiteLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/${ProjectName}/web"
+      RetentionInDays: 7
+
+  # ===========================================================================
+  #  LA INSTANCIA
+  # ===========================================================================
+
+  SiteInstance:
+    Type: AWS::EC2::Instance
+    # La IP tiene que estar pegada ANTES del primer arranque (ver cabecera).
+    DependsOn: SiteIpAssociation
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT10M
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfileName
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          NetworkInterfaceId: !Ref SiteNic
+      # IMDSv2 obligatorio. Un salto basta: el contenedor no usa credenciales
+      # de AWS; quien lee SSM y S3 es el script, en la propia maquina.
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-web"
+        - Key: Project
+          Value: !Ref ProjectName
+      # -----------------------------------------------------------------------
+      #  PRIMER ARRANQUE. Las variables de bash van SIN llaves ($VAR) para que
+      #  CloudFormation no las confunda con las suyas.
+      # -----------------------------------------------------------------------
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > >(tee -a /var/log/biblioteca-arranque.log | logger -t biblioteca -s 2>/dev/console) 2>&1
+
+          dnf install -y -q docker aws-cfn-bootstrap
+          systemctl enable --now docker
+          install -d -m 755 /opt/biblioteca /etc/biblioteca
+
+          # --- Sitio provisional: solo hasta el primer publish-web.sh ---------
+          #  Responde 503, pero ya pide el certificado: cuando llegue el sitio
+          #  de verdad, el HTTPS esta listo.
+          install -d -m 755 /opt/biblioteca/provisional/srv
+          cat > /opt/biblioteca/provisional/Caddyfile <<'EOF'
+          {
+          	servers {
+          		protocols h1 h2
+          	}
+          }
+          {$SITIO_HOST} {
+          	respond "Sitio en preparacion: falta ./aws/pipeline/publish-web.sh" 503
+          }
+          EOF
+          : > /opt/biblioteca/provisional/sitio.env
+
+          # --- Arranque del servicio: se ejecuta en CADA inicio ----------------
+          cat > /opt/biblioteca/arrancar-web.sh <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          REGION=${AWS::Region}
+          CONFIG="$(aws ssm get-parameter --name ${SiteConfig} --region "$REGION" --query Parameter.Value --output text)"
+          valor() { grep "^$1=" <<<"$CONFIG" | cut -d= -f2-; }
+
+          # La version que dejo publish-web.sh; sin ella, el sitio provisional.
+          SITIO=/opt/biblioteca/provisional
+          VERSION="$(cat /etc/biblioteca/version 2>/dev/null || true)"
+          if [ -n "$VERSION" ]; then
+            aws s3api get-object --bucket "$(valor ARTEFACTO_BUCKET)" --key "$(valor ARTEFACTO_KEY)" \
+              --version-id "$VERSION" --region "$REGION" /opt/biblioteca/sitio.tar.gz >/dev/null
+            rm -rf /opt/biblioteca/sitio && install -d -m 755 /opt/biblioteca/sitio
+            tar -xzf /opt/biblioteca/sitio.tar.gz -C /opt/biblioteca/sitio
+            SITIO=/opt/biblioteca/sitio
+          fi
+
+          # Entorno de Caddy: lo de SSM (host, region) + lo del artefacto (API, Cognito).
+          { grep -e '^SITIO_HOST=' -e '^AWS_REGION=' <<<"$CONFIG"; cat "$SITIO/sitio.env"; } > /etc/biblioteca/web.env
+
+          exec docker run --rm --name web \
+            -p 80:80 -p 443:443 \
+            --env-file /etc/biblioteca/web.env \
+            -v "$SITIO/srv":/srv:ro \
+            -v "$SITIO/Caddyfile":/etc/caddy/Caddyfile:ro \
+            -v caddy-datos:/data -v caddy-config:/config \
+            --log-driver awslogs --log-opt awslogs-region=$REGION \
+            --log-opt awslogs-group=${SiteLogGroup} --log-opt awslogs-stream=caddy \
+            public.ecr.aws/docker/library/caddy:2.10-alpine
+          EOF
+          chmod 755 /opt/biblioteca/arrancar-web.sh
+
+          cat > /etc/systemd/system/biblioteca-web.service <<'EOF'
+          [Unit]
+          Description=Servidor web de la biblioteca (Caddy)
+          After=docker.service network-online.target
+          Requires=docker.service
+          [Service]
+          ExecStartPre=-/usr/bin/docker rm -f web
+          ExecStart=/opt/biblioteca/arrancar-web.sh
+          ExecStop=/usr/bin/docker stop web
+          Restart=always
+          RestartSec=10
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable --now biblioteca-web
+
+          # --- Senal: lista cuando Caddy escucha -------------------------------
+          #  No se espera al certificado: eso depende de Let's Encrypt y de
+          #  sslip.io, no de esta maquina. Si tarda, se ve en los logs.
+          OK=1
+          for i in $(seq 1 40); do
+            if curl -s -o /dev/null http://127.0.0.1/; then OK=0; break; fi
+            sleep 5
+          done
+          /opt/aws/bin/cfn-signal -e $OK --stack ${AWS::StackName} --resource SiteInstance --region ${AWS::Region}
 
 Outputs:
 
-  SiteBucketName:
-    Description: Bucket donde aws/pipeline/publish-web.sh hace el s3 sync.
-    Value: !Ref SiteBucket
+  SiteHost:
+    Description: Nombre del sitio (dominio propio, o <ip>.sslip.io).
+    Value: !If [HayDominio, !Ref SiteDomain, !Sub "${SiteIp}.sslip.io"]
 
   SiteOrigin:
     Description: >-
-      ORIGEN del sitio (esquema + host, sin barra final ni ruta). Este valor
-      exacto es el que va en AllowOrigins de api.yaml: el navegador compara el
-      header Origin caracter por caracter.
-    Value: !Sub "https://${SiteBucket}.s3.${AWS::Region}.amazonaws.com"
+      ORIGEN del sitio (esquema + host, sin barra final). Va al CORS de
+      api.yaml y de Spring: el navegador compara el header Origin caracter por
+      caracter.
+    Value: !If [HayDominio, !Sub "https://${SiteDomain}", !Sub "https://${SiteIp}.sslip.io"]
 
   SiteUrl:
     Description: >-
-      URL para abrir en el navegador. Tambien es el CallbackURL de Cognito, y
-      tiene que coincidir EXACTAMENTE, /index.html incluido.
-    Value: !Sub "https://${SiteBucket}.s3.${AWS::Region}.amazonaws.com/index.html"
+      URL del sitio. Tambien es el callback y el logout de Cognito, y el
+      redirectUrl de Amplify: tiene que coincidir EXACTAMENTE, barra incluida.
+    Value: !If [HayDominio, !Sub "https://${SiteDomain}/", !Sub "https://${SiteIp}.sslip.io/"]
+
+  SitePublicIp:
+    Description: IP elastica. El registro A del dominio propio apunta aqui.
+    Value: !Ref SiteIp
+
+  InstanceId:
+    Description: La EC2. publish-web.sh la reinicia por SSM con el sitio nuevo.
+    Value: !Ref SiteInstance
+
+  SiteObjectKey:
+    Description: Ruta del .tar.gz del sitio en el bucket de artefactos.
+    Value: !Ref SiteObjectKey
+
+  LogGroupName:
+    Description: "Logs de Caddy: aws logs tail <este valor> --follow"
+    Value: !Ref SiteLogGroup

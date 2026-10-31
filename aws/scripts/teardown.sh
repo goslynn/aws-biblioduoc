@@ -12,13 +12,14 @@
 #      1. api        (depende del NLB y del pool; borra el VPC Link)
 #      2. backend    (EC2 + RabbitMQ + NLB; depende del bucket, la red y la base)
 #      3. database   <- se borra la instancia SIN snapshot: es un laboratorio
-#      4. network    <- puede tardar unos minutos: AWS libera con calma las
+#      4. web        (servidor del sitio; vive en la subred publica, y libera
+#                       la IP elastica: el nombre sslip.io no se recupera)
+#      5. network    <- puede tardar unos minutos: AWS libera con calma las
 #                       interfaces de red del NLB y del VPC Link
-#      5. cognito
-#      6. web        <- hay que VACIAR el bucket primero
+#      6. cognito
 #      7. artifacts  <- hay que vaciarlo, y ademas borrar TODAS las versiones
 #
-#  >>> POR QUE HAY QUE VACIAR LOS BUCKETS A MANO <<<
+#  >>> POR QUE HAY QUE VACIAR EL BUCKET A MANO <<<
 #    CloudFormation se niega a borrar un bucket que tenga objetos dentro, y el
 #    stack entero queda en DELETE_FAILED. En un bucket VERSIONADO, ademas, no
 #    basta con borrar los objetos: hay que eliminar cada version y cada delete
@@ -45,9 +46,9 @@ cat <<EOF
       ${STACK_API}
       ${STACK_BACKEND}    + la EC2, RabbitMQ y los mensajes que queden en sus colas
       ${STACK_DATABASE}   + la base PostgreSQL entera, sin snapshot
+      ${STACK_WEB}        + el servidor del sitio y su IP elastica (el nombre sslip.io cambia)
       ${STACK_NETWORK}
       ${STACK_COGNITO}
-      ${STACK_WEB}        + todo el contenido del bucket del sitio
       ${STACK_ARTIFACTS}  + todas las versiones de los artefactos
 
   Se pierden tambien los usuarios de Cognito y todas las solicitudes.
@@ -110,8 +111,7 @@ borra_stack() {
   fi
 }
 
-# Los buckets, antes de que desaparezcan sus stacks.
-vacia_bucket "$(output_de "$STACK_WEB" SiteBucketName)"
+# El bucket, antes de que desaparezca su stack.
 vacia_bucket "$(output_de "$STACK_ARTIFACTS" ArtifactsBucketName)"
 
 # La VPN primero: su regla vive en el security group de la base y su subred en
@@ -120,10 +120,11 @@ vacia_bucket "$(output_de "$STACK_ARTIFACTS" ArtifactsBucketName)"
 borra_stack "$STACK_API"
 borra_stack "$STACK_BACKEND"
 borra_stack "$STACK_DATABASE"
+# El servidor del sitio vive en la subred publica: antes que la red.
+borra_stack "$STACK_WEB"
 info "la red puede tardar unos minutos: AWS esta liberando las interfaces del NLB y del VPC Link"
 borra_stack "$STACK_NETWORK"
 borra_stack "$STACK_COGNITO"
-borra_stack "$STACK_WEB"
 borra_stack "$STACK_ARTIFACTS"
 
 # Los generados en local dejan de tener sentido: apuntan a cosas que ya no existen.

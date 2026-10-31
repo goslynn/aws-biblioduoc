@@ -51,13 +51,13 @@ export function Diagnostico() {
   const llamarConTokenAMano = async () => {
     setResultadoManual('llamando…');
     try {
-      const respuesta = await fetch(`${awsConfig.apiBaseUrl}/api/libros`, {
+      const respuesta = await fetch('/api/libros', {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const cuerpo = await respuesta.text();
       setResultadoManual(`HTTP ${respuesta.status}\n${recortar(cuerpo)}`);
     } catch (e) {
-      setResultadoManual(`Sin respuesta: ${(e as Error).message}\n(mira la pestana Network: suele ser CORS)`);
+      setResultadoManual(`Sin respuesta: ${(e as Error).message}\n(mira la consola: suele ser la CSP)`);
     }
   };
 
@@ -65,7 +65,7 @@ export function Diagnostico() {
   const llamarSinToken = async () => {
     setResultadoSinToken('llamando…');
     try {
-      const respuesta = await fetch(`${awsConfig.apiBaseUrl}/api/libros`);
+      const respuesta = await fetch('/api/libros');
       const cuerpo = await respuesta.text();
       setResultadoSinToken(`HTTP ${respuesta.status}\n${recortar(cuerpo)}`);
     } catch (e) {
@@ -93,7 +93,7 @@ export function Diagnostico() {
           <>
             <dl className="datos">
               <dt>Usuario</dt><dd>{estado.usuario}</dd>
-              <dt>API</dt><dd><code>{awsConfig.apiBaseUrl}</code></dd>
+              <dt>API</dt><dd><code>{window.location.origin}/api</code> (Caddy la reenvia a API Gateway)</dd>
               <dt>Scope exigido</dt><dd><code>{awsConfig.scope}</code></dd>
             </dl>
 
