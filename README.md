@@ -7,7 +7,7 @@ por correo** de cada paso. El personal de biblioteca (**empleados**) aprueba o
 rechaza las solicitudes, registra devoluciones y carga stock.
 
 ```
-Angular en S3  ──▶  API Gateway (REST + Cognito)  ──VPC Link──▶  NLB interno
+React en S3    ──▶  API Gateway (REST + Cognito)  ──VPC Link──▶  NLB interno
       │                        │                                    │ :80 → :8080
    Amplify Auth          authorizer + scopes             ┌── EC2 (subred publica, SG cerrado) ──┐
    (code + PKCE)          + CORS + stage                 │  Spring Boot: API, 2.ª validacion    │
@@ -30,7 +30,7 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 | Directorio | Que contiene |
 |---|---|
 | `back/` | Backend Spring Boot 4.1 (Java 21): API REST, RBAC, productores y consumidores de RabbitMQ, envio de correo. Tiene su propio [README](back/README.md) |
-| `front/` | Frontend Angular 22 con AWS Amplify, publicado como sitio estatico en S3 |
+| `front/` | Frontend React 19 (Vite) con AWS Amplify, publicado como sitio estatico en S3. Tiene su propio [README](front/README.md) |
 | `aws/` | Las siete plantillas de CloudFormation, los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
 | `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa. Tiene su propio [README](bruno/README.md) |
 
@@ -163,7 +163,7 @@ Detalles en `aws/README.md` §4.
 
 | Via | Quien la usa | Verificacion |
 |---|---|---|
-| **Autoservicio**: boton *Crear cuenta* → `/signup` de la Hosted UI | cualquier persona | Cognito manda un **codigo de 6 digitos** al correo indicado; hasta teclearlo la cuenta queda `UNCONFIRMED` |
+| **Autoservicio**: boton *Crear cuenta* → `/signup` de Managed Login (en castellano, con la marca de la Biblioteca) | cualquier persona | Cognito manda un **codigo de 6 digitos** al correo indicado; hasta teclearlo la cuenta queda `UNCONFIRMED` |
 | **Administrador**: `admin-create-user` desde `bootstrap.sh` | el laboratorio: `alumno@duoc.cl` y `empleado@duoc.cl` | ninguna: se crean ya confirmadas, con contrasena conocida |
 
 **Empleado = miembro del grupo de Cognito `empleados`.** Cognito pone los
@@ -173,8 +173,23 @@ real lo haria un administrador. Los scopes no sirven para esto: se asignan por
 App Client, no por persona.
 
 **Para recibir correos hace falta una casilla real.** Las cuentas de
-demostracion tienen direcciones inventadas: registrate con la tuya desde la
-Hosted UI y activa los avisos en *Mis solicitudes*.
+demostracion tienen direcciones inventadas: registrate con la tuya desde
+*Crear cuenta* y activa los avisos en *Mis solicitudes*.
+
+### Las pantallas de login y registro
+
+Son de Cognito (**Managed Login**, `ManagedLoginVersion: 2`), no de la
+aplicacion, pero se ven como ella: salen **en castellano** (el frontend pide
+`lang=es`) y con los colores, el logo y el favicon de la Biblioteca
+(`LoginBranding` en `aws/cognito.yaml`; los SVG estan en `aws/marca/`).
+
+No son formularios propios a proposito. Un formulario dentro del frontend
+llamaria a Cognito con `InitiateAuth` (SRP), y ese flujo **no emite custom
+scopes**: el access token saldria sin `biblioteca-api/acceso` y la API
+responderia 401 a todo. Arreglarlo exigiria una Lambda (trigger Pre Token
+Generation V2) y que la contrasena pasara por el JavaScript de la aplicacion.
+Con Managed Login el flujo sigue siendo code + PKCE y la contrasena solo la ve
+Cognito.
 
 ---
 
@@ -280,28 +295,29 @@ nombre del grupo, en `cognito.yaml`, `application.properties` y el frontend.
 
 ## 5. Frontend
 
-Angular 22 standalone con signals y Amplify Auth 6.
+React 19 con React Router 8 (rutas de datos), compilado con Vite, y Amplify
+Auth 6. Detalle en [`front/README.md`](front/README.md).
 
 | Pieza | Archivo | Que hace |
 |---|---|---|
-| Configuracion de Amplify | `front/src/main.ts` | Se configura **antes** de arrancar Angular |
-| Interceptor | `front/src/app/auth/auth.interceptor.ts` | Anade el `Bearer` a toda peticion de `HttpClient` |
-| Guards | `front/src/app/auth/auth.guard.ts` | `authGuard`: rutas privadas; `empleadoGuard`: las de gestion |
+| Configuracion de Amplify | `front/src/main.tsx` | Se configura **antes** de montar React |
+| Cliente HTTP | `front/src/app/auth/http.ts` | Unico punto que llama a la API; anade el `Bearer` a toda peticion |
+| Guardas | `front/src/app/auth/guardas.ts` | `loader` de las rutas: `requiereSesion` (privadas) y `requiereEmpleado` (gestion) |
 | Servicios | `libros`, `solicitudes`, `avisos`, `gestion` | Encapsulan URL y llamadas; los componentes no saben de HTTP |
 | Gestion | `front/src/app/gestion/` | Bandeja (aprobar, rechazar, devolver) y carga de stock |
 | Configuracion AWS | `aws-config.ts` | **Generada** por el pipeline; no se versiona |
-| Vista de diagnostico | `diagnostico/` | **Opt-in**: solo se compila con `DEBUG=true` (ver abajo) |
+| Vista de diagnostico | `diagnostico/` | **Opt-in**: solo se empaqueta con `DEBUG=true` (ver abajo) |
 
-### Guard e interceptor no son lo mismo
+### Guarda y cliente HTTP no son lo mismo
 
-Un **Guard** controla la navegacion: que rutas puede abrir el usuario. Un
-**interceptor** controla las llamadas HTTP: que cabecera llevan. Y **ninguno de
+Una **guarda** controla la navegacion: que rutas puede abrir el usuario. El
+**cliente HTTP** controla las llamadas: que cabecera llevan. Y **ninguno de
 los dos protege la API**: los dos corren en el navegador del usuario, que puede
-saltarselos con la consola abierta. Si los Guards desaparecieran, la API
+saltarselos con la consola abierta. Si las guardas desaparecieran, la API
 seguiria igual de protegida, porque quien protege son API Gateway y Spring
 Security.
 
-Lo mismo vale para `empleadoGuard` y los enlaces *Bandeja* y *Stock*: se
+Lo mismo vale para `requiereEmpleado` y los enlaces *Bandeja* y *Stock*: se
 muestran segun el claim `cognito:groups` del access token, pero un estudiante
 que forzara la ruta solo veria errores 403 de Spring.
 
@@ -311,8 +327,8 @@ No es una pantalla de negocio: existe para ver lo que normalmente esta
 escondido. Muestra el access token, su payload decodificado (`token_use`,
 `client_id`, `scope`) y hace dos llamadas **manuales con `fetch`**, una con la
 cabecera puesta a mano y otra sin ninguna. Es redundante respecto del
-interceptor: sirve para mostrar de forma explicita la cabecera que el
-interceptor agrega automaticamente en el resto de la aplicacion.
+cliente HTTP: sirve para mostrar de forma explicita la cabecera que
+`auth/http.ts` agrega automaticamente en el resto de la aplicacion.
 
 Y precisamente por eso **no se entrega**: ensena una credencial valida en
 claro, a la vista de cualquiera que mire la pantalla. Es material para explicar
@@ -325,13 +341,13 @@ DEBUG=true ./aws/pipeline/publish-web.sh      # publica ademas /diagnostico
 
 **Apagada no es "escondida": es que no existe.** Lo que la variable genera es
 la RUTA (`front/src/app/diagnostico/rutas.ts`), no un `if`. Con `DEBUG=false`
-esa lista llega vacia, nadie importa el componente, Angular no lo compila y en
+esa lista llega vacia, nadie importa el componente, Vite no lo empaqueta y en
 `dist/` no queda ningun chunk que subir al bucket. Medido:
 
-| `DEBUG` | Chunk en `dist/` | Rastro del token en el sitio |
+| `DEBUG` | Chunk en `dist/` | Texto de la vista en `dist/` |
 |---|---|---|
-| `false` | ninguno | cero coincidencias en todo `dist/` |
-| `true` | `chunk-*.js` · 4,47 kB (`diagnostico`) | el que ensena la propia vista |
+| `false` | ninguno | cero coincidencias |
+| `true` | `assets/diagnostico-*.js` · 3,75 kB | solo en ese chunk |
 
 Un `if` sobre un flag habria dejado el componente compilado y subido al
 bucket: sin enlace y sin ruta, pero descargable. El token sigue viviendo en el
@@ -340,7 +356,7 @@ aplicacion lo publique en pantalla por su cuenta.
 
 El token tampoco viaja en el estado compartido de la sesion (`EstadoSesion`
 lleva `autenticado`, `usuario` y `empleado`): quien lo necesita se lo pide a
-Amplify, y eso ocurre en exactamente dos sitios, el interceptor y esta vista.
+Amplify, y eso ocurre en exactamente dos sitios, `auth/http.ts` y esta vista.
 (`refrescar()` mira el payload del access token para saber si hay sesion y si
 es empleado, y lo descarta.)
 
@@ -398,6 +414,8 @@ Se declaran aqui en lugar de esconderlas.
 | — | **Correo por un proveedor SMTP externo** (Gmail, Brevo...) | SES tiene *explicitDeny* en el lab. El proveedor se elige al desplegar; su contrasena va a Secrets Manager (parametro `NoEcho`) |
 | Un empleado real en las pruebas automaticas | **El cliente M2M `backoffice` hace de empleado en Bruno** | Un token de PERSONA con custom scope solo sale del flujo del navegador (`admin-initiate-auth` no emite custom scopes). El empleado humano (grupo `empleados`) se prueba en el navegador |
 | Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql y ver el panel de RabbitMQ. Usa la subred publica del proyecto; las subredes de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
+| Frontend en **Angular** | **React 19 + Vite** | Decision del usuario. Mismas vistas, misma integracion con Cognito (Amplify, code + PKCE) y mismo contrato con la API; el interceptor de `HttpClient` pasa a ser un cliente HTTP propio (`auth/http.ts`) y los Guards, `loader` de React Router |
+| **Hosted UI** clasica de Cognito | **Managed Login** con marca propia y en castellano | La clasica solo existe en ingles y su logo no se puede poner desde CloudFormation. Exige el plan **Essentials** del User Pool, que ya era el de por defecto (medido) |
 | `ng serve` en `localhost:4200` | **Sitio publicado en S3** | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |
 
 ---

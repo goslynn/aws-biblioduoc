@@ -1,26 +1,29 @@
 {
-  "compileOnSave": false,
+  "// include": [
+    "Se comprueba TODO src/, tambien la vista de diagnostico: con DEBUG=false",
+    "nadie la importa y sin esto dejaria de compilarse y podria pudrirse sin que",
+    "ningun build lo notara. Solo entra en la COMPROBACION DE TIPOS (tsc); el",
+    "bundle lo arma Vite desde src/main.tsx siguiendo los import, asi que",
+    "apagada no genera ningun chunk."
+  ],
   "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
     "strict": true,
     "noImplicitOverride": true,
     "noPropertyAccessFromIndexSignature": true,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "isolatedModules": true,
-    "experimentalDecorators": true,
-    "importHelpers": true,
-    "target": "ES2022",
-    "module": "preserve",
-    "moduleResolution": "bundler"
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true
   },
-  "angularCompilerOptions": {
-    "enableI18nLegacyMessageIdFormat": false,
-    "strictInjectionParameters": true,
-    "strictInputAccessModifiers": true,
-    "typeCheckHostBindings": true,
-    "strictTemplates": true
-  },
-  "files": [],
-  "references": [{ "path": "./tsconfig.app.json" }]
+  "include": ["src", "vite.config.ts"]
 }

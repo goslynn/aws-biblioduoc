@@ -6,7 +6,8 @@ export type Sede = (typeof SEDES)[number];
 export interface NuevaSolicitud {
   items: { libroId: string; cantidad: number }[];
   dias: number;
-  motivo: string;
+  /** Opcional; sin el, el backend guarda "". */
+  motivo?: string;
   sede: Sede;
 }
 
@@ -21,6 +22,14 @@ export interface LineaSolicitud {
 /** Ciclo de vida (EstadoSolicitud.java): RECIBIDA -> APROBADA -> DEVUELTA, o RECIBIDA -> RECHAZADA. */
 export const ESTADOS = ['RECIBIDA', 'APROBADA', 'RECHAZADA', 'DEVUELTA'] as const;
 export type EstadoSolicitud = (typeof ESTADOS)[number];
+
+/** La clase de la etiqueta de estado: verde si se aprobo, roja si se rechazo. */
+export function claseEstado(estado: EstadoSolicitud): string {
+  if (estado === 'APROBADA') {
+    return 'etiqueta si';
+  }
+  return estado === 'RECHAZADA' ? 'etiqueta no' : 'etiqueta';
+}
 
 /** Lo que devuelve la API (Solicitud.java). */
 export interface Solicitud {

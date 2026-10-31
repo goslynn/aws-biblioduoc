@@ -40,7 +40,7 @@ Pipelines parciales, cuando ya hay stacks desplegados:
 ```sh
 ./aws/pipeline/build-backend.sh    # cambiaste codigo Java (mvnw package -> jar a S3 -> stack -> reinicio por SSM)
 ./aws/pipeline/api-deploy.sh       # cambiaste rutas, metodos o scopes en api.yaml
-./aws/pipeline/publish-web.sh      # cambiaste el frontend (config + ng build + s3 sync)
+./aws/pipeline/publish-web.sh      # cambiaste el frontend (config + tsc + vite build + s3 sync)
 ./aws/pipeline/bruno-env.sh        # los tokens caducaron (60 min)
 
 SKIP_TESTS=true ./aws/pipeline/build-backend.sh
@@ -60,7 +60,7 @@ es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
 
 ```sh
 cd back
-./mvnw package                                          # compila y corre los 33 tests (necesita Docker:
+./mvnw package                                          # compila y corre los 34 tests (necesita Docker:
                                                         #  PostgreSQL y RabbitMQ con Testcontainers, GreenMail)
 ./mvnw test
 ./mvnw test -Dtest=AvisosIntegracionTest                # una clase
@@ -71,15 +71,16 @@ cd back
 
 ```sh
 cd front
-npm ci && npm run build            # deja dist/biblioteca-front/browser/
+npm ci && npm run build            # tsc -b (tipos) + vite build; deja dist/
 
 # para compilar sin desplegar: los dos archivos que genera el pipeline
 cp src/app/aws-config.example.ts        src/app/aws-config.ts
 cp src/app/diagnostico/rutas.example.ts src/app/diagnostico/rutas.ts
 ```
 
-No hay target de test en `angular.json`: `npm test` no funciona. La
-verificacion del frontend es el recorrido en navegador del `front/README.md` §4.
+React 19 + React Router 8 + Vite. No hay script de test ni de servidor de
+desarrollo (`npm run dev` no existe a proposito). La verificacion del frontend
+es el recorrido en navegador del `front/README.md` §4.
 
 ### Pruebas de la API
 
@@ -114,7 +115,7 @@ destino sano (la app arrancando o caida): `aws elbv2 describe-target-health`.
 ## Arquitectura
 
 ```
-Angular (S3, endpoint REST)  ──▶  API Gateway REST (authorizer Cognito + scopes)
+React (S3, endpoint REST)    ──▶  API Gateway REST (authorizer Cognito + scopes)
                                           │ HTTP_PROXY por VPC Link
                                           ▼
                               NLB interno (subredes privadas)
@@ -173,7 +174,7 @@ y M2M de `cognito.yaml`, `AuthorizationScopes` en `api.yaml`, `SecurityConfig`
 (solo el App Client backoffice) en: Resource Server, `api.yaml` y `SecurityConfig`
 (por `BIBLIOTECA_SCOPE_GESTION`). Se propagan desde los Outputs `ScopeCompleto`
 y `ScopeGestion`. El grupo `empleados` en `cognito.yaml`,
-`biblioteca.grupo-empleados` de `application.properties` y `sesion.service.ts`.
+`biblioteca.grupo-empleados` de `application.properties` y `auth/sesion.ts`.
 
 **RBAC**: el gateway acepta cualquiera de los dos scopes en todos los metodos;
 el rol lo decide Spring. `ROLE_EMPLEADO` = (grupo `empleados` en
@@ -208,7 +209,7 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 
 * **Nada de `localhost` ni entornos de desarrollo.** Solo se entrega el acceso
   publico: `localhost` no esta en las listas blancas de Cognito ni en el CORS.
-  No propongas `ng serve` como via de verificacion.
+  No propongas `vite` / `npm run dev` como via de verificacion.
 * **Cero identificadores de AWS escritos a mano.** Todo sale de Outputs de
   CloudFormation. Archivos generados y no versionados:
   `front/src/app/aws-config.ts` (plantilla: `aws-config.example.ts`),
@@ -217,10 +218,18 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   `aws/.env` (plantilla: `aws/.env.example`; lleva `SMTP_PASSWORD`).
 * **La vista de diagnostico es opt-in y no se entrega.** Ensena el access token
   en claro. Solo aparece con `DEBUG=true`, y lo que esa variable genera es la
-  RUTA, no un `if`: apagada, el componente no lo importa nadie y Angular no lo
-  compila, asi que no llega a `dist/` ni como codigo muerto. El token tampoco
-  vive en `EstadoSesion`: lo piden a Amplify el interceptor y esa vista, nadie
+  RUTA, no un `if`: apagada, el componente no lo importa nadie y Vite no lo
+  empaqueta, asi que no llega a `dist/` ni como codigo muerto. El token tampoco
+  vive en `EstadoSesion`: lo piden a Amplify `auth/http.ts` y esa vista, nadie
   mas.
+* **Toda llamada a la API pasa por `auth/http.ts`**, que pone el `Bearer`. Un
+  `fetch` suelto en un componente sale sin token (401); la unica excepcion
+  declarada es la vista de diagnostico.
+* **Las pantallas de login y registro son de Cognito (Managed Login v2), no del
+  frontend.** Un formulario propio usaria `InitiateAuth` (SRP), que no emite
+  custom scopes: 401 en toda la API. La marca vive en `LoginBranding`
+  (`cognito.yaml`) y los SVG en `aws/marca/`; el idioma lo pide el frontend
+  con `lang=es` (`auth/sesion.ts`, tambien en la URL de `/signup`).
 * **Cero recursos `AWS::IAM::*`**: el Learner Lab no permite crear roles.
   La EC2 usa el perfil `LabInstanceProfile` (parametro `InstanceProfileName`).
   Tampoco hay ninguna Access Key estatica en el sistema.
@@ -269,10 +278,11 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   pasaban en verde.
 * **`/health` es la unica ruta publica** y no se publica en API Gateway: es el
   health check del NLB y la senal (cfn-signal) del primer arranque de la EC2.
-* **`provideHttpClient(withInterceptors([...]))` va DENTRO del array
-  `providers`** de `app.config.ts`. Fuera, compila, arranca y el interceptor no
-  se registra: todo responde 401.
-* **Rutas con `#` (`withHashLocation`)**: el endpoint REST de S3 no redirige a
+* **Con `ManagedLoginVersion: 2`, un App Client sin `ManagedLoginBranding` no
+  tiene pantalla de login**: `/login` da error. El logo (`FORM_LOGO`) tiene que
+  tener proporcion entre 1:1 y 4:1 o el recurso falla al crearse; los colores
+  van en RGBA hexadecimal sin `#` (`0f6b5cff`).
+* **Rutas con `#` (`createHashRouter`)**: el endpoint REST de S3 no redirige a
   `index.html`, y el *website endpoint* es HTTP puro, que Cognito rechaza como
   callback.
 * **`admin-initiate-auth` no emite custom scopes.** El token bueno solo sale de
@@ -312,5 +322,5 @@ La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 | `README.md` | Vision general, arquitectura, matriz de seguridad, desviaciones declaradas |
 | `aws/README.md` | Contrato de cada stack, orden de despliegue, restricciones del Learner Lab, tabla de problemas |
 | `back/README.md` | Historias de usuario, RabbitMQ (topologia, ACK/NACK, DLQ), decisiones y quien produce cada codigo |
-| `front/README.md` | Estructura Angular y recorrido de comprobacion en navegador |
+| `front/README.md` | Estructura React y recorrido de comprobacion en navegador |
 | `bruno/README.md` | Por que la matriz vive en los entornos y no en peticiones duplicadas |

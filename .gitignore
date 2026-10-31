@@ -8,10 +8,10 @@
 back/target/
 back/.mvn/wrapper/maven-wrapper.jar
 
-# ---- Frontend (Angular) ----
+# ---- Frontend (React + Vite) ----
 front/node_modules/
-front/.angular/
 front/dist/
+front/*.tsbuildinfo
 
 # Configuracion del frontend GENERADA por aws/pipeline/publish-web.sh a partir
 # de los Outputs de CloudFormation. No se versiona: cambia con cada cuenta AWS.

@@ -17,7 +17,7 @@ paso del pipeline, por SSM Run Command.)
 ```
                        ┌──────────────────────────────┐
   Navegador ──────────▶│  S3  biblioteca-web-<cuenta> │   web.yaml
-                       │  Angular compilado (HTTPS)   │
+                       │  React compilado (HTTPS)     │
                        └──────────────┬───────────────┘
                                       │  ① login  (code + PKCE)
                                       ▼
@@ -30,7 +30,7 @@ paso del pipeline, por SSM Run Command.)
                        │   App Client SPA  (publico)  │
                        │   App Client M2M  (secreto)  │
                        │   App Client backoffice      │
-                       │   Hosted UI / dominio        │
+                       │   Managed Login + marca      │
                        └──────────────┬───────────────┘
                                       │ ② access_token
   ③ GET /test/api/libros              ▼
@@ -75,7 +75,7 @@ paso del pipeline, por SSM Run Command.)
 
 | Origen | Destino | Como | Credencial |
 |---|---|---|---|
-| Navegador | Hosted UI | redireccion HTTP | ninguna (cliente publico + PKCE) |
+| Navegador | Managed Login (`/login`, `/signup`) | redireccion HTTP | ninguna (cliente publico + PKCE) |
 | Navegador | `/oauth2/token` | POST form-urlencoded | `code` + `code_verifier`, **sin secreto** |
 | Navegador | API Gateway | `Authorization: Bearer` | `access_token` |
 | API Gateway | Cognito | descarga el JWKS | ninguna (endpoint publico) |
@@ -105,7 +105,7 @@ En ningun punto del sistema hay una Access Key estatica.
 |---|---|---|---|
 | `artifacts.yaml` | `biblioteca-artifacts` | Bucket privado, versionado, con ciclo de vida de 7 dias | — |
 | `web.yaml` | `biblioteca-web` | Bucket publico del sitio (endpoint REST, HTTPS) | — |
-| `cognito.yaml` | `biblioteca-cognito` | User Pool, grupo `empleados`, Resource Server + 2 scopes, App Clients SPA, M2M y backoffice, dominio | — |
+| `cognito.yaml` | `biblioteca-cognito` | User Pool (plan Essentials), grupo `empleados`, Resource Server + 2 scopes, App Clients SPA, M2M y backoffice, dominio con Managed Login y su marca (`aws/marca/*.svg`) | — |
 | `network.yaml` | `biblioteca-network` | VPC; dos subredes privadas sin ruta (RDS, NLB); una subred publica con IGW (EC2, VPN); security groups App ↔ RDS | — |
 | `database.yaml` | `biblioteca-database` | RDS PostgreSQL 16 privado y cifrado, parameter group con TLS obligatorio, dos secretos | `network` |
 | `backend.yaml` | `biblioteca-backend` | EC2 con Docker (Spring Boot + RabbitMQ), NLB interno, secretos de RabbitMQ y SMTP, parametro SSM de configuracion, LogGroup | `artifacts`, `cognito`, `web`, `network`, `database`, y el jar ya subido |
@@ -123,7 +123,7 @@ En ningun punto del sistema hay una Access Key estatica.
 | `scripts/_comun.sh` | No se ejecuta solo: funciones compartidas (mensajes, requisitos, lectura de Outputs) |
 | `pipeline/build-backend.sh` | `mvnw package` → JWKS de Cognito → jar a S3 → stack del backend → (si ya existia) reinicio por SSM → espera al health check del NLB |
 | `pipeline/api-deploy.sh` | `create-deployment` al stage. **Imprescindible tras cada cambio de la API** |
-| `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `ng build` → `s3 sync` |
+| `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `tsc` + `vite build` → `s3 sync` |
 | `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno |
 
 Ningun script prueba la API. Eso es trabajo de Bruno y del navegador.
@@ -149,7 +149,8 @@ web.yaml
 
 cognito.yaml
   entra : ProjectName, CallbackUrls, LogoutUrls, ResourceServerId, ScopeName,
-          ManagementScopeName, EmployeesGroupName, DuracionTokenMinutos
+          ManagementScopeName, EmployeesGroupName, DuracionTokenMinutos,
+          LogoLoginSvg, FaviconLoginSvg (aws/marca/*.svg en base64, de bootstrap.sh)
   sale  : UserPoolArn ───────────────────────▶ api.yaml (authorizer)
           UserPoolId ────────────────────────▶ backend.yaml (email de avisos), bruno-env.sh, usuarios demo
           SpaClientId ───────────────────────▶ frontend, bruno-env.sh
@@ -467,6 +468,9 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 | `500 Internal Server Error` en todas las rutas | El NLB no tiene ningun destino sano: la app arrancando, caida, o el lab recien reabierto | `describe-target-health` (§6) y `aws logs tail /biblioteca/backend` |
 | La EC2 se crea pero el stack falla por timeout de la senal | El UserData no llego a ver `/health` en 15 min (imagen que no baja, secreto ilegible, app que no arranca) | `aws ec2 get-console-output --instance-id <id> --latest` |
 | La app no arranca: `PRECONDITION_FAILED - inequivalent arg` | Cambio un argumento de una cola ya creada (p. ej. el TTL de `correo.espera`) | Borra esa cola desde el panel y reinicia la app |
+| El stack de Cognito falla en `LoginBranding`: *Invalid file dimension* | El logo (`FORM_LOGO`) tiene que tener proporcion ancho:alto entre 1:1 y 4:1 | Ajusta el `viewBox` de `aws/marca/logo-login.svg` |
+| `/login` responde error y no hay pantalla | Con `ManagedLoginVersion: 2`, el App Client no tiene estilo de marca | `LoginBranding` en `cognito.yaml` (no se puede quitar sin volver a la version 1) |
+| El login sale en ingles | Falta `lang=es` en la redireccion | `signInWithRedirect({ options: { lang } })` y la URL de `/signup`, en `front/src/app/auth/sesion.ts` |
 | Activar avisos responde 500 | La app no consiguio credenciales para Cognito: el contenedor no alcanza IMDS | `HttpPutResponseHopLimit: 2` en `backend.yaml` (ya esta) |
 | Los correos no llegan; `correo.fallidos` crece | El proveedor SMTP rechaza (credenciales, remitente no verificado, limite diario) | Header `x-motivo-fallo` en el panel; corrige con `SMTP_*` en `build-backend.sh` y mueve los mensajes de vuelta |
 | `build-backend.sh` falla en el reinicio por SSM | La instancia esta detenida (el lab la paro) o el agente de SSM aun no se registro | Espera a que este `running` y repite |

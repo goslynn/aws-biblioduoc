@@ -1,7 +1,24 @@
 # Frontend · biblioteca-front
 
-Aplicacion Angular 22 (standalone, signals) con **AWS Amplify Auth 6**,
-publicada como sitio estatico en S3.
+Aplicacion **React 19** con **React Router 8** (rutas de datos), compilada con
+**Vite** y con **AWS Amplify Auth 6**, publicada como sitio estatico en S3.
+
+Antes era Angular 22. La migracion conserva las mismas vistas, la misma
+integracion con Cognito (Amplify, code + PKCE) y el mismo contrato con la API.
+Cada pieza de Angular tiene su equivalente:
+
+| Angular | React | Archivo |
+|---|---|---|
+| `bootstrapApplication` tras `Amplify.configure` | `createRoot` tras `Amplify.configure` | `src/main.tsx` |
+| `SesionService` (signal, `providedIn: 'root'`) | almacen de modulo + hook `useSesion()` | `app/auth/sesion.ts` |
+| `authInterceptor` de `HttpClient` | cliente `http` sobre `fetch` | `app/auth/http.ts` |
+| `authGuard` / `empleadoGuard` (`canActivate`) | `requiereSesion` / `requiereEmpleado` (`loader`) | `app/auth/guardas.ts` |
+| `provideRouter(..., withHashLocation())` | `createHashRouter` | `app/rutas.tsx` |
+| `loadComponent: () => import(...)` | `lazy: () => import(...)` | `app/rutas.tsx` |
+| `title` de la ruta | `handle.titulo`, que aplica `App` | `app/rutas.tsx`, `app/app.tsx` |
+| `SeleccionService` | almacen de modulo + `useSeleccion()` | `app/catalogo/seleccion.ts` |
+| servicios con `Observable` | objetos con funciones que devuelven `Promise` | `*.service.ts` |
+| pipe `date: 'dd-MM-yyyy HH:mm'` | `fechaHora()` | `app/formato.ts` |
 
 ---
 
@@ -18,8 +35,12 @@ A mano:
 ```sh
 cd front
 npm ci
-npm run build       # deja dist/biblioteca-front/browser/
+npm run build       # tsc -b (solo tipos) + vite build; deja dist/
 ```
+
+No hay `npm run dev` ni servidor de desarrollo, a proposito: `localhost` no esta
+en las listas blancas de Cognito ni en el CORS. Se comprueba en el sitio
+publicado (§4).
 
 ### Antes de compilar hacen falta dos archivos generados
 
@@ -31,7 +52,7 @@ y el otro de como se quiera publicar el sitio.
 | `src/app/aws-config.ts` | Outputs de CloudFormation | `aws-config.example.ts` |
 | `src/app/diagnostico/rutas.ts` | variable de entorno `DEBUG` | `rutas.example.ts` (apagada) · `rutas.example-debug.ts` (encendida) |
 
-Para trabajar sin desplegar nada:
+Para compilar sin desplegar nada:
 
 ```sh
 cp src/app/aws-config.example.ts           src/app/aws-config.ts
@@ -53,52 +74,63 @@ publico. Lo que protege el flujo es PKCE.
 ## 2. Estructura
 
 ```
+index.html                      punto de entrada de Vite (<div id="raiz">)
+vite.config.ts                  salida a dist/, base '/' (raiz del bucket)
+tsconfig.json                   comprueba TODO src/, diagnostico incluido
 src/
-├── main.ts                     Amplify.configure() ANTES de bootstrapApplication
-├── index.html  styles.css
+├── main.tsx                    Amplify.configure() ANTES de montar React
+├── styles.css
 └── app/
-    ├── app.config.ts           provideHttpClient(withInterceptors([...])) + withHashLocation()
-    ├── app.routes.ts           /inicio publica; el resto tras authGuard (y /gestion tras empleadoGuard), lazy
-    ├── app.ts / app.html       marco: cabecera, navegacion, estado de sesion
-    ├── inicio.ts / .html       portada publica: botones de login y de registro
+    ├── rutas.tsx               createHashRouter; /inicio publica, el resto tras una guarda, lazy
+    ├── app.tsx                 marco: cabecera, navegacion, estado de sesion, titulo
+    ├── inicio.tsx              portada publica
+    ├── almacen.ts              estado compartido fuera de React (useSyncExternalStore)
+    ├── formato.ts              fechas como dd-MM-yyyy HH:mm
     ├── auth/
-    │   ├── sesion.service.ts   estado de la sesion: entrar, registrarse, salir, ¿empleado?
-    │   ├── auth.interceptor.ts anade el Bearer a toda peticion de HttpClient
-    │   └── auth.guard.ts       authGuard y empleadoGuard: bloquean la NAVEGACION
+    │   ├── sesion.ts           entrar, registrarse, salir, ¿empleado? (+ hook useSesion)
+    │   ├── http.ts             UNICO cliente de la API: anade el Bearer a toda peticion
+    │   └── guardas.ts          requiereSesion y requiereEmpleado: bloquean la NAVEGACION
     ├── catalogo/               buscador, filtros, seleccion y "avisame cuando vuelva"
     ├── solicitudes/            formulario de prestamo y "mis solicitudes" (con los avisos por correo)
     ├── avisos/                 activar / desactivar los avisos (el consentimiento)
     ├── gestion/                SOLO EMPLEADOS: bandeja (aprobar, rechazar, devolver) y stock
     ├── diagnostico/            OPT-IN: token, payload y fetch manual
-    │   ├── diagnostico.ts/.html  solo se compila si la ruta existe
-    │   └── rutas.ts              GENERADO segun DEBUG (vacio = no se compila)
+    │   ├── diagnostico.tsx       solo se empaqueta si la ruta existe
+    │   └── rutas.ts              GENERADO segun DEBUG (vacio = no se empaqueta)
     └── aws-config.ts           GENERADO (aws-config.example.ts es la plantilla)
 ```
 
 ---
 
-## 3. Siete cosas que hay que mirar dos veces
+## 3. Ocho cosas que hay que mirar dos veces
 
-**`provideHttpClient(withInterceptors([...]))` va DENTRO del array
-`providers`.** Si se cierra el objeto antes, el archivo compila, la aplicacion
-arranca y el interceptor **no queda registrado**: las peticiones salen sin
-`Bearer` y todo responde 401. Es el error que la guia del curso marca dos veces.
+**Toda llamada a la API pasa por `auth/http.ts`.** Es el papel que en Angular
+hacia el interceptor: se pide el token a Amplify justo antes de cada peticion y
+se anade `Authorization: Bearer`. Un `fetch` suelto en un componente saldria sin
+token y recibiria 401. La unica excepcion, y declarada, es la vista de
+diagnostico.
 
 **Se manda el ACCESS token, no el id token.** El id token dice quien eres; el
 access token dice a que tienes derecho, y es el unico que lleva el claim
 `scope`. Con un id token, API Gateway responde 401.
 
-**El token no esta en `EstadoSesion`.** La senal de sesion solo lleva
-`autenticado`, `usuario` y `empleado`. Guardarlo ahi no hace falta -- el interceptor se lo
-pide a Amplify en cada peticion -- y solo abre la puerta a que acabe pintado en
-una plantilla. Lo piden dos archivos, y los dos se ven venir:
-`auth.interceptor.ts` y la vista de diagnostico, que es **opt-in** y con
-`DEBUG=false` ni se compila (README raiz §5).
+**El token no esta en `EstadoSesion`.** El estado de sesion solo lleva
+`autenticado`, `usuario` y `empleado`. Guardarlo ahi no hace falta --
+`http.ts` se lo pide a Amplify en cada peticion -- y solo abre la puerta a que
+acabe pintado en pantalla. Lo piden dos archivos, y los dos se ven venir:
+`auth/http.ts` y la vista de diagnostico, que es **opt-in** y con
+`DEBUG=false` ni se empaqueta (README raiz §5).
 
-**El Guard no protege la API.** Controla la navegacion, y corre en el navegador
-del usuario. Quien protege son API Gateway y Spring Security. El Guard esta
-porque hay rutas privadas de verdad y sin el se verian pantallas vacias llenas
-de 401.
+**La sesion y la seleccion son almacenes de modulo, no Context.** Las guardas
+son `loader` de React Router: corren antes de pintar y fuera de cualquier
+componente, asi que un Context no les llegaria. `almacen.ts` guarda el valor en
+el modulo y lo expone con `useSyncExternalStore`: guardas y componentes leen el
+MISMO estado, como hacian los servicios singleton de Angular.
+
+**La guarda no protege la API.** Controla la navegacion, y corre en el
+navegador del usuario. Quien protege son API Gateway y Spring Security. La
+guarda esta porque hay rutas privadas de verdad y sin ella se verian pantallas
+vacias llenas de 401.
 
 **`empleado` es solo para pintar.** Sale del claim `cognito:groups` del access
 token y decide si se ven *Bandeja* y *Stock*. Quien decide si se PUEDE es
@@ -106,17 +138,18 @@ Spring, que lee el mismo claim del token ya validado: un estudiante que forzara
 `#/gestion/solicitudes` veria la pantalla y un 403 en cada accion. Tras meter a
 alguien en el grupo, tiene que volver a iniciar sesion: el claim va en el token.
 
-**El registro no lo hace Amplify.** No existe un `signUpWithRedirect`:
-`signInWithRedirect()` siempre aterriza en `/login`. Pero `/signup` es un
-endpoint mas de la Hosted UI y acepta los mismos parametros que
-`/oauth2/authorize`, asi que `sesion.service.ts` arma esa URL con los valores de
-`aws-config.ts`. **Tiene que pedir los mismos scopes que el login**, custom
-scope incluido: si se olvida, el usuario se registra bien y la API le responde
-401 a la primera peticion.
+**Las pantallas de login y registro son de Cognito, en castellano.** Son
+Managed Login (`aws/cognito.yaml`), con la marca de la Biblioteca. El idioma lo
+pide `sesion.ts` con `lang=es`, en `signInWithRedirect` y en la URL de
+`/signup`. El registro no lo hace Amplify: no existe un `signUpWithRedirect`,
+asi que `sesion.ts` arma la URL de `/signup` con los valores de `aws-config.ts`.
+**Tiene que pedir los mismos scopes que el login**, custom scope incluido: si
+se olvida, el usuario se registra bien y la API le responde 401 a la primera
+peticion.
 
-**Las rutas llevan `#` (`withHashLocation`).** El sitio se sirve por el endpoint
-REST de S3, que devuelve los objetos que existen y nada mas: con rutas limpias,
-recargar en `/catalogo` daria 404. El *website endpoint* si redirige a
+**Las rutas llevan `#` (`createHashRouter`).** El sitio se sirve por el
+endpoint REST de S3, que devuelve los objetos que existen y nada mas: con rutas
+limpias, recargar en `/catalogo` daria 404. El *website endpoint* si redirige a
 `index.html`, pero es HTTP puro y Cognito rechaza callbacks sin TLS.
 
 ---
@@ -130,8 +163,9 @@ direcciones inventadas. Para el estudiante, registrate con la tuya; el
 empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 `aws/.local/usuario-demo.env`), en otra ventana privada.
 
-1. **Crear cuenta** (estudiante) → `/signup` → codigo de 6 digitos al correo →
-   vuelve ya autenticado. (O **Iniciar sesion** con una cuenta existente.)
+1. **Crear cuenta** (estudiante) → `/signup` **en castellano y con el logo de
+   la Biblioteca** → codigo de 6 digitos al correo → vuelve ya autenticado. (O
+   **Iniciar sesion** con una cuenta existente: la misma marca.)
 2. **Mis solicitudes → Activar avisos por correo** → PUT 200 con tu email, y
    llega el correo de bienvenida.
 3. **Catalogo**: buscar y filtrar. Cada busqueda es una peticion real.
@@ -146,8 +180,8 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 7. **Empleado → Stock**: cargar el libro agotado del paso 5 → el estudiante
    recibe "Volvio: ..." y su suscripcion se cierra.
 8. **Empleado → Bandeja → Registrar devolucion** → correo de devolucion.
-9. Con el estudiante, forzar `#/gestion/solicitudes`: redirige al catalogo (el
-   guard); y aunque se lo saltara, Spring responderia 403.
+9. Con el estudiante, forzar `#/gestion/solicitudes`: redirige al catalogo (la
+   guarda); y aunque se la saltara, Spring responderia 403.
 10. En Network: **ni un solo error de CORS** (incluidos `PUT` y `DELETE`), y el
     `Authorization: Bearer` en cada peticion **sin que ningun componente lo
     haya puesto**.
@@ -156,7 +190,7 @@ Para ver el recordatorio sin esperar dias, despliega con
 `REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh`, pide un prestamo de
 **1 dia** y apruebalo: a los ~2 minutos llega "vence pronto".
 
-Ese ultimo punto es la evidencia de que el interceptor funciona, y el silencio
+Ese ultimo punto es la evidencia de que `auth/http.ts` funciona, y el silencio
 en CORS es la evidencia de que el preflight y los `GatewayResponses` estan bien.
 
 ### El paso que no esta, salvo que se pida
@@ -168,5 +202,5 @@ dos llamadas manuales con `fetch` (con cabecera a mano → 200, sin cabecera →
 valida en claro.
 
 Con `DEBUG=false` -- el valor por defecto -- ese enlace no existe, la ruta
-tampoco, el componente ni siquiera se compila y pedir `#/diagnostico` a mano
+tampoco, el componente ni siquiera se empaqueta y pedir `#/diagnostico` a mano
 redirige al inicio.

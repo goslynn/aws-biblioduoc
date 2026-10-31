@@ -1,8 +1,4 @@
-import { HttpClient } from '@angular/common/http';
-import { Injectable, inject } from '@angular/core';
-import { Observable } from 'rxjs';
-
-import { awsConfig } from '../aws-config';
+import { http } from '../auth/http';
 
 /** GET /api/avisos/correo (ContactoController.EstadoAvisos). */
 export interface EstadoAvisos {
@@ -17,23 +13,20 @@ export interface EstadoAvisos {
  * lee de Cognito (email verificado) por el sub del token: si viniera de aqui,
  * cualquiera podria mandar avisos al correo de otra persona.
  */
-@Injectable({ providedIn: 'root' })
-export class AvisosService {
+const url = '/api/avisos/correo';
 
-  private readonly http = inject(HttpClient);
-  private readonly url = `${awsConfig.apiBaseUrl}/api/avisos/correo`;
-
-  estado(): Observable<EstadoAvisos> {
-    return this.http.get<EstadoAvisos>(this.url);
-  }
+export const avisosService = {
+  estado(): Promise<EstadoAvisos> {
+    return http.get<EstadoAvisos>(url);
+  },
 
   /** PUT -> 200, y un correo de bienvenida. 409 si la cuenta no tiene email verificado. */
-  activar(): Observable<EstadoAvisos> {
-    return this.http.put<EstadoAvisos>(this.url, null);
-  }
+  activar(): Promise<EstadoAvisos> {
+    return http.put<EstadoAvisos>(url);
+  },
 
   /** DELETE -> 204. */
-  desactivar(): Observable<void> {
-    return this.http.delete<void>(this.url);
-  }
-}
+  desactivar(): Promise<void> {
+    return http.delete<void>(url);
+  },
+};

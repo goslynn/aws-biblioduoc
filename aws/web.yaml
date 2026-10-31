@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 # ==============================================================================
-#  biblioteca / web.yaml   --   Hosting del frontend Angular en S3
+#  biblioteca / web.yaml   --   Hosting del frontend React en S3
 # ==============================================================================
 #
 #  QUE HACE
-#    * SiteBucket       -> bucket S3 con el Angular ya compilado (ng build).
+#    * SiteBucket       -> bucket S3 con el React ya compilado (vite build).
 #    * SiteBucketPolicy -> politica que permite a CUALQUIERA leer los objetos.
 #                          Es un sitio publico: solo contiene HTML, CSS y JS.
 #
@@ -21,7 +21,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #                        HTTPS de verdad, aceptado por Cognito. No reescribe
 #                        rutas desconocidas a index.html.
 #
-#    Se usa el REST, y por eso el frontend enruta con withHashLocation():
+#    Se usa el REST, y por eso el frontend enruta con createHashRouter():
 #    todas las vistas viven en .../index.html#/catalogo y el navegador nunca
 #    le pide a S3 una ruta que no existe como objeto.
 #
@@ -54,7 +54,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 # ==============================================================================
 
 Description: >-
-  biblioteca - Bucket S3 publico que sirve el frontend Angular por su endpoint
+  biblioteca - Bucket S3 publico que sirve el frontend React por su endpoint
   REST (HTTPS). Sin dependencias.
 
 Parameters:

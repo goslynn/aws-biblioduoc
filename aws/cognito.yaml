@@ -13,8 +13,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 #                        stock. Cognito pone los grupos de cada usuario en el
 #                        claim "cognito:groups" de su access token, y Spring
 #                        deduce de ahi el rol EMPLEADO.
-#    * SpaClient      -> la app Angular. Cliente PUBLICO (sin secreto) que usa
-#                        Authorization Code + PKCE contra la Hosted UI.
+#    * SpaClient      -> la app React. Cliente PUBLICO (sin secreto) que usa
+#                        Authorization Code + PKCE contra Managed Login.
 #    * M2mClient      -> cliente maquina a maquina (con secreto) que obtiene un
 #                        token por client_credentials, sin navegador. Es el que
 #                        usa la coleccion de Bruno para el estudiante.
@@ -22,13 +22,38 @@ AWSTemplateFormatVersion: "2010-09-09"
 #                        de inventario. Para Spring es un EMPLEADO, y es lo que
 #                        permite probar la gestion desde Bruno (un token de
 #                        PERSONA con custom scope solo sale del navegador).
-#    * UserPoolDomain -> la Hosted UI: la pantalla de login, la de REGISTRO y
-#                        los endpoints /oauth2/authorize, /signup y
-#                        /oauth2/token.
+#    * UserPoolDomain -> el dominio de Cognito: las pantallas de login y de
+#                        REGISTRO (Managed Login) y los endpoints
+#                        /oauth2/authorize, /signup y /oauth2/token.
+#    * LoginBranding  -> la MARCA de esas pantallas: colores, logo y favicon
+#                        de la Biblioteca, para que el login no parezca otra
+#                        aplicacion. Solo la lleva el cliente SPA: los M2M no
+#                        tienen pantallas.
+#
+#  >>> MANAGED LOGIN (v2) Y NO LA HOSTED UI CLASICA (v1) <<<
+#    Las dos son paginas que aloja Cognito en el mismo dominio y con el mismo
+#    flujo OAuth (code + PKCE), asi que para el frontend, API Gateway y Spring
+#    no cambia NADA: el token sale igual, con el mismo custom scope.
+#    Lo que gana la v2:
+#      * se traduce: el frontend pide lang=es y las pantallas (login, registro,
+#        codigo de verificacion, "olvide mi contrasena") salen en castellano.
+#        La clasica solo existe en ingles;
+#      * se le pone marca desde CloudFormation (LoginBranding), logo incluido.
+#        La clasica solo admite CSS desde la plantilla; el logo exigia una
+#        llamada imperativa a set-ui-customization.
+#    Lo que cuesta: el plan ESSENTIALS del User Pool (ver UserPoolTier).
+#
+#  >>> POR QUE NO SON PANTALLAS PROPIAS DENTRO DEL FRONTEND <<<
+#    Un formulario propio llamaria a Cognito con InitiateAuth (SRP), y ese
+#    flujo NO emite custom scopes: el access token saldria sin
+#    biblioteca-api/acceso y la API responderia 401 a todo. Arreglarlo exige
+#    un trigger Pre Token Generation V2 (una Lambda) y que la contrasena pase
+#    por el JavaScript de la aplicacion. Con Managed Login las pantallas se
+#    ven como la aplicacion y la contrasena solo la ve Cognito.
 #
 #  >>> QUIEN PUEDE CREAR CUENTAS <<<
 #    Las dos vias conviven:
-#      * AUTOSERVICIO: cualquiera se registra en /signup de la Hosted UI y
+#      * AUTOSERVICIO: cualquiera se registra en /signup de Managed Login y
 #        confirma con un codigo que Cognito manda a su correo. Lo habilita
 #        AllowAdminCreateUserOnly: false.
 #      * ADMINISTRADOR: bootstrap.sh crea la cuenta de demostracion con
@@ -80,16 +105,22 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      http://localhost. Por eso el sitio va en el endpoint REST de S3.
 #    * El CallbackURL debe coincidir CARACTER POR CARACTER con el redirect_uri
 #      que manda Amplify, /index.html incluido.
-#    * El enlace "Sign up" de la Hosted UI NO se configura: aparece o no segun
+#    * El enlace "Sign up" de Managed Login NO se configura: aparece o no segun
 #      AllowAdminCreateUserOnly. Con true, /signup responde un error de cliente
 #      invalido aunque la URL este bien formada.
 #    * El remitente por defecto de Cognito tiene un limite de ~50 correos al
 #      dia por pool. Si los registros dejan de recibir el codigo sin que nada
 #      mas cambie, es lo primero que hay que mirar.
+#    * Con ManagedLoginVersion: 2, un App Client SIN estilo de marca no tiene
+#      pantalla: /login responde un error. Por eso LoginBranding no es
+#      decoracion opcional; si se quita, hay que volver a la version 1.
+#    * Los colores de LoginBranding van en hexadecimal RGBA SIN "#":
+#      "0f6b5cff" (el ultimo par es la opacidad).
 #
 #  DEPENDE DE
 #    Nada. bootstrap.sh le pasa la URL del sitio calculada a partir del
-#    AccountId, antes incluso de que exista el bucket.
+#    AccountId, antes incluso de que exista el bucket, y el logo y el favicon
+#    del login en base64 (aws/marca/*.svg).
 #
 #  ENTREGA (Outputs)
 #    UserPoolArn    -> api.yaml (el authorizer)
@@ -110,7 +141,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      --parameter-overrides \
 #        ProjectName=biblioteca \
 #        "CallbackUrls=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com/index.html" \
-#        "LogoutUrls=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com/index.html"
+#        "LogoutUrls=https://biblioteca-web-<ACCOUNT>.s3.us-east-1.amazonaws.com/index.html" \
+#        "LogoLoginSvg=$(base64 -w0 aws/marca/logo-login.svg)" \
+#        "FaviconLoginSvg=$(base64 -w0 aws/marca/favicon-login.svg)"
 # ==============================================================================
 
 Description: >-
@@ -124,7 +157,7 @@ Parameters:
     Type: String
     Default: biblioteca
     AllowedPattern: "^[a-z0-9-]+$"
-    ConstraintDescription: Solo minusculas, numeros y guiones (va en el dominio de la Hosted UI).
+    ConstraintDescription: Solo minusculas, numeros y guiones (va en el dominio de Cognito).
     Description: Prefijo de nombres. Debe coincidir con el de los demas stacks.
 
   ResourceServerId:
@@ -178,6 +211,19 @@ Parameters:
       sesion de laboratorio; ojo, es tambien la vida util de los entornos de
       Bruno, que se regeneran con aws/pipeline/bruno-env.sh.
 
+  LogoLoginSvg:
+    Type: String
+    MinLength: 1
+    Description: >-
+      Logo de las pantallas de login y registro: aws/marca/logo-login.svg en
+      base64, sin saltos de linea. Lo pasa bootstrap.sh. Va como parametro y
+      no pegado aqui para que el SVG siga siendo un archivo legible y editable.
+
+  FaviconLoginSvg:
+    Type: String
+    MinLength: 1
+    Description: Favicon de esas pantallas, aws/marca/favicon-login.svg en base64.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -187,6 +233,13 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub "${ProjectName}-user-pool"
+
+      # ESSENTIALS es el plan por defecto de los pools nuevos, y el minimo para
+      # Managed Login con marca (LoginBranding). Se escribe para que no dependa
+      # de un valor por defecto que AWS ya cambio una vez. Medido en el lab: el
+      # pool ya estaba en ESSENTIALS antes de declararlo. Tiene capa gratuita
+      # (10.000 usuarios activos al mes), de sobra para el laboratorio.
+      UserPoolTier: ESSENTIALS
 
       # El usuario se identifica por su correo, sin un "username" aparte.
       UsernameAttributes:
@@ -206,7 +259,7 @@ Resources:
 
       # AUTOSERVICIO DE REGISTRO, ACTIVADO.
       #
-      # En false, cualquiera puede darse de alta desde la Hosted UI: Cognito
+      # En false, cualquiera puede darse de alta desde Managed Login: Cognito
       # anade solo el enlace "Sign up" y expone /signup. En true (como estaba
       # antes) ese enlace desaparece y la unica via de alta es
       # admin-create-user, que es lo que sigue haciendo bootstrap.sh para la
@@ -223,7 +276,7 @@ Resources:
 
       # El correo de verificacion: codigo de 6 digitos, no enlace.
       #
-      #   CONFIRM_WITH_CODE  -> Cognito manda un codigo y la Hosted UI muestra
+      #   CONFIRM_WITH_CODE  -> Cognito manda un codigo y Managed Login muestra
       #                         la pantalla donde se teclea. El usuario nunca
       #                         sale del flujo.
       #   CONFIRM_WITH_LINK  -> exige un dominio propio verificado en SES; en
@@ -288,7 +341,7 @@ Resources:
       Description: Personal de biblioteca. Aprueban, rechazan, registran devoluciones y cargan stock.
 
   # ---------------------------------------------------------------------------
-  #  CLIENTE SPA: el que usa Angular desde el navegador.
+  #  CLIENTE SPA: el que usa React desde el navegador.
   # ---------------------------------------------------------------------------
   SpaClient:
     Type: AWS::Cognito::UserPoolClient
@@ -403,15 +456,136 @@ Resources:
         AccessToken: minutes
 
   # ---------------------------------------------------------------------------
-  #  La Hosted UI. Sin dominio no hay pantalla de login ni endpoints OAuth2.
-  #  El AccountId en el prefijo evita chocar con el dominio de otro alumno: es
-  #  unico en toda la region, no solo en tu cuenta.
+  #  El dominio de Cognito. Sin dominio no hay pantalla de login ni endpoints
+  #  OAuth2. El AccountId en el prefijo evita chocar con el dominio de otro
+  #  alumno: es unico en toda la region, no solo en tu cuenta.
   # ---------------------------------------------------------------------------
   UserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
       Domain: !Sub "${ProjectName}-${AWS::AccountId}"
       UserPoolId: !Ref UserPool
+      # 2 = Managed Login (traducible y con marca); 1 = Hosted UI clasica.
+      # Ver la cabecera. Cambiarlo no recrea el dominio: la URL es la misma.
+      ManagedLoginVersion: 2
+
+  # ---------------------------------------------------------------------------
+  #  LA MARCA DEL LOGIN: que las pantallas de Cognito se vean como la Biblioteca.
+  #
+  #  Settings es PARCIAL a proposito: solo lleva lo que se aparta del estilo de
+  #  Cognito. Lo que no esta aqui (espaciados, tipografia, alertas...) lo pone
+  #  Cognito por defecto. Para ver el resultado completo, ya mezclado:
+  #    aws cognito-idp describe-managed-login-branding-by-client \
+  #      --user-pool-id <id> --client-id <SpaClientId> --return-merged-resources
+  #
+  #  Los colores son los de front/src/styles.css (--duoc, --fondo, --tinta,
+  #  --linea...), en RGBA sin "#". Si cambia la paleta del sitio, cambia aqui.
+  # ---------------------------------------------------------------------------
+  LoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref SpaClient
+      # false: se usan los Settings y Assets de abajo y no el estilo de fabrica.
+      UseCognitoProvidedValues: false
+      Settings:
+        categories:
+          global:
+            # El sitio no tiene modo oscuro: el login tampoco, o el salto de
+            # uno a otro en mitad del flujo parece un cambio de aplicacion.
+            colorSchemeMode: LIGHT
+            pageHeader:
+              enabled: false
+            pageFooter:
+              enabled: false
+          form:
+            displayGraphics: true
+            location:
+              horizontal: CENTER
+              vertical: CENTER
+            # El idioma lo fija el frontend con lang=es; un selector solo
+            # invitaria a cambiarlo a mitad del registro.
+            languageSelector:
+              enabled: false
+        components:
+          pageBackground:
+            image:
+              enabled: false
+            lightMode:
+              color: f7f3ecff        # --fondo
+          form:
+            borderRadius: 12         # --radio
+            backgroundImage:
+              enabled: false
+            # El logo arriba y DENTRO de la tarjeta, como la cabecera del sitio.
+            logo:
+              enabled: true
+              location: CENTER
+              position: TOP
+              formInclusion: IN
+            lightMode:
+              backgroundColor: ffffffff
+              borderColor: e6e1d6ff  # --linea
+          primaryButton:
+            lightMode:
+              defaults:
+                backgroundColor: 0f6b5cff   # --duoc
+                textColor: ffffffff
+              hover:
+                backgroundColor: 13806eff   # --duoc un 12 % mas claro, como el :hover del sitio
+                textColor: ffffffff
+              active:
+                backgroundColor: 0a4d42ff
+                textColor: ffffffff
+          secondaryButton:
+            lightMode:
+              defaults:
+                backgroundColor: ffffffff
+                borderColor: 0f6b5cff
+                textColor: 0f6b5cff
+              hover:
+                backgroundColor: e3f1eeff   # --duoc-claro
+                borderColor: 0f6b5cff
+                textColor: 0f6b5cff
+              active:
+                backgroundColor: e3f1eeff
+                borderColor: 0a4d42ff
+                textColor: 0a4d42ff
+          pageText:
+            lightMode:
+              headingColor: 22282fff        # --tinta
+              bodyColor: 22282fff
+              descriptionColor: 6b7580ff    # --tinta-suave
+        componentClasses:
+          buttons:
+            borderRadius: 8
+          input:
+            borderRadius: 8
+            lightMode:
+              defaults:
+                backgroundColor: ffffffff
+                borderColor: e6e1d6ff
+              placeholderColor: 6b7580ff
+          link:
+            lightMode:
+              defaults:
+                textColor: 0f6b5cff
+              hover:
+                textColor: 0a4d42ff
+          focusState:
+            lightMode:
+              borderColor: 0f6b5cff
+      # Las imagenes viajan en base64 dentro del recurso; los SVG de origen
+      # estan en aws/marca/ y bootstrap.sh los codifica al desplegar.
+      Assets:
+        - Category: FORM_LOGO
+          ColorMode: LIGHT
+          Extension: SVG
+          Bytes: !Ref LogoLoginSvg
+        - Category: FAVICON_SVG
+          ColorMode: LIGHT
+          Extension: SVG
+          Bytes: !Ref FaviconLoginSvg
 
 Outputs:
 
@@ -459,7 +633,9 @@ Outputs:
     Value: !Sub "${ResourceServerId}/${ScopeName}"
 
   HostedUiDomain:
-    Description: Base de la Hosted UI (login y endpoints OAuth2).
+    # El nombre del Output se conserva aunque ya no sea la Hosted UI clasica:
+    # lo leen publish-web.sh y bruno-env.sh, y la URL es la misma.
+    Description: Base de Managed Login (pantallas de login y endpoints OAuth2).
     Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
 
   TokenUrl:
@@ -469,9 +645,9 @@ Outputs:
   LoginUrl:
     Description: >-
       URL de login lista para pegar en el navegador, util para comprobar que la
-      Hosted UI carga sin depender del frontend.
+      pantalla de login (y su marca) carga sin depender del frontend.
     Value: !Sub
-      - "${Dominio}/oauth2/authorize?response_type=code&client_id=${Cliente}&scope=openid+email+profile+${Scope}&redirect_uri=${Redirect}"
+      - "${Dominio}/oauth2/authorize?response_type=code&client_id=${Cliente}&scope=openid+email+profile+${Scope}&redirect_uri=${Redirect}&lang=es"
       - Dominio: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
         Cliente: !Ref SpaClient
         Scope: !Sub "${ResourceServerId}/${ScopeName}"

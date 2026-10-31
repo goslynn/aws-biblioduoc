@@ -1,9 +1,5 @@
-import { HttpClient } from '@angular/common/http';
-import { Injectable, inject } from '@angular/core';
-import { Observable } from 'rxjs';
-
-import { awsConfig } from '../aws-config';
-import { NuevaSolicitud, Solicitud } from './solicitud';
+import { http } from '../auth/http';
+import type { NuevaSolicitud, Solicitud } from './solicitud';
 
 /**
  * Solicitudes de prestamo.
@@ -12,23 +8,20 @@ import { NuevaSolicitud, Solicitud } from './solicitud';
  * del JWT ya validado. Si viniera del formulario, cualquiera podria pedir
  * libros a nombre de otra persona.
  */
-@Injectable({ providedIn: 'root' })
-export class SolicitudesService {
+const base = '/api/solicitudes';
 
-  private readonly http = inject(HttpClient);
-  private readonly base = `${awsConfig.apiBaseUrl}/api/solicitudes`;
-
+export const solicitudesService = {
   /** POST /api/solicitudes -> 201. Puede dar 400 (validacion), 404 o 409. */
-  crear(solicitud: NuevaSolicitud): Observable<Solicitud> {
-    return this.http.post<Solicitud>(this.base, solicitud);
-  }
+  crear(solicitud: NuevaSolicitud): Promise<Solicitud> {
+    return http.post<Solicitud>(base, solicitud);
+  },
 
   /**
    * GET /api/solicitudes -> solo las del portador del token. El filtro lo
    * aplica el backend con el sub del JWT; la bandeja completa es de
-   * empleados (GestionService).
+   * empleados (gestionService).
    */
-  mias(): Observable<Solicitud[]> {
-    return this.http.get<Solicitud[]>(this.base);
-  }
-}
+  mias(): Promise<Solicitud[]> {
+    return http.get<Solicitud[]>(base);
+  },
+};

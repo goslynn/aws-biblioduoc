@@ -5,9 +5,9 @@
 #
 #  QUE HACE, EN TRES PASOS
 #    1. GENERA   front/src/app/aws-config.ts a partir de los Outputs de los
-#                stacks (ids de Cognito, dominio de la Hosted UI, URL de la API),
-#                y front/src/app/diagnostico/rutas.ts segun DEBUG.
-#    2. COMPILA  npm ci + ng build  ->  front/dist/
+#                stacks (ids de Cognito, dominio de Managed Login, URL de la
+#                API), y front/src/app/diagnostico/rutas.ts segun DEBUG.
+#    2. COMPILA  npm ci + tsc + vite build  ->  front/dist/
 #    3. PUBLICA  aws s3 sync --delete al bucket del sitio
 #
 #  POR QUE LA CONFIGURACION SE GENERA Y NO SE VERSIONA
@@ -29,7 +29,7 @@
 #    entregar.
 #
 #    Lo que se genera es la RUTA, no un if: con DEBUG=false el archivo trae una
-#    lista vacia, nadie importa el componente y Angular ni lo compila. No queda
+#    lista vacia, nadie importa el componente y Vite ni lo empaqueta. No queda
 #    chunk que subir al bucket, asi que la pantalla no llega al sitio ni como
 #    codigo muerto descargable. Medido en dist/ (ver front/README.md).
 #
@@ -94,23 +94,23 @@ EOF
 # La ruta de la vista de diagnostico: una lista vacia, o la ruta de verdad.
 # Va en su propio archivo y no en aws-config.ts porque ahi solo hay Outputs de
 # CloudFormation, y porque un flag no basta: mientras el componente siga
-# importado desde algun sitio, Angular lo compila y lo sube igual.
+# importado desde algun sitio, Vite lo empaqueta y lo sube igual.
 log "Generando front/src/app/diagnostico/rutas.ts (DEBUG=${DEBUG})"
 if [ "$DEBUG" = "true" ]; then
   cat > "${FRONT}/src/app/diagnostico/rutas.ts" <<'EOF'
 // ARCHIVO GENERADO por aws/pipeline/publish-web.sh -- NO LO EDITES A MANO.
 // Version ENCENDIDA (DEBUG=true): se publica /diagnostico, que ensena el
 // access token en claro. La plantilla de referencia es rutas.example-debug.ts.
-import { Routes } from '@angular/router';
+import type { RouteObject } from 'react-router';
 
-import { authGuard } from '../auth/auth.guard';
+import { requiereSesion } from '../auth/guardas';
 
-export const rutasDiagnostico: Routes = [
+export const rutasDiagnostico: RouteObject[] = [
   {
     path: 'diagnostico',
-    canActivate: [authGuard],
-    title: 'Diagnostico · Biblioteca Duoc',
-    loadComponent: () => import('./diagnostico').then((m) => m.Diagnostico),
+    loader: requiereSesion,
+    handle: { titulo: 'Diagnostico · Biblioteca Duoc' },
+    lazy: () => import('./diagnostico').then((m) => ({ Component: m.Diagnostico })),
   },
 ];
 EOF
@@ -118,11 +118,11 @@ else
   cat > "${FRONT}/src/app/diagnostico/rutas.ts" <<'EOF'
 // ARCHIVO GENERADO por aws/pipeline/publish-web.sh -- NO LO EDITES A MANO.
 // Version APAGADA (DEBUG=false): la vista de diagnostico no se enruta y, al no
-// importarla nadie, ni siquiera se compila. La plantilla de referencia es
+// importarla nadie, ni siquiera se empaqueta. La plantilla de referencia es
 // diagnostico/rutas.example.ts.
-import { Routes } from '@angular/router';
+import type { RouteObject } from 'react-router';
 
-export const rutasDiagnostico: Routes = [];
+export const rutasDiagnostico: RouteObject[] = [];
 EOF
 fi
 
@@ -133,7 +133,7 @@ info "redirect  ${SITE_URL}"
 if [ "$DEBUG" = "true" ]; then
   info "debug     true  -> se publica /diagnostico (ensena el access token)"
 else
-  info "debug     false -> la vista de diagnostico no se compila"
+  info "debug     false -> la vista de diagnostico no se empaqueta"
 fi
 
 if [ "$SOLO_CONFIG" = "true" ]; then
@@ -144,14 +144,17 @@ fi
 # --- 2. Compilar ---------------------------------------------------------------
 requiere npm
 log "Compilando el frontend"
-if [ -d "${FRONT}/node_modules" ]; then
-  info "node_modules ya existe; se omite la instalacion"
+# Se reinstala si falta node_modules o si package-lock.json es mas nuevo que
+# la ultima instalacion (npm deja su marca en node_modules/.package-lock.json):
+# asi un cambio de dependencias no se compila contra las viejas.
+if [ -d "${FRONT}/node_modules" ] && [ ! "${FRONT}/package-lock.json" -nt "${FRONT}/node_modules/.package-lock.json" ]; then
+  info "node_modules al dia; se omite la instalacion"
 else
   ( cd "$FRONT" && npm ci --no-audit --no-fund )
 fi
 ( cd "$FRONT" && npm run build )
 
-SALIDA="${FRONT}/dist/biblioteca-front/browser"
+SALIDA="${FRONT}/dist"
 [ -d "$SALIDA" ] || die "no encuentro la salida del build en ${SALIDA}"
 
 # --- 3. Publicar ---------------------------------------------------------------
@@ -177,7 +180,8 @@ cat <<EOF
         ${SITE_URL}
 
     Recorrido de comprobacion (DevTools abierto, pestana Network):
-      1. "Iniciar sesion" -> Hosted UI de Cognito -> vuelve al sitio
+      1. "Iniciar sesion" -> pantalla de Cognito, en castellano y con la
+         marca de la Biblioteca -> vuelve al sitio
       2. Catalogo: buscar y filtrar
       3. Solicitar: enviar el formulario -> 201
       4. Mis solicitudes: aparece lo enviado

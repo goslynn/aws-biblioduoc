@@ -1,21 +1,21 @@
 // La version ENCENDIDA de diagnostico/rutas.ts: la que genera
 // aws/pipeline/publish-web.sh cuando se le pasa DEBUG=true.
 //
-// Esta aqui por dos motivos: para poder encender la vista en local sin
+// Esta aqui por dos motivos: para poder encender la vista al compilar sin
 // desplegar (copiandola a diagnostico/rutas.ts) y para que el generador del
 // pipeline tenga un original legible contra el que compararse.
 //
 // No la dejes copiada al publicar: esta pantalla ensena el access token en
-// claro. Ver diagnostico/diagnostico.ts.
-import { Routes } from '@angular/router';
+// claro. Ver diagnostico/diagnostico.tsx.
+import type { RouteObject } from 'react-router';
 
-import { authGuard } from '../auth/auth.guard';
+import { requiereSesion } from '../auth/guardas';
 
-export const rutasDiagnostico: Routes = [
+export const rutasDiagnostico: RouteObject[] = [
   {
     path: 'diagnostico',
-    canActivate: [authGuard],
-    title: 'Diagnostico · Biblioteca Duoc',
-    loadComponent: () => import('./diagnostico').then((m) => m.Diagnostico),
+    loader: requiereSesion,
+    handle: { titulo: 'Diagnostico · Biblioteca Duoc' },
+    lazy: () => import('./diagnostico').then((m) => ({ Component: m.Diagnostico })),
   },
 ];

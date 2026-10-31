@@ -91,10 +91,14 @@ despliega_stack web.yaml "$STACK_WEB" \
   "ProjectName=${PROJECT_NAME}" > "${TMP_LOGS}/web" 2>&1 &
 PID_WEB=$!
 
+# El logo y el favicon de las pantallas de login viajan en base64: los SVG de
+# aws/marca/ son la fuente, y el recurso ManagedLoginBranding los quiere asi.
 despliega_stack cognito.yaml "$STACK_COGNITO" \
   "ProjectName=${PROJECT_NAME}" \
   "CallbackUrls=${SITE_URL}" \
-  "LogoutUrls=${SITE_URL}" > "${TMP_LOGS}/cognito" 2>&1 &
+  "LogoutUrls=${SITE_URL}" \
+  "LogoLoginSvg=$(base64 -w0 "${ROOT}/aws/marca/logo-login.svg")" \
+  "FaviconLoginSvg=$(base64 -w0 "${ROOT}/aws/marca/favicon-login.svg")" > "${TMP_LOGS}/cognito" 2>&1 &
 PID_COGNITO=$!
 
 despliega_stack network.yaml "$STACK_NETWORK" \
@@ -192,7 +196,7 @@ usuario_demo() {
     info "usuario ${usuario} creado"
   fi
   # --permanent evita el estado FORCE_CHANGE_PASSWORD, que bloquearia tanto el
-  # login de la Hosted UI como el admin-initiate-auth de bruno-env.sh.
+  # login de Managed Login como el admin-initiate-auth de bruno-env.sh.
   aws cognito-idp admin-set-user-password \
     --user-pool-id "$USER_POOL_ID" \
     --username "$usuario" \
@@ -218,7 +222,7 @@ info "${DEMO_EMPLOYEE} esta en el grupo ${GRUPO_EMPLEADOS}"
 cat > "${LOCAL_DIR}/usuario-demo.env" <<EOF
 # Generado por aws/scripts/bootstrap.sh. Esta en .gitignore.
 # Lo lee bruno-env.sh para pedir los tokens del usuario, y te sirve a ti para
-# entrar por la Hosted UI.
+# entrar por la pantalla de login de Cognito.
 DEMO_USER='${DEMO_USER}'
 DEMO_PASSWORD='${DEMO_PASSWORD}'
 DEMO_EMPLOYEE='${DEMO_EMPLOYEE}'
@@ -247,7 +251,7 @@ log "Todo desplegado"
 cat <<EOF
     Sitio        ${SITE_URL}
     API          ${API_ENDPOINT}/api/libros
-    Hosted UI    ${HOSTED_UI}
+    Login        ${HOSTED_UI}
     Logs         aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}
 
     Entra con    ${DEMO_USER}      (estudiante)
@@ -255,7 +259,7 @@ cat <<EOF
                  (las contrasenas estan en aws/.local/usuario-demo.env)
 
     Los avisos por correo solo llegan a un email REAL: registrate con el
-    tuyo desde la Hosted UI y activa los avisos en "Mis solicitudes".
+    tuyo con "Crear cuenta" y activa los avisos en "Mis solicitudes".
 
     Probar la API:
         cd bruno && bru run --env aws
