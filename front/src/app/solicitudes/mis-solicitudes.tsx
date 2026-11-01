@@ -3,16 +3,14 @@ import { Link } from 'react-router';
 
 import { statusDe } from '../auth/http';
 import { avisosService, type EstadoAvisos } from '../avisos/avisos.service';
-import { fechaHora } from '../formato';
-import { claseEstado, type EstadoSolicitud, type Solicitud } from './solicitud';
+import { Tapa } from '../catalogo/tapa';
+import { diasHasta, fechaHora } from '../formato';
+import { IconoReloj } from '../iconos';
+import { NOMBRE_ESTADO, NOMBRE_SEDE, claseEstado, type Solicitud } from './solicitud';
 import { solicitudesService } from './solicitudes.service';
 
-const NOMBRE_ESTADO: Record<EstadoSolicitud, string> = {
-  RECIBIDA: 'En revision',
-  APROBADA: 'Aprobada',
-  RECHAZADA: 'Rechazada',
-  DEVUELTA: 'Devuelta',
-};
+/** En curso: lo que todavia pide algo al estudiante (esperar o devolver). */
+const enCurso = (s: Solicitud) => s.estado === 'RECIBIDA' || s.estado === 'APROBADA';
 
 /**
  * Las solicitudes del usuario que tiene la sesion abierta, y el interruptor de
@@ -31,6 +29,8 @@ export function MisSolicitudes() {
 
   const [avisos, setAvisos] = useState<EstadoAvisos | null>(null);
   const [errorAvisos, setErrorAvisos] = useState('');
+
+  const [pestana, setPestana] = useState<'curso' | 'historial'>('curso');
 
   const cargar = () => {
     setCargando(true);
@@ -67,66 +67,163 @@ export function MisSolicitudes() {
     );
   };
 
+  const vista = lista.filter((s) => (pestana === 'curso') === enCurso(s));
+  const cuantasEnCurso = lista.filter(enCurso).length;
+
   return (
     <>
-      <section className="panel">
-        <h1>Mis solicitudes</h1>
-        <button type="button" className="secundario" onClick={cargar}>Recargar</button>
+      <section className="encabezado con-pestanas">
+        <div className="contenedor">
+          <div className="titulo-pagina">
+            <div>
+              <h1>Mis solicitudes</h1>
+              <p className="bajada">En que esta cada prestamo y cuando tienes que devolverlo.</p>
+            </div>
+            <div className="acciones">
+              <button type="button" className="sutil" onClick={cargar}>Recargar</button>
+              <Link to="/catalogo" className="boton secundario">Nueva solicitud</Link>
+            </div>
+          </div>
+          <div className="pestanas" role="tablist" aria-label="Solicitudes">
+            <button type="button" role="tab" aria-selected={pestana === 'curso'} onClick={() => setPestana('curso')}>
+              En curso ({cuantasEnCurso})
+            </button>
+            <button type="button" role="tab" aria-selected={pestana === 'historial'} onClick={() => setPestana('historial')}>
+              Historial ({lista.length - cuantasEnCurso})
+            </button>
+          </div>
+        </div>
       </section>
 
-      <section className="panel">
-        <h2>Avisos por correo</h2>
-        {avisos && (avisos.activo ? (
-          <>
-            <p>
-              Te avisamos a <strong>{avisos.email}</strong> cuando registremos, aprobemos o
-              rechacemos una solicitud, antes de que venza un prestamo y cuando vuelva un libro
-              que esperas.
+      <div className="contenedor columnas">
+        <div className="principal" role="tabpanel">
+          {error && <p className="fallo">{error}</p>}
+          {cargando && <p className="tenue">Cargando…</p>}
+
+          {!cargando && vista.length === 0 && !error && (
+            <div className="vacio">
+              {pestana === 'curso' ? (
+                <>
+                  <h2>No tienes prestamos en curso</h2>
+                  <p>Cuando envies una solicitud, aqui veras en que esta.</p>
+                  <Link to="/catalogo" className="boton primario">Ir al catalogo</Link>
+                </>
+              ) : (
+                <>
+                  <h2>Todavia no hay historial</h2>
+                  <p>Aqui quedan las solicitudes devueltas y las rechazadas.</p>
+                </>
+              )}
+            </div>
+          )}
+
+          {vista.map((solicitud) => <TarjetaSolicitud key={solicitud.id} solicitud={solicitud} />)}
+        </div>
+
+        <aside className="lateral panel avisos" aria-labelledby="avisos">
+          <div className="cabeza">
+            <h2 id="avisos">Avisos por correo</h2>
+            {avisos && (
+              <button type="button" role="switch" className="interruptor" aria-checked={avisos.activo}
+                      aria-labelledby="avisos" onClick={avisos.activo ? desactivarAvisos : activarAvisos} />
+            )}
+          </div>
+          {avisos?.activo ? (
+            <>
+              <p>Te escribimos a <strong>{avisos.email}</strong> cuando:</p>
+              <ul>
+                <li>registramos tu solicitud</li>
+                <li>la aprobamos o la rechazamos</li>
+                <li>se acerca el vencimiento de un prestamo</li>
+                <li>vuelve un libro que esperas</li>
+              </ul>
+            </>
+          ) : avisos ? (
+            <p className="bajada">
+              Estan desactivados. Activalos para recibir el comprobante, la resolucion y los
+              recordatorios en el correo con el que te registraste. Puedes desactivarlos cuando quieras.
             </p>
-            <button type="button" className="sutil" onClick={desactivarAvisos}>Desactivar avisos</button>
-          </>
-        ) : (
-          <>
-            <p className="tenue">
-              Activalos para recibir el comprobante, la resolucion y los recordatorios en el correo
-              con el que te registraste. Puedes desactivarlos cuando quieras.
-            </p>
-            <button type="button" onClick={activarAvisos}>Activar avisos por correo</button>
-          </>
-        ))}
-        {errorAvisos && <p className="fallo">{errorAvisos}</p>}
-      </section>
-
-      {error && <p className="fallo">{error}</p>}
-      {cargando && <p className="tenue">Cargando…</p>}
-
-      {!cargando && lista.length === 0 && !error && (
-        <p className="aviso">
-          No hay solicitudes a tu nombre todavia. <Link to="/catalogo">Ir al catalogo</Link>.
-        </p>
-      )}
-
-      {lista.map((solicitud) => (
-        <article key={solicitud.id} className="panel solicitud">
-          <header>
-            <h3>{solicitud.id}</h3>
-            <span className={claseEstado(solicitud.estado)}>{NOMBRE_ESTADO[solicitud.estado]}</span>
-          </header>
-          <p className="tenue">
-            {solicitud.dias} dias · retiro en {solicitud.sede} ·{' '}
-            {solicitud.venceEn
-              ? `devolver antes del ${fechaHora(solicitud.venceEn)}`
-              : `devolucion estimada ${solicitud.fechaDevolucion}`}
-          </p>
-          {solicitud.motivoRechazo && <p className="fallo">Motivo del rechazo: {solicitud.motivoRechazo}</p>}
-          {solicitud.motivo && <p>{solicitud.motivo}</p>}
-          <ul>
-            {solicitud.lineas.map((linea) => (
-              <li key={linea.libroId}>{linea.cantidad} x {linea.titulo} <span className="tenue">({linea.autor})</span></li>
-            ))}
-          </ul>
-        </article>
-      ))}
+          ) : (
+            <p className="tenue">No se pudo consultar el estado de los avisos.</p>
+          )}
+          {errorAvisos && <p className="fallo">{errorAvisos}</p>}
+        </aside>
+      </div>
     </>
+  );
+}
+
+/** Una solicitud con su progreso y, si esta prestada, cuando hay que devolverla. */
+function TarjetaSolicitud({ solicitud }: { solicitud: Solicitud }) {
+  const { estado } = solicitud;
+  const rechazada = estado === 'RECHAZADA';
+  const prestada = estado === 'APROBADA' && solicitud.venceEn;
+
+  const cuando = estado === 'RECIBIDA'
+    ? `Creada ${fechaHora(solicitud.creadaEn)}`
+    : estado === 'DEVUELTA' && solicitud.devueltaEn
+      ? `Devuelta ${fechaHora(solicitud.devueltaEn)}`
+      : solicitud.resueltaEn ? `Resuelta ${fechaHora(solicitud.resueltaEn)}` : `Creada ${fechaHora(solicitud.creadaEn)}`;
+
+  return (
+    <article className="panel solicitud">
+      <div className="contenido">
+        <div className="cabeza">
+          <div>
+            <h2>{solicitud.id}</h2>
+            <span className={claseEstado(estado)}>{NOMBRE_ESTADO[estado]}</span>
+          </div>
+          <span className="tenue">{cuando} · {NOMBRE_SEDE[solicitud.sede]}</span>
+        </div>
+
+        <ol className="progreso" aria-label="Progreso">
+          <li className={estado === 'RECIBIDA' ? undefined : 'hecho'} aria-current={estado === 'RECIBIDA' ? 'step' : undefined}>
+            {estado === 'RECIBIDA' ? 'Recibida · en revision' : 'Recibida'}
+          </li>
+          <li className={rechazada ? 'cortado' : estado === 'DEVUELTA' ? 'hecho' : undefined}
+              aria-current={estado === 'APROBADA' || rechazada ? 'step' : undefined}>
+            {rechazada ? 'Rechazada' : estado === 'APROBADA' ? 'Aprobada · retirala' : 'Aprobada'}
+          </li>
+          <li className={estado === 'DEVUELTA' ? 'hecho' : undefined}>Devuelta</li>
+        </ol>
+
+        <ul className="libros-solicitud">
+          {solicitud.lineas.map((linea) => (
+            <li key={linea.libroId}>
+              <Tapa titulo={linea.titulo} chica />
+              <span><strong>{linea.titulo}</strong> · {linea.autor}{linea.cantidad > 1 && ` · ${linea.cantidad} ejemplares`}</span>
+            </li>
+          ))}
+        </ul>
+
+        {estado === 'RECIBIDA' && (
+          <p className="tenue">
+            {solicitud.dias} dias · devolucion estimada {solicitud.fechaDevolucion}. Un empleado la revisara pronto.
+          </p>
+        )}
+        {solicitud.motivo && <p className="tenue">Tu motivo: {solicitud.motivo}</p>}
+        {solicitud.motivoRechazo && (
+          <p className="fallo"><strong>Motivo del rechazo:</strong> {solicitud.motivoRechazo}</p>
+        )}
+      </div>
+
+      {prestada && <Vencimiento venceEn={solicitud.venceEn!} />}
+    </article>
+  );
+}
+
+/** La franja de "devuelvela antes del…": amarilla, o roja si ya vencio. */
+function Vencimiento({ venceEn }: { venceEn: string }) {
+  const dias = diasHasta(venceEn);
+  const faltan = dias > 1 ? `Faltan ${dias} dias`
+    : dias === 1 ? 'Vence manana'
+      : dias === 0 ? 'Vence hoy'
+        : `Vencida hace ${-dias} dia(s)`;
+  return (
+    <div className={dias < 0 ? 'vencimiento vencida' : 'vencimiento'}>
+      <IconoReloj />
+      <span>Devuelvela antes del <strong>{fechaHora(venceEn)}</strong></span>
+      <span className="faltan">{faltan}</span>
+    </div>
   );
 }

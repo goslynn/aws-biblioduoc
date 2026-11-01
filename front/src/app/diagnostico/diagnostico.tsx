@@ -74,7 +74,7 @@ export function Diagnostico() {
   };
 
   return (
-    <>
+    <div className="contenedor cuerpo">
       <section className="panel">
         <h1>Diagnostico</h1>
         <p className="aviso">
@@ -142,7 +142,7 @@ export function Diagnostico() {
           </>
         )}
       </section>
-    </>
+    </div>
   );
 }
 

@@ -1,77 +1,109 @@
-/** Portada publica: lo unico que se puede ver sin iniciar sesion. */
+import { iniciarSesion, registrarse } from './auth/sesion';
+import { Tapa } from './catalogo/tapa';
+import { IconoUbicacion } from './iconos';
+import { NOMBRE_SEDE, SEDES } from './solicitudes/solicitud';
+
+/**
+ * Portada publica: lo unico que se puede ver sin iniciar sesion. Su unico
+ * proposito es que la persona entre o cree su cuenta; por eso las dos
+ * acciones se repiten arriba, en la cabecera y en el titular.
+ *
+ * La tarjeta de la derecha es una MUESTRA fija de como se ve una solicitud
+ * aprobada, no datos reales: aqui todavia no hay token para pedirlos.
+ */
 export function Inicio() {
   return (
     <>
       <section className="hero">
-        <div className="hero-texto">
-          <h1>Tu biblioteca, siempre a mano</h1>
-          <p>
-            Consulta el catalogo, arma tu solicitud de prestamo y sigue su estado,
-            todo desde un solo lugar.
-          </p>
-          <p className="tenue">
-            ¿Primera vez aqui? Crea tu cuenta con tu correo: te enviaremos un codigo
-            de seis digitos para activarla. La contrasena necesita al menos 8
-            caracteres, con una mayuscula, una minuscula y un numero.
-          </p>
-        </div>
+        <div className="contenedor">
+          <div className="hero-texto">
+            <span className="sello">Para estudiantes de Duoc UC</span>
+            <h1>Pide tus libros <span>sin hacer fila.</span></h1>
+            <p>
+              Busca en el catalogo, junta varios titulos en una sola solicitud y
+              retiralos en tu sede. Te avisamos por correo cuando este aprobada y
+              antes de que venza.
+            </p>
+            <div className="acciones">
+              <button type="button" className="primario grande" onClick={registrarse}>Crear mi cuenta</button>
+              <button type="button" className="secundario grande" onClick={() => void iniciarSesion()}>Ya tengo cuenta</button>
+            </div>
+            <p className="nota">
+              Te enviaremos un codigo de 6 digitos al correo para activarla. La
+              contrasena necesita al menos 8 caracteres, con una mayuscula, una
+              minuscula y un numero.
+            </p>
+          </div>
 
-        <div className="hero-ilustracion">
-          <svg viewBox="0 0 300 200" role="img" aria-label="Estante de libros">
-            <line x1="0" y1="192" x2="300" y2="192" stroke="var(--linea)" strokeWidth="4" />
-            <rect x="8" y="70" width="22" height="122" rx="3" style={{ fill: 'var(--duoc)' }} />
-            <rect x="34" y="45" width="18" height="147" rx="3" style={{ fill: 'var(--acento)' }} />
-            <rect x="56" y="90" width="26" height="102" rx="3" style={{ fill: 'var(--tinta-suave)' }} />
-            <rect x="86" y="30" width="16" height="162" rx="3" style={{ fill: 'var(--duoc-claro)' }} stroke="var(--duoc)" strokeWidth="1.5" />
-            <rect x="106" y="60" width="24" height="132" rx="3" style={{ fill: 'var(--acento-fondo)' }} stroke="var(--acento)" strokeWidth="1.5" />
-            <rect x="134" y="50" width="20" height="142" rx="3" style={{ fill: 'var(--duoc)' }} />
-            <rect x="158" y="85" width="22" height="107" rx="3" style={{ fill: 'var(--tinta)' }} />
-            <rect x="184" y="40" width="18" height="152" rx="3" style={{ fill: 'var(--acento)' }} />
-            <rect x="206" y="65" width="26" height="127" rx="3" style={{ fill: 'var(--duoc-claro)' }} stroke="var(--duoc)" strokeWidth="1.5" />
-            <rect x="236" y="95" width="20" height="97" rx="3" style={{ fill: 'var(--tinta-suave)' }} />
-            <rect x="260" y="55" width="24" height="137" rx="3" style={{ fill: 'var(--acento-fondo)' }} stroke="var(--acento)" strokeWidth="1.5" />
-          </svg>
+          <div className="hero-muestra" aria-hidden="true">
+            <div className="tarjeta">
+              <div className="fila">
+                <strong>SOL-0042</strong>
+                <span className="etiqueta si">Aprobada</span>
+              </div>
+              <ol className="progreso">
+                <li className="hecho">Recibida</li>
+                <li aria-current="step">Aprobada</li>
+                <li>Devuelta</li>
+              </ol>
+              <div className="libro-mini">
+                <Tapa titulo="Clean Code" genero="Informatica" chica />
+                <span><strong>Clean Code</strong><small>Robert C. Martin</small></span>
+              </div>
+              <div className="libro-mini">
+                <Tapa titulo="OAuth 2 in Action" genero="Seguridad" chica />
+                <span><strong>OAuth 2 in Action</strong><small>Justin Richer y Antonio Sanso</small></span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      <section className="funciones">
-        <article>
-          <span className="icono-funcion" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
-                 strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="10.5" cy="10.5" r="6.5" />
-              <line x1="15.5" y1="15.5" x2="21" y2="21" />
-            </svg>
-          </span>
-          <h3>Catalogo</h3>
-          <p>Busca por titulo, autor o categoria y filtra por disponibilidad.</p>
-        </article>
+      <section className="contenedor seccion" aria-labelledby="como">
+        <header>
+          <h2 id="como">Como funciona</h2>
+          <p>Tres pasos, y en cada uno sabes en que esta tu prestamo.</p>
+        </header>
+        <ol className="pasos">
+          <li className="panel">
+            <span className="numero">1</span>
+            <h3>Busca y elige</h3>
+            <p>
+              Filtra por genero o disponibilidad y agrega los titulos que
+              necesitas. Si uno esta agotado, pide que te avisemos cuando vuelva.
+            </p>
+          </li>
+          <li className="panel">
+            <span className="numero">2</span>
+            <h3>Envia tu solicitud</h3>
+            <p>
+              Elige la sede de retiro y por cuantos dias (hasta 30). Un empleado
+              de la biblioteca la revisa y la aprueba.
+            </p>
+          </li>
+          <li className="panel">
+            <span className="numero">3</span>
+            <h3>Retira y devuelve</h3>
+            <p>
+              Con los avisos activos recibes el comprobante, la resolucion y un
+              recordatorio antes del vencimiento.
+            </p>
+          </li>
+        </ol>
+      </section>
 
-        <article>
-          <span className="icono-funcion" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
-                 strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="5" y="3" width="14" height="18" rx="2" />
-              <line x1="8" y1="8" x2="16" y2="8" />
-              <line x1="8" y1="12" x2="16" y2="12" />
-              <line x1="8" y1="16" x2="13" y2="16" />
-            </svg>
-          </span>
-          <h3>Solicitudes</h3>
-          <p>Arma tu pedido con varios libros y envialo en un solo paso.</p>
-        </article>
-
-        <article>
-          <span className="icono-funcion" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
-                 strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9" />
-              <path d="M12 7v5l3.5 2" />
-            </svg>
-          </span>
-          <h3>Seguimiento</h3>
-          <p>Revisa el estado de cada solicitud que has enviado.</p>
-        </article>
+      <section className="contenedor" aria-labelledby="sedes">
+        <div className="panel sedes">
+          <div>
+            <h2 id="sedes">Retira en {SEDES.length} sedes</h2>
+            <p>Eliges la sede al enviar la solicitud.</p>
+          </div>
+          <ul>
+            {SEDES.map((sede) => (
+              <li key={sede}><IconoUbicacion />{NOMBRE_SEDE[sede]}</li>
+            ))}
+          </ul>
+        </div>
       </section>
     </>
   );

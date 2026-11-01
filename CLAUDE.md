@@ -300,7 +300,7 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 * **Con `ManagedLoginVersion: 2`, un App Client sin `ManagedLoginBranding` no
   tiene pantalla de login**: `/login` da error. El logo (`FORM_LOGO`) tiene que
   tener proporcion entre 1:1 y 4:1 o el recurso falla al crearse; los colores
-  van en RGBA hexadecimal sin `#` (`0f6b5cff`).
+  van en RGBA hexadecimal sin `#` (`ffb800ff`).
 * **Rutas limpias (`createBrowserRouter`) dependen del `try_files` del
   `Caddyfile`**: sin el, recargar `/catalogo` da 404. Y el proxy de `/api`
   necesita `header_up Host {upstream_hostport}`: con el `Host` del sitio, API

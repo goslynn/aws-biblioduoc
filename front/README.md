@@ -82,19 +82,20 @@ index.html                      punto de entrada de Vite (<div id="raiz">)
 vite.config.ts                  salida a dist/, base '/' (raiz del sitio)
 tsconfig.json                   comprueba TODO src/, diagnostico incluido
 src/
-├── main.tsx                    Amplify.configure() ANTES de montar React
-├── styles.css
+├── main.tsx                    Amplify.configure() ANTES de montar React; fuentes empaquetadas
+├── styles.css                  marca Duoc: amarillo sobre negro, Montserrat + Lato
 └── app/
     ├── rutas.tsx               createBrowserRouter; /inicio publica, el resto tras una guarda, lazy
     ├── app.tsx                 marco: cabecera, navegacion, estado de sesion, titulo
     ├── inicio.tsx              portada publica
     ├── almacen.ts              estado compartido fuera de React (useSyncExternalStore)
-    ├── formato.ts              fechas como dd-MM-yyyy HH:mm
+    ├── formato.ts              fechas como dd-MM-yyyy HH:mm, dias hasta un vencimiento
+    ├── iconos.tsx              iconos de trazo (decorativos, aria-hidden)
     ├── auth/
     │   ├── sesion.ts           entrar, registrarse, salir, ¿empleado? (+ hook useSesion)
     │   ├── http.ts             UNICO cliente de la API (/api, mismo origen): anade el Bearer
     │   └── guardas.ts          requiereSesion y requiereEmpleado: bloquean la NAVEGACION
-    ├── catalogo/               buscador, filtros, seleccion y "avisame cuando vuelva"
+    ├── catalogo/               buscador, panel de filtros colapsable, seleccion (un ejemplar por libro), tapas y "avisame cuando vuelva"
     ├── solicitudes/            formulario de prestamo y "mis solicitudes" (con los avisos por correo)
     ├── avisos/                 activar / desactivar los avisos (el consentimiento)
     ├── gestion/                SOLO EMPLEADOS: bandeja (aprobar, rechazar, devolver) y stock
@@ -172,22 +173,32 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 `aws/.local/usuario-demo.env`), en otra ventana privada.
 
 1. **Crear cuenta** (estudiante) → `/signup` **en castellano y con el logo de
-   la Biblioteca** → codigo de 6 digitos al correo → vuelve ya autenticado. (O
-   **Iniciar sesion** con una cuenta existente: la misma marca.)
-2. **Mis solicitudes → Activar avisos por correo** → PUT 200 con tu email, y
-   llega el correo de bienvenida.
-3. **Catalogo**: buscar y filtrar. Cada busqueda es una peticion real.
-4. **Agregar** libros y **Completar la solicitud** → 201 al instante; el
-   comprobante llega por correo segundos despues.
+   la Biblioteca** → codigo de 6 digitos al correo → vuelve con la pantalla
+   *Iniciando sesion…* (sin asomar la portada) y aterriza en el catalogo con
+   **tu correo arriba a la derecha**. (O **Iniciar sesion** con una cuenta
+   existente: la misma marca.)
+2. **Mis solicitudes → interruptor *Avisos por correo*** → PUT 200 con tu
+   email, y llega el correo de bienvenida.
+3. **Catalogo**: buscar; en el panel **Filtros** (se oculta y se muestra)
+   elegir un genero o *Con ejemplares*: cada cambio es una peticion real.
+   Autor, *Publicado entre*, ubicacion, *Agotados* y **Ordenar** afinan la
+   respuesta sin pedirla otra vez; cada filtro activo aparece como chip
+   quitable.
+4. **Agregar** libros (un ejemplar por libro; la ✕ lo quita) → **Continuar con la solicitud** → elegir sede y dias →
+   **Enviar solicitud** → 201 al instante; el comprobante llega por correo
+   segundos despues.
 5. En un libro agotado (*Building Microservices*, *Terraform*): **Avisame
-   cuando vuelva** → 201; el boton pasa a *Dejar de avisarme*.
-6. **Empleado → Bandeja**: la solicitud esta RECIBIDA. **Aprobar** → 200 → el
+   cuando vuelva** → 201; el boton pasa a *Te avisaremos* (tocarlo otra vez
+   → DELETE 204).
+6. **Empleado → Bandeja → Por revisar**: la solicitud esta RECIBIDA, con el
+   stock de cada libro al lado. **Aprobar** → 200 → el
    estudiante recibe "aprobada" con la fecha de devolucion, y en *Mis
-   solicitudes* la ve *Aprobada*. (O **Rechazar** con motivo → correo con el
-   motivo.)
+   solicitudes* la ve *Aprobada* con los dias que faltan. (O **Rechazar** con
+   motivo → correo con el motivo.)
 7. **Empleado → Stock**: cargar el libro agotado del paso 5 → el estudiante
    recibe "Volvio: ..." y su suscripcion se cierra.
-8. **Empleado → Bandeja → Registrar devolucion** → correo de devolucion.
+8. **Empleado → Bandeja → Prestadas → Registrar devolucion** → correo de
+   devolucion.
 9. Con el estudiante, forzar `/gestion/solicitudes`: redirige al catalogo (la
    guarda); y aunque se la saltara, Spring responderia 403.
 10. Recargar (F5) en `/mis-solicitudes`: sigue en la misma vista, sin 404.

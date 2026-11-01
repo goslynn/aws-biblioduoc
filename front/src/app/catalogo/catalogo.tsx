@@ -1,25 +1,70 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 
 import { statusDe } from '../auth/http';
+import { IconoCampana, IconoCerrar, IconoCheck, IconoFiltros, IconoFlechaAbajo, IconoLupa, IconoMas } from '../iconos';
 import type { Libro } from './libro';
 import { librosService } from './libros.service';
-import { agregarASeleccion, useSeleccion } from './seleccion';
+import { Quitar } from './quitar';
+import { agregarASeleccion, quitarDeSeleccion, useSeleccion } from './seleccion';
+import { Tapa } from './tapa';
+
+type Disponibilidad = 'todos' | 'disponibles' | 'agotados';
+type Orden = 'relevancia' | 'titulo' | 'recientes' | 'antiguos' | 'ejemplares';
+
+const ORDENES: Record<Orden, string> = {
+  relevancia: 'Relevancia',
+  titulo: 'Titulo (A-Z)',
+  recientes: 'Mas recientes',
+  antiguos: 'Mas antiguos',
+  ejemplares: 'Mas ejemplares',
+};
+
+/** Si el panel de filtros queda abierto entre visitas. Es comodidad: si falla, se abre segun el ancho. */
+const CLAVE_PANEL = 'catalogo.filtros-abiertos';
+
+function panelInicial(): boolean {
+  try {
+    const guardado = localStorage.getItem(CLAVE_PANEL);
+    if (guardado !== null) {
+      return guardado === 'true';
+    }
+  } catch {
+    // Almacenamiento bloqueado: se decide por el ancho de la pantalla.
+  }
+  return window.matchMedia('(min-width: 900px)').matches;
+}
+
+/** Sin tildes ni mayusculas: "garcia" encuentra "Garcia" y "García". */
+const normalizar = (texto: string) => texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 /**
- * El catalogo: buscador, filtros y la lista de libros.
+ * El catalogo: buscador, panel de filtros y la lista de libros.
  *
- * El filtrado lo hace el BACKEND, no este componente. Podria hacerse aqui
- * —son 20 libros— pero entonces el buscador no probaria nada: asi cada
- * busqueda es una peticion real que atraviesa auth/http.ts, API Gateway, el
- * authorizer y Spring.
+ * El filtrado se reparte en dos capas, y a proposito:
+ *   * El texto, el genero y "con ejemplares" los resuelve el BACKEND: cada
+ *     cambio es una peticion real que atraviesa auth/http.ts, API Gateway, el
+ *     authorizer y Spring (GET /api/libros?q=&genero=&soloDisponibles=).
+ *   * Autor, fecha de publicacion, ubicacion, "agotados" y el orden AFINAN en el
+ *     navegador la lista que devolvio la API, que no recibe esos parametros.
+ *     Son 20 libros: pedirlos otra vez para reordenarlos no aporta nada.
  */
 export function Catalogo() {
   const seleccion = useSeleccion();
 
+  // Filtros que viajan a la API.
   const [texto, setTexto] = useState('');
   const [genero, setGenero] = useState('');
-  const [soloDisponibles, setSoloDisponibles] = useState(false);
+  const [disponibilidad, setDisponibilidad] = useState<Disponibilidad>('todos');
+
+  // Filtros que afinan la respuesta en el navegador.
+  const [autor, setAutor] = useState('');
+  const [anioDesde, setAnioDesde] = useState('');
+  const [anioHasta, setAnioHasta] = useState('');
+  const [ubicacion, setUbicacion] = useState('');
+  const [orden, setOrden] = useState<Orden>('relevancia');
+
+  const [panelAbierto, setPanelAbierto] = useState(panelInicial);
 
   const [resultados, setResultados] = useState<Libro[]>([]);
   const [generos, setGeneros] = useState<string[]>([]);
@@ -31,10 +76,10 @@ export function Catalogo() {
 
   // Los filtros van como argumentos y no se leen del estado: "Limpiar" busca
   // con los valores vacios en el mismo clic, antes de que React repinte.
-  const buscar = (q = texto, g = genero, disp = soloDisponibles) => {
+  const buscar = (q = texto, g = genero, disp = disponibilidad) => {
     setCargando(true);
     setError('');
-    librosService.buscar(q, g, disp).then(
+    librosService.buscar(q, g, disp === 'disponibles').then(
       (libros) => {
         setResultados(libros);
         setCargando(false);
@@ -60,6 +105,16 @@ export function Catalogo() {
     buscar();
   }, []);
 
+  const alternarPanel = () => {
+    const abierto = !panelAbierto;
+    setPanelAbierto(abierto);
+    try {
+      localStorage.setItem(CLAVE_PANEL, String(abierto));
+    } catch {
+      // Sin almacenamiento, el panel simplemente no se recuerda.
+    }
+  };
+
   const enviar = (evento: FormEvent) => {
     evento.preventDefault();
     buscar();
@@ -84,92 +139,297 @@ export function Catalogo() {
     );
   };
 
+  const elegirGenero = (g: string) => {
+    setGenero(g);
+    buscar(texto, g, disponibilidad);
+  };
+
+  /** "Agotados" no es un parametro de la API: se piden todos y se afina aqui. */
+  const elegirDisponibilidad = (disp: Disponibilidad) => {
+    setDisponibilidad(disp);
+    if ((disp === 'disponibles') !== (disponibilidad === 'disponibles')) {
+      buscar(texto, genero, disp);
+    }
+  };
+
   const limpiar = () => {
     setTexto('');
     setGenero('');
-    setSoloDisponibles(false);
-    buscar('', '', false);
+    setDisponibilidad('todos');
+    setAutor('');
+    setAnioDesde('');
+    setAnioHasta('');
+    setUbicacion('');
+    buscar('', '', 'todos');
   };
+
+  // Lo que ofrece cada filtro sale de la respuesta: no hay listas fijas.
+  const autores = useMemo(() => [...new Set(resultados.map((l) => l.autor))].sort(), [resultados]);
+  const ubicaciones = useMemo(() => [...new Set(resultados.map((l) => l.ubicacion))].sort(), [resultados]);
+  const anios = resultados.map((l) => l.anio);
+  const anioMin = anios.length ? Math.min(...anios) : undefined;
+  const anioMax = anios.length ? Math.max(...anios) : undefined;
+
+  const visibles = useMemo(() => {
+    const buscado = normalizar(autor.trim());
+    const desde = anioDesde ? Number(anioDesde) : -Infinity;
+    const hasta = anioHasta ? Number(anioHasta) : Infinity;
+    const filtrados = resultados.filter((l) =>
+      (disponibilidad !== 'agotados' || !l.disponible)
+      && (!buscado || normalizar(l.autor).includes(buscado))
+      && l.anio >= desde && l.anio <= hasta
+      && (!ubicacion || l.ubicacion === ubicacion));
+    const comparar: Record<Orden, ((a: Libro, b: Libro) => number) | null> = {
+      relevancia: null,
+      titulo: (a, b) => a.titulo.localeCompare(b.titulo, 'es'),
+      recientes: (a, b) => b.anio - a.anio,
+      antiguos: (a, b) => a.anio - b.anio,
+      ejemplares: (a, b) => b.ejemplares - a.ejemplares,
+    };
+    const criterio = comparar[orden];
+    return criterio ? [...filtrados].sort(criterio) : filtrados;
+  }, [resultados, disponibilidad, autor, anioDesde, anioHasta, ubicacion, orden]);
+
+  /** Cada filtro activo, como chip que se quita de un toque. */
+  const activos: { clave: string; texto: string; quitar: () => void }[] = [
+    ...(genero ? [{ clave: 'genero', texto: genero, quitar: () => elegirGenero('') }] : []),
+    ...(disponibilidad !== 'todos' ? [{
+      clave: 'disp',
+      texto: disponibilidad === 'disponibles' ? 'Con ejemplares' : 'Agotados',
+      quitar: () => elegirDisponibilidad('todos'),
+    }] : []),
+    ...(autor.trim() ? [{ clave: 'autor', texto: `Autor: ${autor.trim()}`, quitar: () => setAutor('') }] : []),
+    ...(anioDesde ? [{ clave: 'desde', texto: `Desde ${anioDesde}`, quitar: () => setAnioDesde('') }] : []),
+    ...(anioHasta ? [{ clave: 'hasta', texto: `Hasta ${anioHasta}`, quitar: () => setAnioHasta('') }] : []),
+    ...(ubicacion ? [{ clave: 'ubic', texto: ubicacion, quitar: () => setUbicacion('') }] : []),
+  ];
+  const hayFiltros = texto.trim() !== '' || activos.length > 0;
+  const rangoInvalido = anioDesde !== '' && anioHasta !== '' && Number(anioDesde) > Number(anioHasta);
 
   return (
     <>
-      <section className="panel">
-        <h1>Catalogo</h1>
-        <p className="tenue">{resultados.length} titulo(s).</p>
-
-        <form className="filtros" onSubmit={enviar}>
-          <div className="campo ancho">
-            <label htmlFor="q">Buscar por titulo, autor o ISBN</label>
-            <input id="q" name="q" value={texto} onChange={(e) => setTexto(e.target.value)}
-                   placeholder="por ejemplo: parra, oauth, 978-…" />
+      <section className="encabezado">
+        <div className="contenedor">
+          <div className="titulo-pagina">
+            <div>
+              <h1>Catalogo</h1>
+              <p className="bajada">Encuentra lo que necesitas y agregalo a tu solicitud.</p>
+            </div>
           </div>
 
-          <div className="campo">
-            <label htmlFor="genero">Genero</label>
-            <select id="genero" name="genero" value={genero} onChange={(e) => setGenero(e.target.value)}>
-              <option value="">Todos</option>
-              {generos.map((g) => <option key={g} value={g}>{g}</option>)}
-            </select>
-          </div>
+          <form role="search" className="buscador" onSubmit={enviar}>
+            <label htmlFor="q" className="solo-lectores">Buscar por titulo, autor o ISBN</label>
+            <div className="caja">
+              <IconoLupa />
+              <input id="q" name="q" type="search" value={texto} onChange={(e) => setTexto(e.target.value)}
+                     placeholder="Titulo, autor o ISBN: por ejemplo parra, oauth, 978-…" />
+            </div>
+            <button type="submit">Buscar</button>
+          </form>
+        </div>
+      </section>
 
-          <div className="campo casilla">
-            <label htmlFor="disp">
-              <input id="disp" type="checkbox" name="disp" checked={soloDisponibles}
-                     onChange={(e) => setSoloDisponibles(e.target.checked)} />
-              Solo disponibles
+      <div className={panelAbierto ? 'contenedor catalogo' : 'contenedor catalogo sin-filtros'}>
+        {panelAbierto && (
+          <aside id="panel-filtros" className="panel panel-filtros" aria-labelledby="titulo-filtros">
+            <div className="cabeza">
+              <h2 id="titulo-filtros">Filtros</h2>
+              {activos.length > 0 && <button type="button" className="enlace" onClick={limpiar}>Limpiar</button>}
+              <button type="button" className="sutil icono" onClick={alternarPanel} aria-label="Ocultar filtros">
+                <IconoCerrar />
+              </button>
+            </div>
+
+            <fieldset>
+              <legend>Genero</legend>
+              <label className="opcion">
+                <input type="radio" name="genero" checked={genero === ''} onChange={() => elegirGenero('')} />
+                Todos
+              </label>
+              {generos.map((g) => (
+                <label key={g} className="opcion">
+                  <input type="radio" name="genero" checked={genero === g} onChange={() => elegirGenero(g)} />
+                  {g}
+                </label>
+              ))}
+            </fieldset>
+
+            <fieldset>
+              <legend>Disponibilidad</legend>
+              {(['todos', 'disponibles', 'agotados'] as const).map((d) => (
+                <label key={d} className="opcion">
+                  <input type="radio" name="disponibilidad" checked={disponibilidad === d}
+                         onChange={() => elegirDisponibilidad(d)} />
+                  {d === 'todos' ? 'Todos' : d === 'disponibles' ? 'Con ejemplares' : 'Agotados'}
+                </label>
+              ))}
+            </fieldset>
+
+            <div className="campo">
+              <label htmlFor="autor">Autor</label>
+              <input id="autor" name="autor" list="autores" value={autor} autoComplete="off"
+                     onChange={(e) => setAutor(e.target.value)} placeholder="Ej. Martin" />
+              <datalist id="autores">
+                {autores.map((a) => <option key={a} value={a} />)}
+              </datalist>
+            </div>
+
+            <fieldset>
+              <legend>Publicado entre</legend>
+              <div className="rango">
+                <label>
+                  <span className="solo-lectores">Desde</span>
+                  <input name="desde" type="number" inputMode="numeric" value={anioDesde}
+                         min={anioMin} max={anioMax} placeholder={anioMin ? String(anioMin) : 'Desde'}
+                         onChange={(e) => setAnioDesde(e.target.value)} aria-invalid={rangoInvalido} />
+                </label>
+                <span aria-hidden="true">–</span>
+                <label>
+                  <span className="solo-lectores">Hasta</span>
+                  <input name="hasta" type="number" inputMode="numeric" value={anioHasta}
+                         min={anioMin} max={anioMax} placeholder={anioMax ? String(anioMax) : 'Hasta'}
+                         onChange={(e) => setAnioHasta(e.target.value)} aria-invalid={rangoInvalido} />
+                </label>
+              </div>
+              {rangoInvalido && <p className="ayuda error-campo">"Desde" no puede ser mayor que "Hasta".</p>}
+            </fieldset>
+
+            <div className="campo">
+              <label htmlFor="ubicacion">Ubicacion</label>
+              <div className="desplegable">
+                <select id="ubicacion" name="ubicacion" value={ubicacion} onChange={(e) => setUbicacion(e.target.value)}>
+                  <option value="">Todas</option>
+                  {ubicaciones.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+                <IconoFlechaAbajo />
+              </div>
+            </div>
+          </aside>
+        )}
+
+        <section className="principal" aria-label="Resultados">
+          <div className="barra-resultados">
+            <button type="button" className="secundario" onClick={alternarPanel}
+                    aria-expanded={panelAbierto} aria-controls="panel-filtros">
+              <IconoFiltros />{panelAbierto ? 'Ocultar filtros' : 'Filtros'}
+              {!panelAbierto && activos.length > 0 && <span className="contador">{activos.length}</span>}
+            </button>
+            <p className="tenue" aria-live="polite">
+              {cargando ? 'Cargando el catalogo…' : visibles.length === resultados.length
+                ? <><strong>{resultados.length}</strong> titulo(s)</>
+                : <><strong>{visibles.length}</strong> de {resultados.length} titulo(s)</>}
+            </p>
+            <label className="ordenar">
+              <span>Ordenar</span>
+              <span className="desplegable">
+                <select name="orden" value={orden} onChange={(e) => setOrden(e.target.value as Orden)}>
+                  {(Object.keys(ORDENES) as Orden[]).map((o) => <option key={o} value={o}>{ORDENES[o]}</option>)}
+                </select>
+                <IconoFlechaAbajo />
+              </span>
             </label>
           </div>
 
-          <div className="campo acciones">
-            <button type="submit">Buscar</button>
-            <button type="button" className="sutil" onClick={limpiar}>Limpiar</button>
+          {activos.length > 0 && (
+            <ul className="activos" aria-label="Filtros aplicados">
+              {activos.map((f) => (
+                <li key={f.clave}>
+                  <button type="button" className="chip" onClick={f.quitar} aria-label={`Quitar filtro ${f.texto}`}>
+                    {f.texto}<IconoCerrar tamano={14} />
+                  </button>
+                </li>
+              ))}
+              <li><button type="button" className="enlace" onClick={limpiar}>Limpiar todo</button></li>
+            </ul>
+          )}
+
+          {error && <p className="fallo">{error}</p>}
+
+          {!cargando && visibles.length === 0 && !error && (
+            <div className="vacio">
+              <h2>Ningun libro coincide</h2>
+              <p>Prueba con otra palabra o quita algun filtro.</p>
+              {hayFiltros && <button type="button" className="secundario" onClick={limpiar}>Quitar filtros</button>}
+            </div>
+          )}
+
+          {visibles.map((libro) => (
+            <article key={libro.id} className="libro">
+              <Tapa titulo={libro.titulo} genero={libro.genero} />
+
+              <div className="datos-libro">
+                <span className="meta">{libro.genero} · {libro.anio}</span>
+                <h2>{libro.titulo}</h2>
+                <p className="autor">{libro.autor}</p>
+                <p className="sinopsis">{libro.sinopsis}</p>
+                <p className="tenue">{libro.ubicacion} · ISBN {libro.isbn} · <code>{libro.id}</code></p>
+              </div>
+
+              <div className="accion">
+                {libro.disponible ? (
+                  <>
+                    <span className="etiqueta si">{libro.ejemplares} disponible(s)</span>
+                    {seleccion.contiene(libro.id) ? (
+                      <button type="button" className="hecho" onClick={() => quitarDeSeleccion(libro.id)}
+                              aria-label={`${libro.titulo} esta en tu solicitud. Quitar`}>
+                        <IconoCheck />En tu solicitud
+                      </button>
+                    ) : (
+                      <button type="button" className="primario" onClick={() => agregarASeleccion(libro)}>
+                        <IconoMas />Agregar
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <span className="etiqueta">Agotado</span>
+                    {esperando.has(libro.id) ? (
+                      <>
+                        <button type="button" className="secundario" onClick={() => alternarAvisame(libro)}
+                                aria-label={`Te avisaremos cuando vuelva ${libro.titulo}. Dejar de esperarlo`}>
+                          <IconoCampana />Te avisaremos
+                        </button>
+                        <small>Toca para dejar de esperarlo</small>
+                      </>
+                    ) : (
+                      <button type="button" onClick={() => alternarAvisame(libro)}>Avisame cuando vuelva</button>
+                    )}
+                  </>
+                )}
+              </div>
+            </article>
+          ))}
+        </section>
+
+        <aside className="lateral panel resumen" aria-labelledby="tu-solicitud">
+          <div className="cabeza">
+            <h2 id="tu-solicitud">Tu solicitud</h2>
+            <span className="tenue">{seleccion.total} libro(s)</span>
           </div>
-        </form>
-      </section>
-
-      {error && <p className="fallo">{error}</p>}
-
-      {cargando ? (
-        <p className="tenue">Cargando el catalogo…</p>
-      ) : resultados.length === 0 && !error ? (
-        <p className="aviso">Ningun libro coincide con la busqueda.</p>
-      ) : null}
-
-      <div className="rejilla">
-        {resultados.map((libro) => (
-          <article key={libro.id} className="panel libro">
-            <header>
-              <span className="etiqueta">{libro.genero}</span>
-              {libro.disponible
-                ? <span className="etiqueta si">{libro.ejemplares} disponible(s)</span>
-                : <span className="etiqueta no">Sin ejemplares</span>}
-            </header>
-
-            <h3>{libro.titulo}</h3>
-            <p className="tenue">{libro.autor} · {libro.anio}</p>
-            <p className="sinopsis">{libro.sinopsis}</p>
-            <p className="tenue"><code>{libro.id}</code> · ISBN {libro.isbn} · {libro.ubicacion}</p>
-
-            {libro.disponible ? (
-              <button type="button" disabled={seleccion.contiene(libro.id)} onClick={() => agregarASeleccion(libro)}>
-                {seleccion.contiene(libro.id) ? 'Ya esta en tu solicitud' : 'Agregar a la solicitud'}
-              </button>
-            ) : (
-              <button type="button" className={esperando.has(libro.id) ? 'sutil' : undefined}
-                      onClick={() => alternarAvisame(libro)}>
-                {esperando.has(libro.id) ? 'Dejar de avisarme' : 'Avisame cuando vuelva'}
-              </button>
-            )}
-          </article>
-        ))}
-      </div>
-
-      {!seleccion.vacia && (
-        <aside className="panel barra">
-          <span>{seleccion.cantidadTotal} ejemplar(es) seleccionado(s)</span>
-          <Link to="/solicitud"><button type="button">Completar la solicitud</button></Link>
+          {seleccion.vacia ? (
+            <p className="bajada">
+              Aun no agregas libros. Usa <strong>Agregar</strong> en los que necesites y los juntamos aqui.
+            </p>
+          ) : (
+            <>
+              <ul className="lista-libros">
+                {seleccion.items.map((libro) => (
+                  <li key={libro.id}>
+                    <Tapa titulo={libro.titulo} genero={libro.genero} chica />
+                    <span>
+                      <strong>{libro.titulo}</strong>
+                      <small>{libro.autor}</small>
+                    </span>
+                    <Quitar libro={libro} />
+                  </li>
+                ))}
+              </ul>
+              <Link to="/solicitud" className="boton primario grande">Continuar con la solicitud</Link>
+              <p className="tenue">Un ejemplar por libro. En el siguiente paso eliges la sede de retiro y los dias de prestamo.</p>
+            </>
+          )}
         </aside>
-      )}
+      </div>
     </>
   );
 }

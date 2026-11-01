@@ -5,6 +5,13 @@ import { RouterProvider } from 'react-router';
 
 import { awsConfig } from './app/aws-config';
 import { router } from './app/rutas';
+
+// Las fuentes de la marca viajan en el bundle (las sirve Caddy desde /assets):
+// la CSP del Caddyfile no deja pedirlas a Google Fonts.
+import '@fontsource/lato/400.css';
+import '@fontsource/lato/400-italic.css';
+import '@fontsource/lato/700.css';
+import '@fontsource-variable/montserrat';
 import './styles.css';
 
 /**

@@ -116,7 +116,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      pantalla: /login responde un error. Por eso LoginBranding no es
 #      decoracion opcional; si se quita, hay que volver a la version 1.
 #    * Los colores de LoginBranding van en hexadecimal RGBA SIN "#":
-#      "0f6b5cff" (el ultimo par es la opacidad).
+#      "ffb800ff" (el ultimo par es la opacidad).
 #
 #  DEPENDE DE
 #    * web.yaml -> SiteUrl (callbacks y logout). Es lo unico: el sitio no
@@ -481,8 +481,11 @@ Resources:
   #    aws cognito-idp describe-managed-login-branding-by-client \
   #      --user-pool-id <id> --client-id <SpaClientId> --return-merged-resources
   #
-  #  Los colores son los de front/src/styles.css (--duoc, --fondo, --tinta,
-  #  --linea...), en RGBA sin "#". Si cambia la paleta del sitio, cambia aqui.
+  #  Los colores son los de front/src/styles.css (--amarillo, --negro,
+  #  --fondo, --linea...), en RGBA sin "#". Si cambia la paleta del sitio,
+  #  cambia aqui. Como en el sitio, el amarillo es solo la accion principal
+  #  (el boton "Iniciar sesion") y lleva el texto en negro: blanco sobre
+  #  amarillo no llega al contraste minimo.
   # ---------------------------------------------------------------------------
   LoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
@@ -515,9 +518,9 @@ Resources:
             image:
               enabled: false
             lightMode:
-              color: f7f3ecff        # --fondo
+              color: f5f5f2ff        # --fondo
           form:
-            borderRadius: 12         # --radio
+            borderRadius: 14         # --radio
             backgroundImage:
               enabled: false
             # El logo arriba y DENTRO de la tarjeta, como la cabecera del sitio.
@@ -528,56 +531,59 @@ Resources:
               formInclusion: IN
             lightMode:
               backgroundColor: ffffffff
-              borderColor: e6e1d6ff  # --linea
+              borderColor: e3e3deff  # --linea
           primaryButton:
             lightMode:
               defaults:
-                backgroundColor: 0f6b5cff   # --duoc
-                textColor: ffffffff
+                backgroundColor: ffb800ff   # --amarillo
+                textColor: 1a1a1aff         # --negro
               hover:
-                backgroundColor: 13806eff   # --duoc un 12 % mas claro, como el :hover del sitio
-                textColor: ffffffff
+                backgroundColor: e6a600ff   # --amarillo-hover, como el :hover del sitio
+                textColor: 1a1a1aff
               active:
-                backgroundColor: 0a4d42ff
-                textColor: ffffffff
+                backgroundColor: cc9300ff
+                textColor: 1a1a1aff
           secondaryButton:
             lightMode:
               defaults:
                 backgroundColor: ffffffff
-                borderColor: 0f6b5cff
-                textColor: 0f6b5cff
+                borderColor: cfcfc8ff       # --linea-2, como el boton .secundario
+                textColor: 1a1a1aff
               hover:
-                backgroundColor: e3f1eeff   # --duoc-claro
-                borderColor: 0f6b5cff
-                textColor: 0f6b5cff
+                backgroundColor: ffffffff
+                borderColor: 1a1a1aff
+                textColor: 1a1a1aff
               active:
-                backgroundColor: e3f1eeff
-                borderColor: 0a4d42ff
-                textColor: 0a4d42ff
+                backgroundColor: f5f5f2ff
+                borderColor: 1a1a1aff
+                textColor: 1a1a1aff
           pageText:
             lightMode:
-              headingColor: 22282fff        # --tinta
-              bodyColor: 22282fff
-              descriptionColor: 6b7580ff    # --tinta-suave
+              headingColor: 1a1a1aff        # --tinta
+              bodyColor: 1a1a1aff
+              descriptionColor: 5c5c5cff    # --tinta-3
         componentClasses:
           buttons:
             borderRadius: 8
           input:
-            borderRadius: 8
+            borderRadius: 10
             lightMode:
               defaults:
                 backgroundColor: ffffffff
-                borderColor: e6e1d6ff
-              placeholderColor: 6b7580ff
+                borderColor: cfcfc8ff       # --linea-2
+              placeholderColor: 6b6b6bff
+          # Los enlaces en ambar oscuro: negro se confundiria con el texto, y
+          # el amarillo de la marca sobre blanco no se lee.
           link:
             lightMode:
               defaults:
-                textColor: 0f6b5cff
+                textColor: 6b4c00ff         # --amarillo-tinta
               hover:
-                textColor: 0a4d42ff
+                textColor: 1a1a1aff
+          # El foco en amarillo, como el outline de :focus-visible del sitio.
           focusState:
             lightMode:
-              borderColor: 0f6b5cff
+              borderColor: ffb800ff
       # Las imagenes viajan en base64 dentro del recurso; los SVG de origen
       # estan en aws/marca/ y bootstrap.sh los codifica al desplegar.
       Assets:

@@ -2,6 +2,15 @@
 export const SEDES = ['SAN_JOAQUIN', 'PLAZA_OESTE', 'PUENTE_ALTO', 'VINA_DEL_MAR', 'CONCEPCION'] as const;
 export type Sede = (typeof SEDES)[number];
 
+/** Como se lee cada sede en pantalla; la API sigue recibiendo el valor del enum. */
+export const NOMBRE_SEDE: Record<Sede, string> = {
+  SAN_JOAQUIN: 'San Joaquin',
+  PLAZA_OESTE: 'Plaza Oeste',
+  PUENTE_ALTO: 'Puente Alto',
+  VINA_DEL_MAR: 'Vina del Mar',
+  CONCEPCION: 'Concepcion',
+};
+
 /** Lo que se envia en POST /api/solicitudes (NuevaSolicitud.java). */
 export interface NuevaSolicitud {
   items: { libroId: string; cantidad: number }[];
@@ -23,12 +32,25 @@ export interface LineaSolicitud {
 export const ESTADOS = ['RECIBIDA', 'APROBADA', 'RECHAZADA', 'DEVUELTA'] as const;
 export type EstadoSolicitud = (typeof ESTADOS)[number];
 
-/** La clase de la etiqueta de estado: verde si se aprobo, roja si se rechazo. */
+/** Como lo lee el estudiante: RECIBIDA es, para el, una solicitud en revision. */
+export const NOMBRE_ESTADO: Record<EstadoSolicitud, string> = {
+  RECIBIDA: 'En revision',
+  APROBADA: 'Aprobada',
+  RECHAZADA: 'Rechazada',
+  DEVUELTA: 'Devuelta',
+};
+
+/**
+ * La clase de la etiqueta de estado. Cada estado tiene un color fijo en toda
+ * la aplicacion: azul en revision, verde aprobada, rojo rechazada, gris devuelta.
+ */
 export function claseEstado(estado: EstadoSolicitud): string {
-  if (estado === 'APROBADA') {
-    return 'etiqueta si';
+  switch (estado) {
+    case 'RECIBIDA':  return 'etiqueta revision';
+    case 'APROBADA':  return 'etiqueta si';
+    case 'RECHAZADA': return 'etiqueta no';
+    default:          return 'etiqueta';
   }
-  return estado === 'RECHAZADA' ? 'etiqueta no' : 'etiqueta';
 }
 
 /** Lo que devuelve la API (Solicitud.java). */

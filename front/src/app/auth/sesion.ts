@@ -1,10 +1,4 @@
-import {
-  fetchAuthSession,
-  fetchUserAttributes,
-  getCurrentUser,
-  signInWithRedirect,
-  signOut,
-} from 'aws-amplify/auth';
+import { fetchAuthSession, signInWithRedirect, signOut } from 'aws-amplify/auth';
 
 import { crearAlmacen } from '../almacen';
 import { awsConfig } from '../aws-config';
@@ -57,6 +51,25 @@ const estado = crearAlmacen<EstadoSesion>(SIN_SESION);
 
 /** Hook con la sesion vigente. Repinta el componente cuando cambia. */
 export const useSesion = estado.usar;
+
+/**
+ * Si la pagina se abrio de vuelta de Cognito ("?code=..." en la URL).
+ *
+ * Se mira AL CARGAR EL MODULO, antes de que exista el router: la ruta "/" a la
+ * que vuelve Cognito redirige a /inicio y esa redireccion se lleva la query.
+ * Mientras Amplify canjea el code por los tokens (una peticion a /oauth2/token
+ * que tarda lo suyo), App pinta una pantalla de carga en vez de la portada
+ * sin sesion.
+ */
+const canjeando = crearAlmacen<boolean>(new URLSearchParams(window.location.search).has('code'));
+
+/** Hook: true mientras se procesa la vuelta del login. */
+export const useCanjeando = canjeando.usar;
+
+/** Lo llama App cuando ya sabe adonde ir tras el login (o que fallo). */
+export function terminarCanje(): void {
+  canjeando.fijar(false);
+}
 
 /**
  * Manda al usuario a la pantalla de login de Cognito (Managed Login).
@@ -121,11 +134,14 @@ export async function cerrarSesion(): Promise<void> {
  * lo manda de verdad es http.ts, que se lo pide a Amplify en cada peticion y
  * nunca lo lee de aqui.
  *
- * "usuario" es SIEMPRE algo legible por humanos (correo o loginId), nunca
- * el "username" que devuelve getCurrentUser(): con UsernameAttributes:
- * email en el User Pool, ese campo es el sub en formato UUID, no el correo.
- * Si no se puede resolver ninguno de los dos, queda vacio en vez de mostrar
- * el UUID.
+ * "usuario" es el correo, y sale del claim "email" del ID TOKEN. No se le
+ * pregunta a Cognito con fetchUserAttributes(): eso es la API GetUser, que
+ * exige el scope "aws.cognito.signin.user.admin" en el access token, y el
+ * SpaClient no lo pide (ni debe: abriria la puerta a que el navegador edite
+ * los atributos del usuario). Tampoco sirve signInDetails.loginId de
+ * getCurrentUser(): solo existe tras un login con usuario y contrasena en la
+ * propia aplicacion, y aqui se entra por redireccion. El id token si lo trae,
+ * porque se pide el scope "email".
  *
  * "empleado" sale del claim "cognito:groups" del MISMO access token (su
  * contenido ya decodificado; el token en si no se guarda).
@@ -139,16 +155,8 @@ export async function refrescar(): Promise<EstadoSesion> {
       estado.fijar(SIN_SESION);
       return SIN_SESION;
     }
-    const usuarioActual = await getCurrentUser();
-    let usuario = usuarioActual.signInDetails?.loginId ?? '';
-    if (!usuario) {
-      try {
-        const atributos = await fetchUserAttributes();
-        usuario = atributos.email ?? '';
-      } catch {
-        usuario = '';
-      }
-    }
+    const correo = sesion.tokens?.idToken?.payload['email'];
+    const usuario = typeof correo === 'string' ? correo : '';
     const grupos = accessToken?.payload['cognito:groups'];
     const empleado = Array.isArray(grupos) && grupos.includes(GRUPO_EMPLEADOS);
     const nuevo: EstadoSesion = { autenticado: true, usuario, empleado };
