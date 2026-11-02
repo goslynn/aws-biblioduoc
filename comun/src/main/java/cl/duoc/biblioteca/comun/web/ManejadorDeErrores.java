@@ -1,4 +1,4 @@
-package cl.duoc.biblioteca.web;
+package cl.duoc.biblioteca.comun.web;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -11,9 +11,11 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 
 /**
- * Convierte los errores del formulario en respuestas JSON utiles.
+ * Convierte los errores de validacion en respuestas JSON utiles, igual en
+ * todos los microservicios (vive en el modulo comun).
  *
  * Sin esto, un cuerpo mal formado produce un 400 vacio (o peor, un 500) y
  * quien llama no sabe que campo corregir. Con esto, el 400 dice exactamente
@@ -40,6 +42,20 @@ public class ManejadorDeErrores {
     }
 
     /**
+     * Falla una anotacion de validacion puesta directamente en un parametro
+     * del metodo (un @PathVariable o @RequestParam), no en un DTO.
+     */
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ResponseEntity<Map<String, Object>> validacionDeParametros(HandlerMethodValidationException ex) {
+        Map<String, String> parametros = new TreeMap<>();
+        ex.getParameterValidationResults().forEach(resultado -> resultado.getResolvableErrors()
+                .forEach(error -> parametros.merge(resultado.getMethodParameter().getParameterName(),
+                        error.getDefaultMessage(), (a, b) -> a + "; " + b)));
+
+        return respuesta(HttpStatus.BAD_REQUEST, "La solicitud no es valida", parametros);
+    }
+
+    /**
      * El JSON no se puede leer: sintaxis rota, o un valor que no encaja en su
      * tipo (por ejemplo una sede inexistente, o "dias": "muchos").
      */
@@ -50,7 +66,12 @@ public class ManejadorDeErrores {
                 Map.of("detalle", causaLegible(ex)));
     }
 
-    private static ResponseEntity<Map<String, Object>> respuesta(
+    /**
+     * El formato de TODOS los errores con cuerpo de los microservicios. Es
+     * publico para que los errores propios de cada servicio (por ejemplo, los
+     * 404 y 409 del administrador de RabbitMQ) salgan con la misma forma.
+     */
+    public static ResponseEntity<Map<String, Object>> respuesta(
             HttpStatus estado, String mensaje, Map<String, String> detalles) {
         Map<String, Object> cuerpo = new LinkedHashMap<>();
         cuerpo.put("instante", Instant.now().toString());

@@ -13,8 +13,10 @@ Navegador ─HTTPS─▶ Caddy (EC2, <ip>.sslip.io, Let's Encrypt)
    Amplify Auth                                         authorizer + scopes             ┌── EC2 (subred publica, SG cerrado) ──┐
    (code + PKCE)                                         + CORS + stage                 │  Spring Boot: API, 2.ª validacion    │
       │                                                  │   del JWT, RBAC, consumidores        │
-      │                                                  │      │ AMQP (red de Docker)          │
-      │                                                  │  RabbitMQ 4.1 ── SMTP 587 ──▶ correo │
+      │                                                  │      │ AMQP (red de docker compose)  │
+      │                                                  │  RabbitMQ 4.1: cluster de 2 nodos    │
+      │                                                  │      ▲          ── SMTP 587 ──▶ correo│
+      │                                                  │  admin-rabbit :8081 (solo por la VPN)│
       │                                                  └──────┼───────────────────────────────┘
       │                                                         │ TLS verify-full, 5432
       │                                                  RDS PostgreSQL 16 (subred privada, sin IP publica)
@@ -30,10 +32,14 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 
 | Directorio | Que contiene |
 |---|---|
-| `back/` | Backend Spring Boot 4.1 (Java 21): API REST, RBAC, productores y consumidores de RabbitMQ, envio de correo. Tiene su propio [README](back/README.md) |
+| `pom.xml`, `mvnw` | Build Maven **multi-modulo** de los microservicios (`./mvnw package` en la raiz compila y prueba los tres modulos) |
+| `back/` | Microservicio 1, la API (Spring Boot 4.1, Java 21): REST, RBAC, productores y consumidores de RabbitMQ, envio de correo. Tiene su propio [README](back/README.md) |
+| `admin-rabbit/` | Microservicio 2, el **administrador de RabbitMQ**: crea y elimina colas, exchanges y bindings por REST (`RabbitAdminService`, DTO validados). Solo interno, por la VPN. Tiene su propio [README](admin-rabbit/README.md) |
+| `comun/` | Libreria compartida por los dos: validacion del JWT de Cognito, rol EMPLEADO y formato de errores |
 | `front/` | Frontend React 19 (Vite) con AWS Amplify, servido por Caddy en una EC2 con HTTPS (`front/Caddyfile`). Tiene su propio [README](front/README.md) |
-| `aws/` | Las siete plantillas de CloudFormation, los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
-| `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa. Tiene su propio [README](bruno/README.md) |
+| `aws/` | Las siete plantillas de CloudFormation, el `docker-compose` de la EC2 de la app (`aws/backend/`), los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
+| `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa y la carpeta del administrador. Tiene su propio [README](bruno/README.md) |
+| `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3 y EP4): que esta hecho y que falta |
 
 ---
 
@@ -117,14 +123,31 @@ direct correo ── transaccional ──▶ correo.transaccional ─┐
 | **direct** | `correo` | dos carriles: 200 avisos de un libro repuesto no retrasan el comprobante de nadie |
 | **fanout** | `correo.reintento` | lleva a la espera lo rechazado, sea cual sea su carril, conservando su routing key |
 | **ACK manual** | todos los consumidores | el mensaje no se da por procesado hasta que el codigo lo dice |
-| **NACK con requeue** | consumidores de eventos | fallo breve (base reiniciando): reintento inmediato; la cola **quorum** cuenta entregas y a la 5.ª lo aparta sola (`x-delivery-limit`) |
+| **NACK con requeue** | consumidores de eventos | fallo breve (base reiniciando): reintento inmediato; la cola **quorum** cuenta entregas y, agotado `x-delivery-limit`, la aparta sola en su DLQ. El consumidor reconoce el ultimo intento (`x-delivery-count`) y lo deja en el log |
 | **NACK sin requeue + DLX** | eventos invalidos; SMTP caido | mensaje imposible directo a la DLQ; correo a la espera con **TTL** |
-| **DLQ** | `eventos.fallidos`, `correo.fallidos` | lo que no se pudo procesar queda a la vista en el panel, con su motivo |
+| **DLQ, una por cola** | `notif.prestamos.dlq`, `notif.disponibilidad.dlq`, `bitacora.dlq` (direct `eventos.dlx`) y `correo.fallidos` | lo que no se pudo procesar queda a la vista en el panel, con su motivo, y en el log |
+| **cluster de 2 nodos** | `rabbitmq-1`, `rabbitmq-2` (docker compose) | las tres colas de eventos son **quorum**: replicadas en los dos nodos |
 | **publisher confirms** | relay y publicador de correo | nada se da por publicado hasta que el broker lo confirma |
 | **prefetch distinto** | 5 transaccional, 1 masivo | el masivo no acapara el SMTP |
 
 Detalles, decisiones (por que el recordatorio es un `@Scheduled` y no un TTL
 por mensaje) y casos de fallo: [`back/README.md`](back/README.md).
+
+### El broker: cluster de dos nodos, administrado por su propio microservicio
+
+En la EC2 de la aplicacion, un **docker compose** (`aws/backend/compose.yaml`)
+levanta cuatro contenedores: los dos nodos de RabbitMQ (`rabbitmq-1`,
+`rabbitmq-2`, unidos en cluster por `classic_config` y una Erlang cookie
+generada en Secrets Manager), la API y el **administrador de RabbitMQ**.
+
+El administrador (`admin-rabbit/`) es el segundo microservicio: una API REST
+para crear y eliminar colas, exchanges y bindings (`POST /api/admin/colas`,
+`DELETE /api/admin/colas/{nombre}`, ...). Toda la logica esta en
+`RabbitAdminService`; los DTO se validan (nombres vacios, `amq.*`, TTL
+negativos, reglas cruzadas: 400 con el campo que fallo), y la topologia de la
+biblioteca esta **protegida** (409). Exige un JWT de empleado y no esta
+detras de API Gateway: se usa por la VPN. Detalle en
+[`admin-rabbit/README.md`](admin-rabbit/README.md).
 
 ### Lo que el cliente no decide
 
@@ -208,7 +231,7 @@ Las `SMTP_*` (el proveedor de correo; el lab bloquea SES) solo hacen falta la
 primera vez, y pueden ir en `aws/.env` en vez de la terminal
 (`cp aws/.env.example aws/.env`; esta en `.gitignore`). Al terminar imprime la URL del sitio, la de la API, las cuentas de
 demostracion y los comandos para probar. La primera vez tarda unos 20 minutos
-(RDS, la EC2 instalando Docker y el VPC Link). Requisitos locales: `aws`, `jq`,
+(RDS, la EC2 instalando Docker y formando el cluster, y el VPC Link). Requisitos locales: `aws`, `jq`,
 `curl`, `python3`, `npm` y **Docker** (los tests del backend levantan
 PostgreSQL y RabbitMQ con Testcontainers; `SKIP_TESTS=true` los salta). Para
 desmontarlo:
@@ -223,9 +246,10 @@ El detalle de cada stack, cada script y cada parametro esta en
 ### Como se prueba
 
 * **La API**, con Bruno: `cd bruno && bru run --env aws` (y `--env aws-backoffice` para la gestion)
+* **El administrador de RabbitMQ**, con Bruno por la VPN: `bru run admin --env aws-admin-vpn`
 * **La aplicacion**, en el navegador, abriendo la URL del sitio con DevTools en
   la pestana Network. El recorrido completo esta en `front/README.md` §4.
-* **Las colas**, en el panel de RabbitMQ por la VPN (`vpn-up.sh` imprime la URL y las credenciales).
+* **El cluster y las colas**, en el panel de RabbitMQ por la VPN (`vpn-up.sh` imprime las URL de los dos nodos y las credenciales).
 
 Ningun script prueba la API por su cuenta: los scripts construyen, y la
 verificacion se hace con Bruno y con el navegador.
@@ -435,6 +459,9 @@ Se declaran aqui en lugar de esconderlas.
 | — | **Correo por un proveedor SMTP externo** (Gmail, Brevo...) | SES tiene *explicitDeny* en el lab. El proveedor se elige al desplegar; su contrasena va a Secrets Manager (parametro `NoEcho`) |
 | Un empleado real en las pruebas automaticas | **El cliente M2M `backoffice` hace de empleado en Bruno** | Un token de PERSONA con custom scope solo sale del flujo del navegador (`admin-initiate-auth` no emite custom scopes). El empleado humano (grupo `empleados`) se prueba en el navegador |
 | Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql y ver el panel de RabbitMQ. Usa la subred publica del proyecto; las subredes de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
+| RabbitMQ en un cluster de nodos en **maquinas distintas** | **Dos nodos en la MISMA EC2**, como contenedores del mismo `docker compose` | Cumple "dos nodos en cluster" y replica las colas quorum en ambos, sin otra EC2 que se cobra por hora. No da tolerancia a fallos real: si cae la maquina caen los dos, y con 2 nodos una quorum necesita a ambos para tener mayoria (eso empieza en 3) |
+| Administrador de RabbitMQ publicado como el resto de la API | **`admin-rabbit` solo interno**, por la VPN (puerto 8081), sin pasar por API Gateway | Administrar el broker no debe existir en Internet. Igual exige un JWT de empleado (la misma validacion que la API, modulo `comun`) |
+| La Erlang cookie como archivo `.erlang.cookie` | **`-setcookie` por variable de entorno** de cada nodo (`RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS`, `RABBITMQ_CTL_ERL_ARGS`) | Evita depender del uid del usuario `rabbitmq` de la imagen para los permisos del archivo. La cookie sale de Secrets Manager (`ErlangCookieSecret`) en cada arranque; como las contrasenas, la ve quien tenga root o `docker inspect` |
 | Frontend en **Angular** | **React 19 + Vite** | Decision del usuario. Mismas vistas, misma integracion con Cognito (Amplify, code + PKCE) y mismo contrato con la API; el interceptor de `HttpClient` pasa a ser un cliente HTTP propio (`auth/http.ts`) y los Guards, `loader` de React Router |
 | **Hosted UI** clasica de Cognito | **Managed Login** con marca propia y en castellano | La clasica solo existe en ingles y su logo no se puede poner desde CloudFormation. Exige el plan **Essentials** del User Pool, que ya era el de por defecto (medido) |
 | `ng serve` en `localhost:4200` | **Sitio publicado** (hoy en Caddy, ver la fila siguiente) | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |

@@ -1,0 +1,80 @@
+info:
+  name: admin
+  type: folder
+  seq: 5
+  description: Microservicio administrador de RabbitMQ - colas, exchanges y bindings (solo por la VPN)
+
+request:
+  auth: inherit
+  scripts:
+    - type: before-request
+      code: |-
+        // Esta carpeta habla con OTRO servicio (admin-rabbit, :8081), que no
+        // esta detras de API Gateway: solo se llega por la VPN. En los
+        // entornos de la API no hay ADMIN_URL, y estas peticiones se saltan
+        // en vez de fallar. Asi "bru run --env aws" sigue en verde.
+        if (!bru.getEnvVar("ADMIN_URL")) {
+          bru.runner.skipRequest();
+        }
+
+docs: |
+  # admin (administrador de RabbitMQ)
+
+  Un **segundo microservicio** Spring Boot (`admin-rabbit/`), distinto de la
+  API: crea y elimina **colas, exchanges y bindings** en el cluster RabbitMQ.
+  Toda la logica vive en `RabbitAdminService`; los controladores solo reciben
+  DTO validados y llaman a sus metodos.
+
+  ## Donde esta, y por que no pasa por API Gateway
+
+  Corre en la misma EC2 que la API, en el puerto **8081**, y **no esta
+  publicado en API Gateway**: administrar el broker no es algo que deba
+  existir en Internet. Se llega por la **VPN** (`./aws/scripts/vpn-up.sh`) a
+  `http://<IP privada de la EC2>:8081`. Aun asi exige un **JWT de empleado**:
+  la VPN da el camino, no el permiso. La validacion es la misma que la de la
+  API (modulo `comun`).
+
+  ## Entornos
+
+  | Entorno | Credencial | Resultado |
+  |---|---|---|
+  | `aws-admin-vpn` | cliente M2M backoffice (scope `gestion`) | 201 / 200 / 204: el ciclo completo |
+  | `aws-admin-vpn-estudiante` | cliente M2M, scope `acceso` | **403** en todo: token valido, no es empleado |
+
+  Los genera `./aws/pipeline/bruno-env.sh`. Se corre SOLO esta carpeta, con la
+  VPN levantada:
+
+  ```sh
+  cd bruno
+  bru run admin --env aws-admin-vpn
+  bru run admin --env aws-admin-vpn-estudiante
+  ```
+
+  En los demas entornos (los de la API) estas peticiones **se saltan**: no
+  tienen `ADMIN_URL`.
+
+  ## Orden en `bru run`
+
+  Un ciclo que deja el broker como estaba: crea el exchange `demo.topic` y la
+  cola `demo.cola`, los enlaza con `libro.*`, consulta la cola, y luego
+  desenlaza y borra las dos. Si una ejecucion se corta a medias, la siguiente
+  recibe **409** al crear: borra `demo.cola` y `demo.topic` con sus
+  peticiones `delete-*` (o desde el panel) y vuelve a correrla.
+
+  ## Reglas que aplica el servicio
+
+  * **Nombres**: minusculas, digitos, `.`, `-` y `_`; sin el prefijo `amq.`
+    (reservado de RabbitMQ). Si no, **400** con el campo que fallo.
+  * **Topologia protegida**: las colas y exchanges de la biblioteca
+    (`biblioteca.eventos`, `notif.prestamos`, `correo`...) no se borran ni se
+    les cambian bindings: **409**. La lista esta en
+    `admin-rabbit/src/main/resources/application.properties`.
+  * **Crear algo que ya existe**: **409**, no una redeclaracion silenciosa.
+  * **Referencias**: un DLX, o el exchange o la cola de un binding, tienen
+    que existir: **404**.
+  * **Broker caido**: **503**.
+
+  | Codigo | Significado en esta carpeta |
+  |---|---|
+  | 401 | sin token, o token invalido |
+  | 403 | token valido de alguien que no es empleado |

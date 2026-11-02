@@ -1,18 +1,21 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 # ==============================================================================
-#  biblioteca / backend.yaml   --   Spring Boot + RabbitMQ en una EC2, tras un NLB
+#  biblioteca / backend.yaml   --   API, administrador y cluster RabbitMQ en una EC2, tras un NLB
 # ==============================================================================
 #
 #  QUE HACE
 #    * RabbitSecret     -> usuario y contrasena del broker, generados.
+#    * ErlangCookieSecret -> el secreto con que los dos nodos forman el cluster.
 #    * SmtpSecret       -> la contrasena del proveedor SMTP (parametro NoEcho).
 #    * AppConfig        -> parametro de SSM con la configuracion NO secreta de
 #                          la aplicacion, en formato "VARIABLE=valor".
-#    * AppLogGroup      -> los logs de los dos contenedores, con caducidad.
-#    * AppInstance      -> Amazon Linux 2023 con Docker y DOS contenedores:
-#                            rabbitmq  (rabbitmq:4.1-management-alpine)
-#                            app       (el fat jar de Spring Boot, en Corretto 21)
+#    * AppLogGroup      -> los logs de los cuatro contenedores, con caducidad.
+#    * AppServer        -> Amazon Linux 2023 con Docker y docker compose, que
+#                          levanta CUATRO contenedores (aws/backend/compose.yaml):
+#                            rabbitmq-1, rabbitmq-2  cluster RabbitMQ 4.1 de dos nodos
+#                            app           la API (back/), en Corretto 21
+#                            admin-rabbit  el administrador de RabbitMQ (admin-rabbit/)
 #    * Nlb + TargetGroup + Listener -> un Network Load Balancer INTERNO en las
 #                          subredes privadas: es el destino del VPC Link de
 #                          api.yaml. API Gateway no puede hablar con una IP de
@@ -27,14 +30,16 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    asi que va en EC2; y para no partir el backend en dos, la API va con el.
 #
 #  >>> COMO ARRANCA, Y POR QUE CADA ARRANQUE LEE TODO DE NUEVO <<<
-#    El UserData (solo en el PRIMER arranque) instala Docker y deja dos
-#    servicios de systemd: biblioteca-rabbitmq y biblioteca-app. Cada vez que
-#    un servicio arranca —primer boot, reinicio, la sesion del lab que vuelve,
-#    o un despliegue de build-backend.sh— su script:
-#      1. lee la configuracion de AppConfig (SSM),
-#      2. lee las contrasenas de Secrets Manager (BD, RabbitMQ, SMTP),
-#      3. las escribe en un archivo de entorno en /run (tmpfs, permisos 600),
-#      4. y lanza el contenedor con ese archivo.
+#    El UserData (solo en el PRIMER arranque) instala Docker y el plugin de
+#    compose, y deja UN servicio de systemd: biblioteca. Cada vez que arranca
+#    —primer boot, reinicio, la sesion del lab que vuelve, o un despliegue de
+#    build-backend.sh— su script (/opt/biblioteca/arrancar.sh):
+#      1. baja el paquete del backend de S3 (jars + compose.yaml + rabbitmq.conf),
+#      2. lee la configuracion de AppConfig (SSM),
+#      3. lee los secretos de Secrets Manager (BD, RabbitMQ, cookie, SMTP),
+#      4. los escribe en archivos de entorno en /run (tmpfs, permisos 600),
+#         uno por tipo de contenedor (el administrador no ve la BD ni el SMTP),
+#      5. y corre "docker compose up -d --wait".
 #    Asi, cambiar un parametro de este stack y reiniciar el servicio basta:
 #    no hace falta recrear la instancia. Y ninguna contrasena queda escrita en
 #    el UserData, ni en la plantilla, ni en el disco.
@@ -64,16 +69,24 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      fallarian.
 #    * Cambiar el UserData DETIENE y vuelve a arrancar la instancia, pero no
 #      lo vuelve a ejecutar (cloud-init lo corre una vez). Por eso aqui solo
-#      hay lo que no cambia; la configuracion vive en AppConfig.
+#      hay lo que no cambia; la configuracion vive en AppConfig y lo que
+#      corre, en el paquete. Cuando el UserData SI tiene que cambiar (paso de
+#      "docker run" a compose), se cambia el id logico de la instancia
+#      (AppInstance -> AppServer): CloudFormation crea otra y borra la vieja.
 #    * La IP publica cambia cada vez que el lab detiene la instancia. No
 #      importa: nada entra por ella, y el NLB apunta al id de la instancia.
-#    * El volumen rabbitmq-datos guarda el estado del broker (colas,
-#      mensajes, usuario). RABBITMQ_DEFAULT_PASS solo se aplica al CREAR ese
-#      volumen: si rotas RabbitSecret, borra el volumen o cambia la contrasena
-#      desde el panel.
+#    * Los volumenes rabbitmq-1-datos y rabbitmq-2-datos guardan el estado de
+#      cada nodo (colas, mensajes, usuario, pertenencia al cluster).
+#      RABBITMQ_DEFAULT_PASS solo se aplica al CREAR el cluster: si rotas
+#      RabbitSecret, cambia la contrasena desde el panel o borra los volumenes.
+#    * Con DOS nodos, una cola quorum necesita a los dos (mayoria de 2): si
+#      cae uno, deja de aceptar mensajes hasta que vuelva. Es un cluster para
+#      demostrar replicacion, no tolerancia a fallos (que pide tres).
+#    * Docker compose se descarga de GitHub con version fija: la instancia
+#      necesita salida 443 (la tiene, para S3, Secrets Manager y las imagenes).
 #
 #  DEPENDE DE
-#    * artifacts.yaml -> ArtifactsBucketName, y el jar ya SUBIDO
+#    * artifacts.yaml -> ArtifactsBucketName, y el paquete ya SUBIDO
 #    * cognito.yaml   -> IssuerUrl, ScopeCompleto, ScopeGestion, UserPoolId (+ JWKS)
 #    * web.yaml       -> SiteOrigin (cabecera CORS de las respuestas reales)
 #    * network.yaml   -> PublicSubnetId, AppSecurityGroupId, PrivateSubnetIds
@@ -83,17 +96,18 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    NlbArn, NlbDnsName  -> api.yaml (VPC Link e integraciones)
 #    InstanceId          -> build-backend.sh (reinicio por SSM tras desplegar)
 #    TargetGroupArn      -> build-backend.sh (espera a que el NLB lo de por sano)
-#    AppPrivateIp        -> vpn-up.sh (panel de RabbitMQ por el tunel)
+#    AppPrivateIp        -> vpn-up.sh y bruno-env.sh (paneles y administrador por el tunel)
 #    RabbitSecretArn     -> vpn-up.sh (credenciales del panel)
 #    LogGroupName        -> aws logs tail
 #
 #  DESPLIEGUE
-#    ./aws/pipeline/build-backend.sh     (compila, sube el jar y despliega)
+#    ./aws/pipeline/build-backend.sh     (compila, sube el paquete y despliega)
 # ==============================================================================
 
 Description: >-
-  biblioteca - EC2 con Spring Boot y RabbitMQ en Docker, detras de un NLB
-  interno para el VPC Link de API Gateway. Depende de artifacts, cognito, web,
+  biblioteca - EC2 con docker compose (cluster RabbitMQ de dos nodos, API y
+  administrador de RabbitMQ), detras de un NLB interno para el VPC Link de
+  API Gateway. Depende de artifacts, cognito, web,
   network y database.
 
 Parameters:
@@ -116,10 +130,11 @@ Parameters:
   InstanceType:
     Type: String
     Default: t3.medium
-    AllowedValues: [t3.small, t3.medium, t3.large]
+    AllowedValues: [t3.medium, t3.large]
     Description: >-
-      Dos JVM-equivalentes en una maquina (Spring Boot y RabbitMQ sobre Erlang).
-      t3.small (2 GiB) arranca justo; t3.medium (4 GiB) deja holgura.
+      Cuatro contenedores en una maquina: dos nodos RabbitMQ (Erlang) y dos
+      JVM (API y administrador), ~3 GiB con los limites de compose.yaml.
+      t3.medium (4 GiB) es el minimo; t3.small ya no alcanza.
 
   ImageId:
     # Se resuelve al desplegar desde el parametro publico que mantiene AWS:
@@ -139,8 +154,11 @@ Parameters:
 
   ArtifactsObjectKey:
     Type: String
-    Default: backend/biblioteca-backend.jar
-    Description: Ruta del fat jar dentro del bucket de artefactos.
+    Default: backend/biblioteca-backend.tar.gz
+    Description: >-
+      Ruta del paquete del backend dentro del bucket de artefactos: los dos
+      fat jars (API y administrador), compose.yaml y la configuracion de
+      RabbitMQ. Lo arma build-backend.sh.
 
   IssuerUrl:
     Type: String
@@ -264,8 +282,8 @@ Resources:
   #  SECRETOS Y CONFIGURACION
   # ===========================================================================
 
-  # Credenciales del broker. Solo las conocen los dos contenedores (y quien
-  # abra el panel por la VPN, leyendolas de aqui).
+  # Credenciales del broker. Las conocen los nodos, la API y el administrador
+  # (y quien abra el panel por la VPN, leyendolas de aqui).
   RabbitSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -274,6 +292,20 @@ Resources:
         SecretStringTemplate: '{"username": "biblioteca"}'
         GenerateStringKey: password
         PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # La Erlang cookie: el secreto compartido con que los DOS nodos de RabbitMQ
+  # se reconocen como del mismo cluster (y con el que entra rabbitmqctl).
+  # Texto plano, sin JSON. Nunca sale de la EC2 de la aplicacion.
+  ErlangCookieSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Erlang cookie del cluster RabbitMQ (dos nodos en la EC2 de la aplicacion).
+      GenerateSecretString:
+        PasswordLength: 48
         ExcludePunctuation: true
       Tags:
         - Key: Project
@@ -314,7 +346,7 @@ Resources:
         BIBLIOTECA_ORIGEN=${WebOrigin}
         BIBLIOTECA_RECORDATORIO_ANTELACION=${ReminderLead}
         SPRING_DATASOURCE_URL=jdbc:postgresql://${DbEndpoint}:${DbPort}/${DbName}?sslmode=verify-full&sslrootcert=/opt/biblioteca/rds-ca.pem
-        RABBITMQ_HOST=rabbitmq
+        RABBITMQ_ADDRESSES=rabbitmq-1:5672,rabbitmq-2:5672
         SMTP_HOST=${SmtpHost}
         SMTP_PORT=587
         SMTP_USER=${SmtpUser}
@@ -323,12 +355,13 @@ Resources:
         SECRETO_MASTER=${MasterSecretArn}
         SECRETO_RABBIT=${RabbitSecret}
         SECRETO_SMTP=${SmtpSecret}
+        SECRETO_COOKIE=${ErlangCookieSecret}
         ARTEFACTO_BUCKET=${ArtifactsBucketName}
         ARTEFACTO_KEY=${ArtifactsObjectKey}
       Tags:
         Project: !Ref ProjectName
 
-  # Los logs de los dos contenedores (driver awslogs de Docker), con caducidad.
+  # Los logs de los cuatro contenedores (driver awslogs de Docker), con caducidad.
   AppLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -339,14 +372,20 @@ Resources:
   #  LA INSTANCIA
   # ===========================================================================
 
-  AppInstance:
+  # Antes se llamaba AppInstance (dos "docker run" con systemd). El id logico
+  # se cambio A PROPOSITO al pasar a docker compose: el UserData nuevo solo
+  # corre en una instancia NUEVA, y un id nuevo es lo que hace que
+  # CloudFormation la cree, mueva el target group a ella y borre la vieja, sin
+  # tocar el NLB ni el VPC Link de api.yaml. Ver TRAMPAS en la cabecera.
+  AppServer:
     Type: AWS::EC2::Instance
     # Sin DependsOn: el UserData referencia AppConfig y AppLogGroup, y eso ya
     # obliga a crearlos antes del primer arranque.
     CreationPolicy:
       ResourceSignal:
         Count: 1
-        Timeout: PT15M
+        # Instalar Docker y compose, bajar tres imagenes y formar el cluster.
+        Timeout: PT20M
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
@@ -390,11 +429,16 @@ Resources:
 
           dnf install -y -q docker jq aws-cfn-bootstrap
           systemctl enable --now docker
-          docker network inspect biblioteca >/dev/null 2>&1 || docker network create biblioteca
+          # docker compose (plugin v2): Amazon Linux 2023 no lo trae en dnf.
+          # Version FIJA, del release oficial de Docker.
+          install -d -m 755 /usr/local/lib/docker/cli-plugins
+          curl -fsSL -o /usr/local/lib/docker/cli-plugins/docker-compose \
+            https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64
+          chmod 755 /usr/local/lib/docker/cli-plugins/docker-compose
           install -d -m 755 /opt/biblioteca /etc/biblioteca
           install -d -m 700 /run/biblioteca
 
-          # --- funciones comunes de los dos scripts de arranque ---------------
+          # --- funciones comunes ------------------------------------------------
           cat > /opt/biblioteca/comun.sh <<'EOF'
           REGION=${AWS::Region}
           GRUPO_LOGS=${AppLogGroup}
@@ -403,58 +447,52 @@ Resources:
           CONFIG="$(aws ssm get-parameter --name "$PARAMETRO" --region "$REGION" --query Parameter.Value --output text)"
           valor() { grep "^$1=" <<<"$CONFIG" | cut -d= -f2-; }
           secreto() { aws secretsmanager get-secret-value --secret-id "$1" --region "$REGION" --query SecretString --output text; }
-          logs() { echo --log-driver awslogs --log-opt awslogs-region=$REGION --log-opt awslogs-group=$GRUPO_LOGS --log-opt awslogs-stream=$1; }
           install -d -m 700 /run/biblioteca
           umask 077
           EOF
 
-          # --- RabbitMQ ---------------------------------------------------------
-          #  5672 (AMQP) NO se publica en la maquina: la app llega por la red
-          #  de Docker. 15672 (panel) si, pero el security group solo lo abre
-          #  a la VPN. --hostname fijo: RabbitMQ guarda sus datos bajo el
-          #  nombre del nodo, y con uno aleatorio los perderia al reiniciar.
-          # Plugins: el panel, y shovel para poder MOVER mensajes de una DLQ de
-          # vuelta a su cola desde el panel ("Move messages") tras arreglar la
-          # causa.
-          echo '[rabbitmq_management,rabbitmq_shovel,rabbitmq_shovel_management].' > /opt/biblioteca/enabled_plugins
-          chmod 644 /opt/biblioteca/enabled_plugins
-
-          cat > /opt/biblioteca/arrancar-rabbitmq.sh <<'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          source /opt/biblioteca/comun.sh
-          R="$(secreto "$(valor SECRETO_RABBIT)")"
-          printf 'RABBITMQ_DEFAULT_USER=%s\nRABBITMQ_DEFAULT_PASS=%s\n' \
-            "$(jq -r .username <<<"$R")" "$(jq -r .password <<<"$R")" > /run/biblioteca/rabbitmq.env
-          exec docker run --rm --name rabbitmq --hostname rabbitmq --network biblioteca \
-            --env-file /run/biblioteca/rabbitmq.env \
-            -v rabbitmq-datos:/var/lib/rabbitmq -p 15672:15672 $(logs rabbitmq) \
-            -v /opt/biblioteca/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro \
-            public.ecr.aws/docker/library/rabbitmq:4.1-management-alpine
-          EOF
-
-          # --- La aplicacion -----------------------------------------------------
-          #  Baja el jar (la version que deje build-backend.sh en
-          #  /etc/biblioteca/version, o la vigente) y la CA de RDS, arma el
-          #  archivo de entorno con la configuracion y los secretos, y arranca.
-          cat > /opt/biblioteca/arrancar-app.sh <<'EOF'
+          # --- El arranque: paquete + entorno + docker compose ------------------
+          #  Baja el paquete del pipeline (la version que dejo build-backend.sh
+          #  en /etc/biblioteca/version, o la vigente): los dos jars,
+          #  compose.yaml, rabbitmq.conf y enabled_plugins. Baja la CA de RDS,
+          #  arma los archivos de entorno con la configuracion y los secretos,
+          #  y levanta los cuatro contenedores (ver aws/backend/compose.yaml).
+          cat > /opt/biblioteca/arrancar.sh <<'EOF'
           #!/bin/bash
           set -euo pipefail
           source /opt/biblioteca/comun.sh
           VERSION="$(cat /etc/biblioteca/version 2>/dev/null || true)"
           if [ -n "$VERSION" ]; then
             aws s3api get-object --bucket "$(valor ARTEFACTO_BUCKET)" --key "$(valor ARTEFACTO_KEY)" \
-              --version-id "$VERSION" --region "$REGION" /opt/biblioteca/app.jar >/dev/null
+              --version-id "$VERSION" --region "$REGION" /opt/biblioteca/paquete.tar.gz >/dev/null
           else
-            aws s3 cp "s3://$(valor ARTEFACTO_BUCKET)/$(valor ARTEFACTO_KEY)" /opt/biblioteca/app.jar --region "$REGION" --only-show-errors
+            aws s3 cp "s3://$(valor ARTEFACTO_BUCKET)/$(valor ARTEFACTO_KEY)" /opt/biblioteca/paquete.tar.gz --region "$REGION" --only-show-errors
           fi
+          rm -rf /opt/biblioteca/paquete
+          install -d -m 755 /opt/biblioteca/paquete
+          tar -xzf /opt/biblioteca/paquete.tar.gz -C /opt/biblioteca/paquete
           curl -fsS -o /opt/biblioteca/rds-ca.pem "https://truststore.pki.rds.amazonaws.com/$REGION/$REGION-bundle.pem"
-          chmod 644 /opt/biblioteca/app.jar /opt/biblioteca/rds-ca.pem
+          chmod -R a+rX /opt/biblioteca/paquete
+          chmod 644 /opt/biblioteca/rds-ca.pem
 
           APP="$(secreto "$(valor SECRETO_APP)")"
           MAESTRO="$(secreto "$(valor SECRETO_MASTER)")"
           RABBIT="$(secreto "$(valor SECRETO_RABBIT)")"
           SMTP="$(secreto "$(valor SECRETO_SMTP)")"
+          COOKIE="$(secreto "$(valor SECRETO_COOKIE)")"
+          RABBIT_USER="$(jq -r .username <<<"$RABBIT")"
+          RABBIT_PASS="$(jq -r .password <<<"$RABBIT")"
+
+          # Los dos nodos: el usuario inicial y la Erlang cookie con la que se
+          # reconocen entre si (y con la que entra rabbitmqctl).
+          {
+            echo "RABBITMQ_DEFAULT_USER=$RABBIT_USER"
+            echo "RABBITMQ_DEFAULT_PASS=$RABBIT_PASS"
+            echo "RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-setcookie $COOKIE"
+            echo "RABBITMQ_CTL_ERL_ARGS=-setcookie $COOKIE"
+          } > /run/biblioteca/rabbitmq.env
+
+          # La API: todo.
           {
             grep -v -e '^SECRETO_' -e '^ARTEFACTO_' <<<"$CONFIG"
             echo "SPRING_DATASOURCE_USERNAME=$(jq -r .username <<<"$APP")"
@@ -462,53 +500,51 @@ Resources:
             echo "BIBLIOTECA_APP_PASSWORD=$(jq -r .password <<<"$APP")"
             echo "SPRING_FLYWAY_USER=$(jq -r .username <<<"$MAESTRO")"
             echo "SPRING_FLYWAY_PASSWORD=$(jq -r .password <<<"$MAESTRO")"
-            echo "RABBITMQ_USER=$(jq -r .username <<<"$RABBIT")"
-            echo "RABBITMQ_PASSWORD=$(jq -r .password <<<"$RABBIT")"
+            echo "RABBITMQ_USER=$RABBIT_USER"
+            echo "RABBITMQ_PASSWORD=$RABBIT_PASS"
             echo "SMTP_PASSWORD=$SMTP"
           } > /run/biblioteca/app.env
 
-          exec docker run --rm --name app --network biblioteca \
-            --env-file /run/biblioteca/app.env -p ${AppPort}:8080 \
-            -v /opt/biblioteca:/opt/biblioteca:ro $(logs app) \
-            public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless \
-            java -XX:MaxRAMPercentage=50 -jar /opt/biblioteca/app.jar
+          # El administrador: solo Cognito (validar el JWT) y RabbitMQ.
+          {
+            grep -e '^AWS_REGION=' -e '^BIBLIOTECA_ISSUER=' -e '^BIBLIOTECA_JWKS=' \
+                 -e '^BIBLIOTECA_SCOPE=' -e '^BIBLIOTECA_SCOPE_GESTION=' -e '^RABBITMQ_ADDRESSES=' <<<"$CONFIG"
+            echo "RABBITMQ_USER=$RABBIT_USER"
+            echo "RABBITMQ_PASSWORD=$RABBIT_PASS"
+          } > /run/biblioteca/admin-rabbit.env
+
+          export AWS_REGION="$REGION" GRUPO_LOGS APP_PUERTO=${AppPort}
+          exec docker compose -p biblioteca -f /opt/biblioteca/paquete/compose.yaml \
+            up -d --remove-orphans --wait --wait-timeout 600
           EOF
           chmod 755 /opt/biblioteca/*.sh
 
-          # --- Servicios: arrancan solos en cada boot y se reinician si caen ---
-          cat > /etc/systemd/system/biblioteca-rabbitmq.service <<'EOF'
+          # --- Un servicio: arranca en cada boot y relee todo ------------------
+          #  oneshot: arrancar.sh termina cuando compose deja todo en marcha.
+          #  Los reinicios de un contenedor caido los hace Docker
+          #  (restart: unless-stopped); este servicio rehace el entorno y el
+          #  paquete en cada arranque y en cada "systemctl restart biblioteca"
+          #  que manda build-backend.sh por SSM.
+          cat > /etc/systemd/system/biblioteca.service <<'EOF'
           [Unit]
-          Description=RabbitMQ de la biblioteca
+          Description=Biblioteca: cluster RabbitMQ, API y administrador (docker compose)
           After=docker.service network-online.target
+          Wants=network-online.target
           Requires=docker.service
           [Service]
-          ExecStartPre=-/usr/bin/docker rm -f rabbitmq
-          ExecStart=/opt/biblioteca/arrancar-rabbitmq.sh
-          ExecStop=/usr/bin/docker stop rabbitmq
-          Restart=always
-          RestartSec=10
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-
-          cat > /etc/systemd/system/biblioteca-app.service <<'EOF'
-          [Unit]
-          Description=Backend Spring Boot de la biblioteca
-          After=docker.service network-online.target biblioteca-rabbitmq.service
-          Requires=docker.service
-          Wants=biblioteca-rabbitmq.service
-          [Service]
-          ExecStartPre=-/usr/bin/docker rm -f app
-          ExecStart=/opt/biblioteca/arrancar-app.sh
-          ExecStop=/usr/bin/docker stop app
-          Restart=always
-          RestartSec=10
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/opt/biblioteca/arrancar.sh
+          ExecStop=/usr/bin/docker compose -p biblioteca -f /opt/biblioteca/paquete/compose.yaml down
+          TimeoutStartSec=900
+          Restart=on-failure
+          RestartSec=20
           [Install]
           WantedBy=multi-user.target
           EOF
 
           systemctl daemon-reload
-          systemctl enable --now biblioteca-rabbitmq biblioteca-app
+          systemctl enable --now biblioteca
 
           # --- Senal para CloudFormation: lista cuando /health responde --------
           OK=1
@@ -516,7 +552,7 @@ Resources:
             if curl -fs http://127.0.0.1:${AppPort}/health >/dev/null; then OK=0; break; fi
             sleep 10
           done
-          /opt/aws/bin/cfn-signal -e $OK --stack ${AWS::StackName} --resource AppInstance --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $OK --stack ${AWS::StackName} --resource AppServer --region ${AWS::Region}
 
   # ===========================================================================
   #  EL BALANCEADOR: lo que permite a API Gateway llegar a la EC2
@@ -544,12 +580,12 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub "${ProjectName}-app"
-      VpcId: !GetAtt AppInstance.VpcId
+      VpcId: !GetAtt AppServer.VpcId
       Protocol: TCP
       Port: !Ref AppPort
       TargetType: instance
       Targets:
-        - Id: !Ref AppInstance
+        - Id: !Ref AppServer
           Port: !Ref AppPort
       HealthCheckProtocol: HTTP
       HealthCheckPath: /health
@@ -586,16 +622,18 @@ Outputs:
     Value: !GetAtt Nlb.DNSName
 
   InstanceId:
-    Description: La EC2. build-backend.sh la reinicia por SSM tras subir un jar nuevo.
-    Value: !Ref AppInstance
+    Description: La EC2. build-backend.sh reinicia su servicio por SSM tras subir un paquete nuevo.
+    Value: !Ref AppServer
 
   TargetGroupArn:
     Description: Target group del NLB. build-backend.sh espera a que la instancia este sana.
     Value: !Ref TargetGroup
 
   AppPrivateIp:
-    Description: IP privada de la EC2. Panel de RabbitMQ por la VPN en http://<esta IP>:15672
-    Value: !GetAtt AppInstance.PrivateIp
+    Description: >-
+      IP privada de la EC2. Por la VPN: paneles de RabbitMQ en :15672 y :15673,
+      administrador de RabbitMQ en :8081. La usan vpn-up.sh y bruno-env.sh.
+    Value: !GetAtt AppServer.PrivateIp
 
   RabbitSecretArn:
     Description: Credenciales del broker (y del panel). Las lee vpn-up.sh.

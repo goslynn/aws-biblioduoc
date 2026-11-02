@@ -5,39 +5,23 @@
   <modelVersion>4.0.0</modelVersion>
 
   <parent>
-    <groupId>org.springframework.boot</groupId>
-    <artifactId>spring-boot-starter-parent</artifactId>
-    <version>4.1.1</version>
-    <relativePath/>
+    <groupId>cl.duoc</groupId>
+    <artifactId>biblioteca</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
   </parent>
 
-  <groupId>cl.duoc</groupId>
   <artifactId>biblioteca-backend</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
   <name>biblioteca-backend</name>
   <description>API interna de la Biblioteca Duoc: catalogo de libros y solicitudes de prestamo</description>
 
-  <properties>
-    <!-- 21 para que coincida con la imagen amazoncorretto:21 de la EC2 (aws/backend.yaml). -->
-    <java.version>21</java.version>
-    <aws-sdk.version>2.57.5</aws-sdk.version>
-    <greenmail.version>2.1.15</greenmail.version>
-  </properties>
-
-  <dependencyManagement>
-    <dependencies>
-      <!-- Versiones alineadas de todos los clientes del AWS SDK v2. -->
-      <dependency>
-        <groupId>software.amazon.awssdk</groupId>
-        <artifactId>bom</artifactId>
-        <version>${aws-sdk.version}</version>
-        <type>pom</type>
-        <scope>import</scope>
-      </dependency>
-    </dependencies>
-  </dependencyManagement>
-
   <dependencies>
+    <!-- Validacion del JWT de Cognito, roles y errores: lo mismo que usa el
+         administrador de RabbitMQ (../comun). -->
+    <dependency>
+      <groupId>cl.duoc</groupId>
+      <artifactId>biblioteca-comun</artifactId>
+    </dependency>
+
     <!-- Spring MVC + Tomcat embebido. En Spring Boot 4 el starter se llama
          "webmvc"; en Boot 3 era "web". El NLB de aws/backend.yaml le reenvia
          el trafico de API Gateway al puerto 8080. -->
@@ -57,7 +41,8 @@
          API Gateway ya valida el token antes de reenviar la peticion. Estas dos
          dependencias hacen que Spring lo vuelva a validar por su cuenta, de
          modo que una llamada que llegue a la EC2 por otro camino (la VPN, por
-         ejemplo) tambien sea rechazada. Ver config/SecurityConfig. -->
+         ejemplo) tambien sea rechazada. Ver config/SecurityConfig y
+         comun/.../seguridad/ValidacionJwt. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security</artifactId>

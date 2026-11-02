@@ -1,0 +1,88 @@
+info:
+  name: create-binding
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{ADMIN_URL}}/api/admin/bindings"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "exchange": "demo.topic",
+        "cola": "demo.cola",
+        "routingKey": "libro.*"
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 201 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 201) {
+          test("devuelve el binding creado", function () {
+            expect(res.getBody()).to.deep.equal(req.getBody());
+          });
+        }
+
+docs: |
+  # Crear un binding
+
+  `POST /api/admin/bindings` con `{exchange, cola, routingKey}`: "lo que
+  llegue a `exchange` con `routingKey`, a `cola`". En un exchange `TOPIC` la
+  clave es un patron (`libro.*` = una palabra; `#` = cualquier cosa). En
+  `FANOUT` y `HEADERS` se ignora: manda `""`.
+
+  Se puede enlazar una cola nueva a un exchange de la biblioteca (por ejemplo,
+  otra cola que escuche `biblioteca.eventos`): eso no le quita nada a la API.
+  Lo que no se puede es cambiar los bindings de una cola protegida.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 201 | enlazado | entorno `aws-admin-vpn` |
+  | 400 | falta `routingKey`, o un nombre es invalido | quita `routingKey` |
+  | 404 | el exchange o la cola no existen | `"exchange": "no-existe"` |
+  | 409 | la cola es parte de la topologia protegida | `"cola": "notif.prestamos"` |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 201 enlazado
+    request:
+      url: "{{ADMIN_URL}}/api/admin/bindings"
+      method: POST
+    response:
+      status: 201
+      statusText: Created
+      body:
+        type: json
+        data: '{"exchange": "demo.topic", "cola": "demo.cola", "routingKey": "libro.*"}'
+  - name: 409 cola protegida
+    request:
+      url: "{{ADMIN_URL}}/api/admin/bindings"
+      method: POST
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "notif.prestamos es parte de la topologia de la biblioteca y no se puede modificar",
+            "detalles": {}
+          }

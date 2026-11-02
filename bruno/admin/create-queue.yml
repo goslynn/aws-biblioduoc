@@ -1,0 +1,120 @@
+info:
+  name: create-queue
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{ADMIN_URL}}/api/admin/colas"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "nombre": "demo.cola",
+        "tipo": "QUORUM",
+        "ttlMs": 600000,
+        "limiteEntregas": 5
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 201 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 201) {
+          test("la cola existe en el broker, vacia y sin consumidores", function () {
+            const enviado = req.getBody();
+            const cuerpo = res.getBody();
+            expect(cuerpo.nombre).to.equal(enviado.nombre);
+            expect(cuerpo.mensajes).to.equal(0);
+            expect(cuerpo.consumidores).to.equal(0);
+            expect(res.getHeader("location")).to.equal("/api/admin/colas/" + enviado.nombre);
+          });
+        }
+
+docs: |
+  # Crear una cola
+
+  `POST /api/admin/colas`. Lo que se manda se traduce a argumentos de la cola
+  en RabbitMQ:
+
+  | Campo | Obligatorio | Argumento | Nota |
+  |---|---|---|---|
+  | `nombre` | si | | minusculas, digitos, `.` `-` `_`; no `amq.*` |
+  | `tipo` | no (`CLASSIC`) | `x-queue-type` | `CLASSIC` o `QUORUM` (replicada en los dos nodos) |
+  | `durable` | no (`true`) | | una `QUORUM` siempre es durable |
+  | `ttlMs` | no | `x-message-ttl` | > 0 |
+  | `deadLetterExchange` | no | `x-dead-letter-exchange` | tiene que existir |
+  | `limiteEntregas` | no | `x-delivery-limit` | solo en `QUORUM` |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 201 | creada; `Location` apunta a ella | entorno `aws-admin-vpn` |
+  | 400 | nombre vacio o invalido, `ttlMs` <= 0, `limiteEntregas` en una `CLASSIC`, `QUORUM` no durable | `"ttlMs": -5`, o `"tipo": "CLASSIC"` dejando `limiteEntregas` |
+  | 404 | el `deadLetterExchange` no existe | anade `"deadLetterExchange": "no-existe"` |
+  | 409 | ya existe | ejecutala dos veces |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 201 creada
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas"
+      method: POST
+    response:
+      status: 201
+      statusText: Created
+      headers:
+        - name: Location
+          value: /api/admin/colas/demo.cola
+      body:
+        type: json
+        data: '{"nombre": "demo.cola", "mensajes": 0, "consumidores": 0}'
+  - name: 400 reglas cruzadas
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas"
+      method: POST
+    response:
+      status: 400
+      statusText: Bad Request
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 400,
+            "error": "Bad Request",
+            "mensaje": "La solicitud no es valida",
+            "detalles": {
+              "limiteSoloEnQuorum": "limiteEntregas solo existe en colas QUORUM",
+              "ttlMs": "ttlMs tiene que ser mayor que 0"
+            }
+          }
+  - name: 409 ya existe
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas"
+      method: POST
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "la cola demo.cola ya existe",
+            "detalles": {}
+          }

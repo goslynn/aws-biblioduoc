@@ -18,7 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import cl.duoc.biblioteca.catalogo.CatalogoLibros;
 import cl.duoc.biblioteca.catalogo.Libro;
-import cl.duoc.biblioteca.config.Roles;
+import cl.duoc.biblioteca.comun.seguridad.Roles;
 import jakarta.validation.Valid;
 
 /**

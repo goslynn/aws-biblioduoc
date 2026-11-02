@@ -101,6 +101,31 @@ desde dentro de la VPC: levanta la VPN (`./aws/scripts/vpn-up.sh`) y llama a
 token sin scope (403). Se hace a mano: no tiene sentido como entorno de Bruno,
 porque depende de un tunel en tu equipo.
 
+### El administrador de RabbitMQ: otro servicio, otros entornos
+
+La carpeta `admin/` no habla con la API: habla con **`admin-rabbit`**, el
+segundo microservicio, que corre en el puerto **8081** de la misma EC2 y **no
+esta detras de API Gateway**. Solo se llega por la VPN. Por eso tiene sus dos
+entornos propios, con `ADMIN_URL` (la IP privada de la EC2) en vez de
+`BASE_URL`, y en los cinco entornos de la API la carpeta **se salta sola**
+(script `before-request` de `admin/folder.yml`).
+
+| Entorno | Credencial | Resultado |
+|---|---|---|
+| `aws-admin-vpn` | cliente M2M backoffice (empleado) | 201 / 200 / 204: crea, consulta y borra |
+| `aws-admin-vpn-estudiante` | cliente M2M de acceso (estudiante) | **403** en todo |
+
+```sh
+./aws/scripts/vpn-up.sh
+./aws/pipeline/bruno-env.sh
+cd bruno
+bru run admin --env aws-admin-vpn
+bru run admin --env aws-admin-vpn-estudiante
+```
+
+Las siete peticiones forman un ciclo que deja el broker como estaba (exchange
+`demo.topic`, cola `demo.cola`, binding `libro.*`, y su borrado).
+
 ---
 
 ## 4. Por que hacen falta TRES formas de conseguir un token
@@ -172,6 +197,15 @@ bruno/
     ├── reject.yml          POST /api/gestion/solicitudes/:id/rechazo
     ├── stock.yml           POST /api/gestion/libros/:id/stock
     └── log.yml             GET  /api/gestion/bitacora
+└── admin/                  OTRO servicio (admin-rabbit :8081), solo por la VPN
+    ├── folder.yml          reglas del administrador; se salta sin ADMIN_URL
+    ├── create-exchange.yml POST   /api/admin/exchanges
+    ├── create-queue.yml    POST   /api/admin/colas
+    ├── create-binding.yml  POST   /api/admin/bindings
+    ├── get-queue.yml       GET    /api/admin/colas/:nombre
+    ├── delete-binding.yml  DELETE /api/admin/bindings?exchange&cola&routingKey
+    ├── delete-queue.yml    DELETE /api/admin/colas/:nombre  (forzar)
+    └── delete-exchange.yml DELETE /api/admin/exchanges/:nombre
 ```
 
 Detalles que conviene conocer al tocarla:
@@ -193,6 +227,11 @@ Detalles que conviene conocer al tocarla:
   create → get → ... → approve → return → reject.
 * `gestion/stock` suma 1 ejemplar a L-013 en cada `bru run` con el backoffice.
   Es intencionado (una carga real); para ver un "avisame", carga L-005.
+* **Query params que se envian**: el runner de terminal (bru 4.2.1, medido)
+  solo manda los que estan TAMBIEN en la `url`, como los guarda la
+  aplicacion. `admin/delete-binding.yml` los lleva en los dos sitios. Los que
+  estan desactivados (por ejemplo `q` en `libros/list`) se quedan solo en
+  `params`: al activarlos en la aplicacion, ella los copia a la URL.
 
 ---
 

@@ -41,6 +41,15 @@
 #    "bru run --env <caso>" pasa en verde en los cinco casos: la matriz de
 #    seguridad completa, automatizada.
 #
+#  EL ADMINISTRADOR DE RABBITMQ, APARTE
+#    admin-rabbit no esta detras de API Gateway: se llega por la VPN a
+#    http://<IP privada de la EC2>:8081 (Output AppPrivateIp del backend). Sus
+#    dos entornos llevan ADMIN_URL en vez de BASE_URL y se corren solo sobre
+#    la carpeta admin/ ("bru run admin --env aws-admin-vpn"); en los entornos
+#    de la API esa carpeta se salta sola.
+#      aws-admin-vpn             backoffice (empleado)  -> 201 / 200 / 204
+#      aws-admin-vpn-estudiante  M2M de acceso          -> 403
+#
 #  USO
 #    ./aws/pipeline/bruno-env.sh
 #
@@ -195,6 +204,44 @@ escribe_entorno aws-token-invalido.yml aws-token-invalido \
   "Una cadena inventada como token. Demuestra que el authorizer valida la FIRMA de verdad y no se limita a mirar si la cabecera existe." \
   "$API_ENDPOINT" "no-es-un-jwt-de-verdad" 401 401 401
 
+# --- El administrador de RabbitMQ (solo por la VPN) ---------------------------
+# $1 archivo  $2 nombre  $3 descripcion  $4 url  $5 token  $6 exito|403
+escribe_entorno_admin() {
+  local archivo="$1" nombre="$2" descripcion="$3" url="$4" token="$5" esperado="$6"
+  cat > "${DESTINO}/${archivo}" <<EOF
+# ARCHIVO GENERADO por aws/pipeline/bruno-env.sh -- NO LO EDITES A MANO.
+# Contiene un token real y esta en .gitignore. Caduca en 60 minutos.
+# Solo para la carpeta admin/ y con la VPN levantada (./aws/scripts/vpn-up.sh):
+#   bru run admin --env ${nombre}
+name: ${nombre}
+description: >-
+  ${descripcion}
+variables:
+  - name: ADMIN_URL
+    value: "${url}"
+    description: Raiz del administrador de RabbitMQ, en la IP PRIVADA de la EC2 (solo por la VPN).
+  - name: ACCESS_TOKEN
+    value: "${token}"
+    description: Credencial de este caso.
+  - name: ESPERADO_ADMIN
+    value: "${esperado}"
+    description: "exito: cada peticion da su 2xx (201, 200 o 204). 403: el token es valido pero no es de empleado."
+EOF
+  info "escrito environments/${archivo}"
+}
+
+APP_IP="$(output_de "$STACK_BACKEND" AppPrivateIp)"
+if [ -n "$APP_IP" ]; then
+  escribe_entorno_admin aws-admin-vpn.yml aws-admin-vpn \
+    "Administrador de RabbitMQ con el cliente M2M backoffice (EMPLEADO): crea, consulta y borra un exchange, una cola y su binding. No pasa por API Gateway: necesita la VPN." \
+    "http://${APP_IP}:8081" "$TOKEN_BACKOFFICE" exito
+  escribe_entorno_admin aws-admin-vpn-estudiante.yml aws-admin-vpn-estudiante \
+    "Administrador de RabbitMQ con el cliente M2M de acceso (ESTUDIANTE): el token es valido, pero administrar el broker es de empleados. 403 en todo, emitido por Spring en el propio servicio." \
+    "http://${APP_IP}:8081" "$TOKEN_M2M" 403
+else
+  warn "el stack ${STACK_BACKEND} no expone AppPrivateIp: no se generan los entornos del administrador"
+fi
+
 # Restos de cuando el backend era una Lambda con Function URL de demostracion.
 rm -f "${DESTINO}/aws-directo.yml" "${DESTINO}/aws-directo-sin-token.yml"
 
@@ -210,6 +257,12 @@ cat <<EOF
         bru run --env aws-token-invalido      # 401        firma invalida
 
     Los cinco deben pasar en VERDE: cada entorno declara el codigo que espera.
+    (La carpeta admin/ se salta en ellos: es otro servicio.)
+
+    El administrador de RabbitMQ, con la VPN levantada (./aws/scripts/vpn-up.sh):
+
+        bru run admin --env aws-admin-vpn             # 201 / 200 / 204 (empleado)
+        bru run admin --env aws-admin-vpn-estudiante  # 403
 
     La segunda capa sin el gateway delante (Spring rechazando una peticion que
     llega directo a la EC2) se prueba a mano por la VPN; ver aws/README.md §5.

@@ -55,10 +55,13 @@ Run Command.)
           │  subred PUBLICA (IGW)         │ ⑤ :8080, health check /health     │
           │                ┌──────────────▼───────────────┐                   │
           │                │  EC2 Amazon Linux 2023       │  backend.yaml     │
+          │                │  docker compose (backend/):  │                   │
           │                │   [app] Spring Boot: valida  │                   │
           │                │     otra vez el token, RBAC, │── ⑦ SMTP 587 ──▶ proveedor
           │                │     consumidores, @Scheduled │── 443 ─▶ S3, Secrets Manager,
-          │                │   [rabbitmq] 4.1 + panel     │         SSM, Cognito, imagenes
+          │                │   [rabbitmq-1] [rabbitmq-2]  │         SSM, Cognito, imagenes
+          │                │     cluster 4.1 + paneles    │                   │
+          │                │   [admin-rabbit] :8081       │                   │
           │                │   SG: entra solo la VPC      │                   │
           │                └──────────────┬───────────────┘                   │
           │  subredes PRIVADAS            │ ⑥ TLS verify-full, 5432           │
@@ -116,9 +119,21 @@ En ningun punto del sistema hay una Access Key estatica.
 | `cognito.yaml` | `biblioteca-cognito` | User Pool (plan Essentials), grupo `empleados`, Resource Server + 2 scopes, App Clients SPA, M2M y backoffice, dominio con Managed Login y su marca (`aws/marca/*.svg`) | `web` (la URL del sitio) |
 | `network.yaml` | `biblioteca-network` | VPC; dos subredes privadas sin ruta (RDS, NLB); una subred publica con IGW (EC2 de la app, servidor web, VPN); security groups App ↔ RDS | — |
 | `database.yaml` | `biblioteca-database` | RDS PostgreSQL 16 privado y cifrado, parameter group con TLS obligatorio, dos secretos | `network` |
-| `backend.yaml` | `biblioteca-backend` | EC2 con Docker (Spring Boot + RabbitMQ), NLB interno, secretos de RabbitMQ y SMTP, parametro SSM de configuracion, LogGroup | `artifacts`, `cognito`, `web`, `network`, `database`, y el jar ya subido |
+| `backend.yaml` | `biblioteca-backend` | EC2 con Docker y docker compose (cluster RabbitMQ de 2 nodos, API, administrador de RabbitMQ), NLB interno, secretos de RabbitMQ, Erlang cookie y SMTP, parametro SSM de configuracion, LogGroup | `artifacts`, `cognito`, `web`, `network`, `database`, y el paquete ya subido |
 | `api.yaml` | `biblioteca-api` | REST API: recursos, metodos, authorizer, scopes, CORS, VPC Link, stage | `cognito`, `backend`, `web` |
-| `vpn.yaml` (opcional) | `biblioteca-vpn` | Servidor WireGuard en la subred publica, y las reglas que abren la base y el panel de RabbitMQ al tunel. **No lo crea el bootstrap** | `network`, `database` |
+| `vpn.yaml` (opcional) | `biblioteca-vpn` | Servidor WireGuard en la subred publica, y las reglas que abren al tunel la base, los paneles de los dos nodos de RabbitMQ y el administrador de RabbitMQ. **No lo crea el bootstrap** | `network`, `database` |
+
+### Lo que corre dentro de la EC2 de la app
+
+No son plantillas: viajan en el paquete que arma `build-backend.sh`
+(`backend/biblioteca-backend.tar.gz`, junto a los dos jars) y los usa
+`/opt/biblioteca/arrancar.sh` en cada arranque.
+
+| Archivo | Que es |
+|---|---|
+| `backend/compose.yaml` | Los cuatro contenedores: `rabbitmq-1`, `rabbitmq-2`, `app`, `admin-rabbit`. Puertos, limites de memoria, healthchecks, logs a CloudWatch |
+| `backend/rabbitmq.conf` | El cluster: `classic_config` con los dos nodos, y la reconciliacion que deja cada quorum con replica en ambos |
+| `backend/enabled_plugins` | Panel de administracion y shovel (*Move messages* desde una DLQ) |
 
 ### Scripts
 
@@ -129,10 +144,10 @@ En ningun punto del sistema hay una Access Key estatica.
 | `scripts/vpn-up.sh` | Opcional. Llaves del equipo → stack `vpn` → interfaz WireGuard local (sudo) → datos de conexion para DataGrip/psql y el panel de RabbitMQ. Idempotente |
 | `scripts/vpn-down.sh` | Baja la interfaz local, borra el stack `vpn` y los archivos locales con secretos |
 | `scripts/_comun.sh` | No se ejecuta solo: funciones compartidas (mensajes, requisitos, lectura de Outputs) |
-| `pipeline/build-backend.sh` | `mvnw package` → JWKS de Cognito → jar a S3 → stack del backend → (si ya existia) reinicio por SSM → espera al health check del NLB |
+| `pipeline/build-backend.sh` | `./mvnw package` (raiz: `comun`, `back`, `admin-rabbit`) → JWKS de Cognito → `.tar.gz` con los dos jars y `backend/*` a S3 → stack del backend → (si ya existia) `systemctl restart biblioteca` por SSM → espera al health check del NLB |
 | `pipeline/api-deploy.sh` | `create-deployment` al stage. **Imprescindible tras cada cambio de la API** |
 | `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `tsc` + `vite build` → `.tar.gz` con `dist/`, `front/Caddyfile` y la API/Cognito → bucket de artefactos → reinicio de Caddy por SSM |
-| `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno |
+| `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno (los cinco de la API y los dos del administrador, con la IP privada de la EC2) |
 
 Ningun script prueba la API. Eso es trabajo de Bruno y del navegador.
 
@@ -196,9 +211,12 @@ backend.yaml
           PublicSubnetId, PrivateSubnetIds, AppSecurityGroupId,
           DbEndpoint, DbPort, DbName, MasterSecretArn, AppSecretArn,
           SmtpHost, SmtpUser, SmtpPassword (NoEcho), SmtpFrom, ReminderLead
+          (ArtifactsObjectKey apunta al .tar.gz, no a un jar)
   sale  : NlbArn, NlbDnsName ────────────────▶ api.yaml (VPC Link, integraciones)
           InstanceId, TargetGroupArn ────────▶ build-backend.sh (reinicio y espera)
-          AppPrivateIp, RabbitSecretArn ─────▶ vpn-up.sh (panel de RabbitMQ)
+          AppPrivateIp ──────────────────────▶ vpn-up.sh (paneles :15672/:15673,
+                                               admin :8081), bruno-env.sh (ADMIN_URL)
+          RabbitSecretArn ───────────────────▶ vpn-up.sh (credenciales del panel)
           LogGroupName ──────────────────────▶ aws logs tail
 
 api.yaml
@@ -209,7 +227,8 @@ api.yaml
 
 vpn.yaml (opcional, lo despliega vpn-up.sh)
   entra : ProjectName, VpcId, VpcCidr, PublicSubnetId, DatabaseSecurityGroupId,
-          AppSecurityGroupId, RabbitPanelPort, DbPort, VpnPort, ClientPublicKey,
+          AppSecurityGroupId, RabbitPanelPort, RabbitPanelSecondPort,
+          AdminRabbitPort, DbPort, VpnPort, ClientPublicKey,
           ClientCidr, TunnelServerAddress, TunnelClientAddress, InstanceType, ImageId
   sale  : InstanceId ────────────────────────▶ vpn-up.sh (IP en vivo, llave del servidor)
           VpnPort ───────────────────────────▶ vpn-up.sh (Endpoint del cliente)
@@ -220,10 +239,19 @@ vpn.yaml (opcional, lo despliega vpn-up.sh)
 El UserData solo corre en el PRIMER arranque, y cambiarlo detiene la instancia.
 Por eso no lleva configuracion: `backend.yaml` la escribe en el parametro de SSM
 `/<proyecto>/backend/app.env` (una linea `VARIABLE=valor` por variable; las
-`SECRETO_*` son ARN, no secretos). Cada vez que arranca un servicio
-(`biblioteca-rabbitmq`, `biblioteca-app`), su script lee ese parametro, resuelve
-los secretos en Secrets Manager y lanza el contenedor. Cambiar un parametro del
-stack y reiniciar el servicio basta; `build-backend.sh` lo hace solo.
+`SECRETO_*` son ARN, no secretos). Cada vez que arranca el servicio
+`biblioteca`, su script baja el paquete, lee ese parametro, resuelve los
+secretos en Secrets Manager, escribe un archivo de entorno por tipo de
+contenedor y corre `docker compose up`. Cambiar un parametro del stack y
+reiniciar el servicio basta; `build-backend.sh` lo hace solo.
+
+Cuando lo que tiene que cambiar es el propio UserData (como al pasar de dos
+`docker run` a compose), se cambia el **id logico** de la instancia
+(`AppInstance` → `AppServer`): CloudFormation crea una EC2 nueva, mueve el
+target group del NLB a ella y borra la vieja. El NLB y el VPC Link de
+`api.yaml` no se tocan, asi que **basta con `build-backend.sh`**; no hace
+falta desmontar nada. El cluster nace vacio: los eventos pendientes viven en
+la bandeja de salida de la base y se publican al volver.
 
 ### El ciclo aparente, y por que no existe
 
@@ -342,8 +370,9 @@ Dejalo en `aws/.env` y no solo en la terminal: cada bootstrap despliega
 
 ### Consultar la base y el panel de RabbitMQ (VPN opcional)
 
-La base no tiene ninguna via desde fuera, y el panel de RabbitMQ (15672) solo
-se abre al tunel. Para mirarlos:
+La base no tiene ninguna via desde fuera, y los paneles de RabbitMQ (15672 y
+15673, uno por nodo) y el administrador de RabbitMQ (8081) solo se abren al
+tunel. Para mirarlos:
 
 ```sh
 ./aws/scripts/vpn-up.sh      # ~3 min la primera vez; pide sudo para la interfaz
@@ -360,7 +389,8 @@ Que hace `vpn-up.sh`, sin pasos manuales:
 2. Detecta tu IP publica: el security group del servidor solo acepta UDP desde
    ella (`VPN_ORIGEN` para otro rango).
 3. Despliega `vpn.yaml` en la subred publica del proyecto: Ubuntu sin SSH ni
-   rol IAM, una regla mas en el SG de RDS (5432) y otra en el de la EC2 (15672).
+   rol IAM, una regla mas en el SG de RDS (5432) y tres en el de la EC2
+   (15672, 15673 y 8081).
 4. Lee en vivo la IP publica del servidor y su llave publica, que este anuncia
    en su consola serie. Su llave privada no sale de la instancia.
 5. Levanta la interfaz `wgbiblioteca` con `wg-quick`. Solo enruta el rango de
@@ -368,17 +398,23 @@ Que hace `vpn-up.sh`, sin pasos manuales:
    si `nix-shell`, las toma de nixpkgs.
 6. Descarga la CA de RDS y escribe `conexion.txt` (permisos 600) con la URL
    JDBC y el comando `psql`, ambos con `sslmode=verify-full`. Si el backend esta
-   desplegado, imprime ademas la URL del panel de RabbitMQ
-   (`http://<IP privada de la EC2>:15672`) y sus credenciales (`RabbitSecret`).
+   desplegado, imprime ademas las URL de los paneles de RabbitMQ
+   (`http://<IP privada de la EC2>:15672` y `:15673`), sus credenciales
+   (`RabbitSecret`) y la del administrador de RabbitMQ (`:8081`).
 
 Por defecto conecta a la base como `biblioteca_app`.
 `VPN_USUARIO_BD=maestro` usa el usuario de Flyway: con el se puede romper el
 esquema que Flyway gestiona.
 
-En el panel de RabbitMQ estan las colas, las DLQ (`correo.fallidos`,
-`eventos.fallidos`) con el motivo de cada mensaje (`x-motivo-fallo`, `x-death`),
+En el panel de RabbitMQ estan los dos nodos del cluster (pestana *Overview*,
+seccion *Nodes*), las colas quorum con sus replicas, las DLQ
+(`notif.prestamos.dlq`, `notif.disponibilidad.dlq`, `bitacora.dlq`,
+`correo.fallidos`) con el motivo de cada mensaje (`x-motivo-fallo`, `x-death`),
 y *Move messages* (plugin shovel) para devolver un mensaje a su cola cuando se
 arregla la causa.
+
+El administrador de RabbitMQ se usa con Bruno (`bru run admin --env
+aws-admin-vpn`, ver `bruno/README.md`) y exige un JWT de empleado.
 
 Vuelve a correr `vpn-up.sh` al reabrir el lab o al cambiar de red: la IP del
 servidor y la tuya cambian, y el script lo reajusta.
@@ -454,8 +490,14 @@ manual, no una prueba automatizada (esas viven en Bruno).
 ## 6. Como ver que pasa
 
 ```sh
-# Logs de la aplicacion y de RabbitMQ (streams "app" y "rabbitmq")
+# Logs de los cuatro contenedores (streams app, admin-rabbit, rabbitmq-1, rabbitmq-2)
 aws logs tail /biblioteca/backend --follow --region us-east-1
+
+# El cluster y los contenedores, por SSM (sin SSH)
+aws ssm start-session --target <InstanceId>
+#   sudo docker compose -p biblioteca -f /opt/biblioteca/paquete/compose.yaml ps
+#   sudo docker exec biblioteca-rabbitmq-1-1 rabbitmqctl cluster_status
+#   sudo docker exec biblioteca-rabbitmq-1-1 rabbitmq-queues quorum_status notif.prestamos
 
 # ¿El NLB ve sana la instancia?
 aws elbv2 describe-target-health --target-group-arn "$(aws cloudformation describe-stacks \
@@ -558,4 +600,8 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 | El tunel esta levantado pero DataGrip no conecta | Cambio tu IP publica, o el servidor se detuvo al cerrar la sesion del lab y cambio la suya | Vuelve a correr `./aws/scripts/vpn-up.sh` |
 | `vpn-up.sh` dice que el servidor esta detenido | El lab paro la instancia al cerrar la sesion | `./aws/scripts/vpn-down.sh && ./aws/scripts/vpn-up.sh` |
 | La API responde 500 y Flyway dice `password authentication failed for user "biblioteca_app"` | Alguien cambio a mano `AppSecret` despues de crear el rol | `ALTER ROLE` con la nueva, o recrear `database` |
-| RabbitMQ no acepta la contrasena tras rotar `RabbitSecret` | `RABBITMQ_DEFAULT_PASS` solo se aplica al crear el volumen `rabbitmq-datos` | Cambiala desde el panel, o borra el volumen (se pierden las colas) |
+| RabbitMQ no acepta la contrasena tras rotar `RabbitSecret` | `RABBITMQ_DEFAULT_PASS` solo se aplica al crear el cluster (volumenes `rabbitmq-1-datos` y `rabbitmq-2-datos`) | Cambiala desde el panel, o borra los dos volumenes (se pierden las colas) |
+| `cluster_status` muestra un solo nodo | Los nodos no se ven: cookie distinta, o un volumen viejo de un nodo que ya pertenecia a otro cluster | Logs del stream `rabbitmq-2`; si es de volumenes, `docker compose down`, borrar los dos volumenes y `systemctl restart biblioteca` |
+| Una cola quorum tiene un solo miembro | Se declaro antes de que el segundo nodo se uniera | Se corrige sola: la reconciliacion de `rabbitmq.conf` anade la replica en unos minutos (`rabbitmq-queues quorum_status <cola>`) |
+| Una quorum deja de aceptar mensajes | Cayo un nodo: con 2 miembros, la mayoria exige los dos | `docker compose ps`; al volver el nodo, la cola sigue sola. Es la limitacion declarada de un cluster de dos nodos |
+| El servicio `biblioteca` falla al arrancar con `docker: 'compose' is not a docker command` | El plugin no se descargo en el primer arranque (sin salida a GitHub) | `aws ec2 get-console-output`; el UserData lo instala en `/usr/local/lib/docker/cli-plugins` |

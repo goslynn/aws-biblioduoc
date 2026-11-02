@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  El backend de la biblioteca: DOS microservicios Spring Boot y una libreria
+  comun, en un solo build de Maven.
+
+    comun         seguridad JWT (decodificador, autoridades, roles) y el
+                  manejador de errores. Es un jar normal, no una aplicacion.
+    back          la API de la biblioteca: catalogo, solicitudes, avisos.
+                  Productor y consumidor de RabbitMQ.
+    admin-rabbit  el administrador de RabbitMQ: crea y borra colas, exchanges
+                  y bindings por REST. Solo interno (por la VPN).
+
+  Cada servicio es su propio fat jar y su propio contenedor
+  (aws/backend/compose.yaml). Lo comun se comparte en el build, no en
+  tiempo de ejecucion: si cambia, se vuelven a construir los dos.
+
+  ./mvnw package                     todo, con los tests (necesita Docker)
+  ./mvnw -pl back -am package        solo la API (y lo que necesita)
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>4.1.1</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>cl.duoc</groupId>
+  <artifactId>biblioteca</artifactId>
+  <version>0.0.1-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>biblioteca</name>
+  <description>Microservicios de la Biblioteca Duoc</description>
+
+  <modules>
+    <module>comun</module>
+    <module>back</module>
+    <module>admin-rabbit</module>
+  </modules>
+
+  <properties>
+    <!-- 21 para que coincida con la imagen amazoncorretto:21 de la EC2 (aws/backend/compose.yaml). -->
+    <java.version>21</java.version>
+    <aws-sdk.version>2.57.5</aws-sdk.version>
+    <greenmail.version>2.1.15</greenmail.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>cl.duoc</groupId>
+        <artifactId>biblioteca-comun</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <!-- Versiones alineadas de todos los clientes del AWS SDK v2. -->
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${aws-sdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+</project>

@@ -1,0 +1,77 @@
+info:
+  name: delete-queue
+  type: http
+  seq: 6
+
+http:
+  method: DELETE
+  url: "{{ADMIN_URL}}/api/admin/colas/:nombre"
+  params:
+    - name: nombre
+      value: "demo.cola"
+      type: path
+      description: >-
+        La cola a borrar. Con notif.prestamos se ve el 409 de la topologia
+        protegida.
+    - name: forzar
+      value: "true"
+      type: query
+      disabled: true
+      description: >-
+        Borrarla aunque tenga mensajes (se pierden). Sin el, una cola con
+        mensajes responde 409.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 204 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Eliminar una cola
+
+  `DELETE /api/admin/colas/{nombre}`. Por defecto **no borra una cola con
+  mensajes**: responde 409 diciendo cuantos tiene. Con `forzar=true` la borra
+  igual (y los mensajes se pierden).
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 204 | borrada | entorno `aws-admin-vpn` |
+  | 400 | nombre invalido | `nombre = Mayusculas` |
+  | 404 | no existe | ejecutala dos veces |
+  | 409 | tiene mensajes y no se forzo, o es parte de la topologia protegida | `nombre = notif.prestamos` |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 204 borrada
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas/demo.cola"
+      method: DELETE
+    response:
+      status: 204
+      statusText: No Content
+  - name: 409 topologia protegida
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas/notif.prestamos"
+      method: DELETE
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "notif.prestamos es parte de la topologia de la biblioteca y no se puede modificar",
+            "detalles": {}
+          }

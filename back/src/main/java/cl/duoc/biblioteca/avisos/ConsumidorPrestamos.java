@@ -14,6 +14,7 @@ import com.rabbitmq.client.Channel;
 
 import cl.duoc.biblioteca.eventos.Evento;
 import cl.duoc.biblioteca.eventos.TiposEvento;
+import cl.duoc.biblioteca.eventos.Entregas;
 import cl.duoc.biblioteca.eventos.TopologiaRabbit;
 import cl.duoc.biblioteca.solicitudes.EstadoSolicitud;
 import cl.duoc.biblioteca.solicitudes.RepositorioSolicitudes;
@@ -30,7 +31,7 @@ import cl.duoc.biblioteca.solicitudes.Solicitud;
  *                          enviar (el estudiante no activo los avisos, o el
  *                          recordatorio llego tarde a un prestamo ya devuelto).
  *   NACK sin requeue       el mensaje es invalido: el broker lo manda al DLX y
- *                          termina en eventos.fallidos para revisarlo a mano.
+ *                          termina en notif.prestamos.dlq para revisarlo a mano.
  *   NACK con requeue       fallo del entorno (base caida, broker sin confirmar):
  *                          vuelve a la cola al instante. La cola quorum cuenta
  *                          las entregas y a la quinta lo manda sola a la DLQ.
@@ -63,10 +64,20 @@ public class ConsumidorPrestamos {
             correo.ifPresent(c -> publicador.encolar(List.of(c), TopologiaRabbit.RK_TRANSACCIONAL));
             canal.basicAck(tag, false);
         } catch (MensajeInvalido e) {
-            log.warn("mensaje invalido en {}, va a la DLQ: {}", TopologiaRabbit.COLA_NOTIF_PRESTAMOS, e.getMessage());
+            log.warn("mensaje invalido en {}, va a {}: {}",
+                    TopologiaRabbit.COLA_NOTIF_PRESTAMOS, TopologiaRabbit.COLA_NOTIF_PRESTAMOS_DLQ, e.getMessage());
             canal.basicNack(tag, false, false);
         } catch (RuntimeException e) {
-            log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_NOTIF_PRESTAMOS, e.toString());
+            if (Entregas.esUltima(mensaje)) {
+                // El requeue ya no reintenta: el broker lo aparta en la DLQ
+                // por x-delivery-limit. Se registra aqui, que es el ultimo
+                // momento en que la aplicacion lo ve.
+                log.error("fallo en {} tras {} reintentos, el broker lo aparta en {}: {}",
+                        TopologiaRabbit.COLA_NOTIF_PRESTAMOS, Entregas.previas(mensaje),
+                        TopologiaRabbit.COLA_NOTIF_PRESTAMOS_DLQ, e.toString());
+            } else {
+                log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_NOTIF_PRESTAMOS, e.toString());
+            }
             canal.basicNack(tag, false, true);
         }
     }

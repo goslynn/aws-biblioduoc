@@ -1,0 +1,81 @@
+info:
+  name: get-queue
+  type: http
+  seq: 4
+
+http:
+  method: GET
+  url: "{{ADMIN_URL}}/api/admin/colas/:nombre"
+  params:
+    - name: nombre
+      value: "demo.cola"
+      type: path
+      description: >-
+        La cola a consultar. Prueba con notif.prestamos (la de la API) para
+        ver la cola real con sus consumidores, o con no-existe para el 404.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("describe la cola pedida", function () {
+            const pedida = decodeURIComponent(req.getUrl().split("/").pop().split("?")[0]);
+            const cuerpo = res.getBody();
+            expect(cuerpo.nombre).to.equal(pedida);
+            expect(cuerpo.mensajes).to.be.a("number");
+            expect(cuerpo.consumidores).to.be.a("number");
+          });
+        }
+
+docs: |
+  # Ver una cola
+
+  `GET /api/admin/colas/{nombre}`: cuantos mensajes esperan y cuantos
+  consumidores estan conectados.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | existe | entorno `aws-admin-vpn` (`nombre = notif.prestamos` muestra los consumidores de la API) |
+  | 400 | nombre invalido | `nombre = Mayusculas` |
+  | 404 | no existe | `nombre = no-existe` |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 200 una cola de la API
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas/notif.prestamos"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: '{"nombre": "notif.prestamos", "mensajes": 0, "consumidores": 1}'
+  - name: 404 no existe
+    request:
+      url: "{{ADMIN_URL}}/api/admin/colas/no-existe"
+      method: GET
+    response:
+      status: 404
+      statusText: Not Found
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 404,
+            "error": "Not Found",
+            "mensaje": "la cola no-existe no existe",
+            "detalles": {}
+          }

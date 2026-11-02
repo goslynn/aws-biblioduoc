@@ -19,8 +19,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      tu IP publica (la detecta vpn-up.sh). Ni SSH ni ningun otro puerto.
 #    * DatabaseFromVpnIngress -> una regla mas en el security group de RDS: el
 #      5432 tambien desde el servidor VPN. Desaparece al borrar este stack.
-#    * AppFromVpnIngress -> lo mismo para el panel de RabbitMQ (15672) en la EC2
-#      de la aplicacion: http://<IP privada de la EC2>:15672 desde tu equipo.
+#    * AppFromVpnIngress, AppPanel2FromVpnIngress, AdminRabbitFromVpnIngress
+#      -> lo mismo en la EC2 de la aplicacion, para los paneles de los dos
+#      nodos de RabbitMQ (15672, 15673) y el administrador de RabbitMQ (8081):
+#      http://<IP privada de la EC2>:<puerto> desde tu equipo.
 #    * VpnInstance -> Ubuntu en t3.micro, sin par de llaves SSH y sin perfil
 #      IAM: no hay forma de "entrar" en la maquina; solo atravesarla.
 #
@@ -102,12 +104,25 @@ Parameters:
     Type: AWS::EC2::SecurityGroup::Id
     Description: >-
       Security group de la EC2 de la aplicacion (Output AppSecurityGroupId de
-      network.yaml). Mientras exista la VPN, abre el panel de RabbitMQ al tunel.
+      network.yaml). Mientras exista la VPN, abre al tunel los paneles de
+      RabbitMQ y el administrador de RabbitMQ.
 
   RabbitPanelPort:
     Type: Number
     Default: 15672
-    Description: Puerto del panel de administracion de RabbitMQ en la EC2.
+    Description: Puerto del panel del nodo 1 de RabbitMQ en la EC2 (aws/backend/compose.yaml).
+
+  RabbitPanelSecondPort:
+    Type: Number
+    Default: 15673
+    Description: Puerto del panel del nodo 2 de RabbitMQ en la EC2 (aws/backend/compose.yaml).
+
+  AdminRabbitPort:
+    Type: Number
+    Default: 8081
+    Description: >-
+      Puerto del microservicio administrador de RabbitMQ en la EC2. No esta
+      detras de API Gateway: la VPN es su unico camino desde fuera de la VPC.
 
   DatabaseSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
@@ -196,10 +211,20 @@ Resources:
           FromPort: !Ref DbPort
           ToPort: !Ref DbPort
           DestinationSecurityGroupId: !Ref DatabaseSecurityGroupId
-        - Description: Panel de RabbitMQ en la EC2 de la aplicacion
+        - Description: Panel de RabbitMQ (nodo 1) en la EC2 de la aplicacion
           IpProtocol: tcp
           FromPort: !Ref RabbitPanelPort
           ToPort: !Ref RabbitPanelPort
+          DestinationSecurityGroupId: !Ref AppSecurityGroupId
+        - Description: Panel de RabbitMQ (nodo 2) en la EC2 de la aplicacion
+          IpProtocol: tcp
+          FromPort: !Ref RabbitPanelSecondPort
+          ToPort: !Ref RabbitPanelSecondPort
+          DestinationSecurityGroupId: !Ref AppSecurityGroupId
+        - Description: Administrador de RabbitMQ en la EC2 de la aplicacion
+          IpProtocol: tcp
+          FromPort: !Ref AdminRabbitPort
+          ToPort: !Ref AdminRabbitPort
           DestinationSecurityGroupId: !Ref AppSecurityGroupId
       Tags:
         - Key: Name
@@ -225,10 +250,33 @@ Resources:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref AppSecurityGroupId
-      Description: Panel de RabbitMQ desde el servidor VPN (temporal)
+      Description: Panel de RabbitMQ nodo 1 desde el servidor VPN (temporal)
       IpProtocol: tcp
       FromPort: !Ref RabbitPanelPort
       ToPort: !Ref RabbitPanelPort
+      SourceSecurityGroupId: !Ref VpnSecurityGroup
+
+  # El panel del nodo 2: el mismo cluster, visto desde el otro miembro.
+  AppPanel2FromVpnIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      Description: Panel de RabbitMQ nodo 2 desde el servidor VPN (temporal)
+      IpProtocol: tcp
+      FromPort: !Ref RabbitPanelSecondPort
+      ToPort: !Ref RabbitPanelSecondPort
+      SourceSecurityGroupId: !Ref VpnSecurityGroup
+
+  # El administrador de RabbitMQ (admin-rabbit). Exige igualmente un JWT de
+  # empleado: la VPN solo da el camino, no el permiso.
+  AdminRabbitFromVpnIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      Description: Administrador de RabbitMQ desde el servidor VPN (temporal)
+      IpProtocol: tcp
+      FromPort: !Ref AdminRabbitPort
+      ToPort: !Ref AdminRabbitPort
       SourceSecurityGroupId: !Ref VpnSecurityGroup
 
   # ---------------------------------------------------------------------------

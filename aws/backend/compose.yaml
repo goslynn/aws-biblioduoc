@@ -1,0 +1,148 @@
+# ==============================================================================
+#  biblioteca / aws/backend/compose.yaml   --   Todo lo que corre en la EC2 de la app
+# ==============================================================================
+#
+#  QUE LEVANTA
+#    rabbitmq-1    nodo 1 del cluster RabbitMQ + panel  (VPN: <ip>:15672)
+#    rabbitmq-2    nodo 2 del cluster RabbitMQ + panel  (VPN: <ip>:15673)
+#    app           la API Spring Boot (back/)           (NLB: <ip>:8080)
+#    admin-rabbit  el administrador de RabbitMQ         (VPN: <ip>:8081)
+#
+#  QUIEN LO EJECUTA, Y CON QUE
+#    No se lanza a mano. Viaja dentro del paquete que sube
+#    aws/pipeline/build-backend.sh (biblioteca-backend.tar.gz, junto a los dos
+#    jars y a rabbitmq.conf) y lo arranca /opt/biblioteca/arrancar.sh, el
+#    script del servicio systemd "biblioteca" que deja el UserData de
+#    aws/backend.yaml. Ese script, en CADA arranque:
+#      1. baja el paquete (la version exacta que anoto el pipeline),
+#      2. escribe los archivos de entorno en /run/biblioteca (tmpfs, 600) con
+#         la configuracion de SSM y los secretos de Secrets Manager,
+#      3. y corre:  docker compose -p biblioteca -f compose.yaml up -d --wait
+#
+#    Para verlo en la EC2 (por SSM):
+#      cd /opt/biblioteca/paquete && docker compose -p biblioteca ps
+#      docker exec biblioteca-rabbitmq-1-1 rabbitmqctl cluster_status
+#
+#  VARIABLES QUE PONE arrancar.sh (no hay ningun valor de AWS escrito aqui)
+#    AWS_REGION, GRUPO_LOGS   destino de los logs (driver awslogs)
+#    APP_PUERTO               el AppPort del stack (al que apunta el NLB)
+#
+#  PUERTOS
+#    5672 (AMQP) no se publica: la app y el admin llegan por la red interna de
+#    compose, por nombre de servicio. Lo publicado solo es alcanzable desde la
+#    VPC: el security group de la EC2 abre el puerto de la app al NLB, y los
+#    paneles y el admin solo a la VPN (aws/vpn.yaml).
+#
+#  MEMORIA (t3.medium, 4 GiB)
+#    2 x RabbitMQ 768 MiB + app 1 GiB + admin 512 MiB = ~3 GiB. Los -Xmx son
+#    fijos: con MaxRAMPercentage, cada JVM calcularia sobre la memoria de la
+#    maquina y no sobre su limite.
+# ==============================================================================
+
+name: biblioteca
+
+# Destino comun de los logs; cada servicio anade su propio stream.
+x-logs: &logs
+  awslogs-region: ${AWS_REGION}
+  awslogs-group: ${GRUPO_LOGS}
+
+# Lo que comparten los dos nodos: misma imagen, misma configuracion de
+# cluster, mismas credenciales y misma Erlang cookie (rabbitmq.env).
+x-rabbitmq: &rabbitmq
+  image: public.ecr.aws/docker/library/rabbitmq:4.1-management-alpine
+  env_file: /run/biblioteca/rabbitmq.env
+  restart: unless-stopped
+  mem_limit: 768m
+  healthcheck:
+    # El nodo acepta conexiones AMQP: es lo que necesitan la app y el admin.
+    test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+    interval: 10s
+    timeout: 10s
+    start_period: 30s
+    retries: 30
+
+services:
+
+  rabbitmq-1:
+    <<: *rabbitmq
+    # Nombre de nodo rabbit@rabbitmq-1 (ver rabbitmq.conf).
+    hostname: rabbitmq-1
+    ports: ["15672:15672"]
+    volumes:
+      - rabbitmq-1-datos:/var/lib/rabbitmq
+      - ./enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: rabbitmq-1
+
+  rabbitmq-2:
+    <<: *rabbitmq
+    hostname: rabbitmq-2
+    # El panel del nodo 2 en otro puerto de la maquina: muestra el MISMO
+    # cluster que el del nodo 1, visto desde el otro miembro.
+    ports: ["15673:15672"]
+    volumes:
+      - rabbitmq-2-datos:/var/lib/rabbitmq
+      - ./enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./rabbitmq.conf:/etc/rabbitmq/conf.d/20-cluster.conf:ro
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: rabbitmq-2
+
+  app:
+    image: public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless
+    # El jar y la CA de RDS (sslmode=verify-full) estan en /opt/biblioteca.
+    command: ["java", "-Xmx768m", "-jar", "/opt/biblioteca/paquete/biblioteca-backend.jar"]
+    env_file: /run/biblioteca/app.env
+    volumes:
+      - /opt/biblioteca:/opt/biblioteca:ro
+    ports: ["${APP_PUERTO}:8080"]
+    restart: unless-stopped
+    mem_limit: 1g
+    # La API declara la topologia al conectarse: que esten los DOS nodos,
+    # para que las colas quorum nazcan con replica en ambos.
+    depends_on:
+      rabbitmq-1:
+        condition: service_healthy
+      rabbitmq-2:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: app
+
+  admin-rabbit:
+    image: public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless
+    command: ["java", "-Xmx256m", "-jar", "/opt/biblioteca/paquete/biblioteca-admin-rabbit.jar"]
+    # Su propio archivo de entorno: solo Cognito y RabbitMQ. No ve las
+    # credenciales de la base ni del SMTP.
+    env_file: /run/biblioteca/admin-rabbit.env
+    volumes:
+      - /opt/biblioteca/paquete:/opt/biblioteca/paquete:ro
+    ports: ["8081:8081"]
+    restart: unless-stopped
+    mem_limit: 512m
+    depends_on:
+      rabbitmq-1:
+        condition: service_healthy
+      rabbitmq-2:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: admin-rabbit
+
+# Un volumen por nodo: cada uno guarda su parte del cluster (y su identidad).
+# Nombre fijo para que no dependa del nombre del proyecto de compose.
+volumes:
+  rabbitmq-1-datos:
+    name: rabbitmq-1-datos
+  rabbitmq-2-datos:
+    name: rabbitmq-2-datos

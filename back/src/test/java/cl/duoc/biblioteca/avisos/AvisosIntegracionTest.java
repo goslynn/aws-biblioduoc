@@ -378,16 +378,19 @@ class AvisosIntegracionTest {
     }
 
     @Test
-    @DisplayName("evento envenenado: NACK sin requeue y directo a eventos.fallidos")
+    @DisplayName("evento envenenado: NACK sin requeue y directo a la DLQ de CADA cola que lo recibio")
     void eventoEnvenenado() {
         String marca = "envenenado-" + UUID.randomUUID();
         rabbit.send(TopologiaRabbit.EXCHANGE_EVENTOS, "solicitud.creada",
                 MessageBuilder.withBody(("{ esto no es json " + marca).getBytes(StandardCharsets.UTF_8)).build());
 
-        // Llega a eventos.fallidos dos veces: lo rechazan notif.prestamos y bitacora (las dos lo reciben).
-        Message apartado = esperarFallido(TopologiaRabbit.COLA_EVENTOS_FALLIDOS, marca);
-        assertThat(apartado.getMessageProperties().getXDeathHeader())
-                .anyMatch(m -> "rejected".equals(String.valueOf(m.get("reason"))));
+        // Lo reciben notif.prestamos y bitacora; cada una lo rechaza y lo
+        // aparta en SU DLQ. notif.disponibilidad no lo recibe (otro binding).
+        for (String dlq : List.of(TopologiaRabbit.COLA_NOTIF_PRESTAMOS_DLQ, TopologiaRabbit.COLA_BITACORA_DLQ)) {
+            Message apartado = esperarFallido(dlq, marca);
+            assertThat(apartado.getMessageProperties().getXDeathHeader())
+                    .anyMatch(m -> "rejected".equals(String.valueOf(m.get("reason"))));
+        }
     }
 
     @Test

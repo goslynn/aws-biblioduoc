@@ -1,0 +1,87 @@
+info:
+  name: delete-binding
+  type: http
+  seq: 5
+
+http:
+  method: DELETE
+  # Los query params van en la URL Y en "params", igual que los guarda la
+  # aplicacion de Bruno. MEDIDO con bru 4.2.1: si solo estan en "params", el
+  # runner de terminal NO los agrega a la URL y el servicio responde 400
+  # (faltan exchange, cola y routingKey). Al editarlos en la pestana Params,
+  # la aplicacion mantiene las dos cosas sincronizadas.
+  url: "{{ADMIN_URL}}/api/admin/bindings?exchange=demo.topic&cola=demo.cola&routingKey=libro.*"
+  params:
+    - name: exchange
+      value: "demo.topic"
+      type: query
+      description: Origen del binding.
+    - name: cola
+      value: "demo.cola"
+      type: query
+      description: Destino del binding. Con notif.prestamos se ve el 409 de la topologia protegida.
+    - name: routingKey
+      value: "libro.*"
+      type: query
+      description: La clave con que se creo. Puede ser vacia, pero no puede faltar.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 204 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Eliminar un binding
+
+  `DELETE /api/admin/bindings?exchange=..&cola=..&routingKey=..`. Un binding
+  no tiene nombre: lo identifican sus tres partes. Van en la URL y no en un
+  cuerpo porque un DELETE con cuerpo no es fiable a traves de proxies.
+
+  AMQP no permite preguntar si un binding existe, y RabbitMQ no da error al
+  quitar uno que no existe: por eso responde **204 en los dos casos**, una vez
+  comprobado que existen el exchange y la cola.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 204 | desenlazado (o ya no estaba) | entorno `aws-admin-vpn` |
+  | 400 | falta un parametro o un nombre es invalido | desactiva `routingKey` |
+  | 404 | el exchange o la cola no existen | `exchange = no-existe` |
+  | 409 | la cola es parte de la topologia protegida | `cola = notif.prestamos` |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 204 desenlazado
+    request:
+      url: "{{ADMIN_URL}}/api/admin/bindings?exchange=demo.topic&cola=demo.cola&routingKey=libro.*"
+      method: DELETE
+    response:
+      status: 204
+      statusText: No Content
+  - name: 400 falta la routingKey
+    request:
+      url: "{{ADMIN_URL}}/api/admin/bindings?exchange=demo.topic&cola=demo.cola"
+      method: DELETE
+    response:
+      status: 400
+      statusText: Bad Request
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 400,
+            "error": "Bad Request",
+            "mensaje": "La solicitud no es valida",
+            "detalles": {
+              "routingKey": "hay que indicar la routingKey (puede ser vacia: \"\")"
+            }
+          }

@@ -32,7 +32,13 @@ import org.springframework.context.annotation.Configuration;
  *     solicitud.* / recordatorio.* / aviso.*  -> notif.prestamos      (quorum)
  *     stock.repuesto                          -> notif.disponibilidad (quorum)
  *     #                                       -> bitacora             (quorum)
- *       las tres: x-delivery-limit=5, DLX eventos.dlx -> eventos.fallidos
+ *       las tres: x-delivery-limit=5 y DLX eventos.dlx, cada una con
+ *       su routing key de muerte = su nombre, asi que cada una tiene SU DLQ:
+ *
+ *  direct eventos.dlx
+ *     notif.prestamos      -> notif.prestamos.dlq
+ *     notif.disponibilidad -> notif.disponibilidad.dlq
+ *     bitacora             -> bitacora.dlq
  *
  *  direct correo
  *     transaccional -> correo.transaccional   (classic)
@@ -59,7 +65,11 @@ public class TopologiaRabbit {
     public static final String COLA_NOTIF_PRESTAMOS = "notif.prestamos";
     public static final String COLA_NOTIF_DISPONIBILIDAD = "notif.disponibilidad";
     public static final String COLA_BITACORA = "bitacora";
-    public static final String COLA_EVENTOS_FALLIDOS = "eventos.fallidos";
+    /** Cada cola de eventos tiene SU DLQ: el mismo nombre con este sufijo. */
+    public static final String SUFIJO_DLQ = ".dlq";
+    public static final String COLA_NOTIF_PRESTAMOS_DLQ = COLA_NOTIF_PRESTAMOS + SUFIJO_DLQ;
+    public static final String COLA_NOTIF_DISPONIBILIDAD_DLQ = COLA_NOTIF_DISPONIBILIDAD + SUFIJO_DLQ;
+    public static final String COLA_BITACORA_DLQ = COLA_BITACORA + SUFIJO_DLQ;
 
     public static final String EXCHANGE_CORREO = "correo";
     public static final String EXCHANGE_CORREO_REINTENTO = "correo.reintento";
@@ -75,8 +85,8 @@ public class TopologiaRabbit {
     /** Igual, pero de a un mensaje: para el correo masivo, que no debe acaparar el SMTP. */
     public static final String FABRICA_MASIVA = "fabricaMasiva";
 
-    /** Cuantas veces entrega el broker un evento antes de mandarlo a eventos.fallidos. */
-    private static final int LIMITE_ENTREGAS = 5;
+    /** Cuantas devoluciones (NACK con requeue) admite un evento antes de que el broker lo aparte en su DLQ. */
+    public static final int LIMITE_ENTREGAS = 5;
 
     @Bean
     Declarables topologiaEventos() {
@@ -86,18 +96,24 @@ public class TopologiaRabbit {
         Queue prestamos = colaDeEventos(COLA_NOTIF_PRESTAMOS);
         Queue disponibilidad = colaDeEventos(COLA_NOTIF_DISPONIBILIDAD);
         Queue bitacora = colaDeEventos(COLA_BITACORA);
-        Queue fallidos = QueueBuilder.durable(COLA_EVENTOS_FALLIDOS).build();
+        Queue prestamosDlq = QueueBuilder.durable(COLA_NOTIF_PRESTAMOS_DLQ).build();
+        Queue disponibilidadDlq = QueueBuilder.durable(COLA_NOTIF_DISPONIBILIDAD_DLQ).build();
+        Queue bitacoraDlq = QueueBuilder.durable(COLA_BITACORA_DLQ).build();
 
-        return new Declarables(eventos, dlx, prestamos, disponibilidad, bitacora, fallidos,
+        return new Declarables(eventos, dlx, prestamos, disponibilidad, bitacora,
+                prestamosDlq, disponibilidadDlq, bitacoraDlq,
                 BindingBuilder.bind(prestamos).to(eventos).with("solicitud.*"),
                 BindingBuilder.bind(prestamos).to(eventos).with("recordatorio.*"),
                 BindingBuilder.bind(prestamos).to(eventos).with("aviso.*"),
                 BindingBuilder.bind(disponibilidad).to(eventos).with(TiposEvento.STOCK_REPUESTO),
                 // "#" = cero o mas palabras: TODO lo que se publique.
                 BindingBuilder.bind(bitacora).to(eventos).with("#"),
-                // Todo lo que muere en cualquiera de las tres colas llega al DLX
-                // con la routing key "fallido" (x-dead-letter-routing-key).
-                BindingBuilder.bind(fallidos).to(dlx).with("fallido"));
+                // Lo que muere en una cola llega al DLX con el NOMBRE de esa
+                // cola como routing key (x-dead-letter-routing-key), y el
+                // exchange direct lo deja en la DLQ que le corresponde.
+                BindingBuilder.bind(prestamosDlq).to(dlx).with(COLA_NOTIF_PRESTAMOS),
+                BindingBuilder.bind(disponibilidadDlq).to(dlx).with(COLA_NOTIF_DISPONIBILIDAD),
+                BindingBuilder.bind(bitacoraDlq).to(dlx).with(COLA_BITACORA));
     }
 
     @Bean
@@ -146,7 +162,7 @@ public class TopologiaRabbit {
                 .quorum()
                 .deliveryLimit(LIMITE_ENTREGAS)
                 .deadLetterExchange(EXCHANGE_EVENTOS_DLX)
-                .deadLetterRoutingKey("fallido")
+                .deadLetterRoutingKey(nombre)
                 .build();
     }
 

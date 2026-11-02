@@ -4,9 +4,11 @@
 # README pero vive solo en local.
 .context/
 
-# ---- Backend (Maven) ----
-back/target/
-back/.mvn/wrapper/maven-wrapper.jar
+# ---- Backend (Maven multi-modulo: comun, back, admin-rabbit) ----
+# target/ de cada modulo y el jar del wrapper, que mvnw descarga solo.
+/*/target/
+/target/
+.mvn/wrapper/maven-wrapper.jar
 
 # ---- Frontend (React + Vite) ----
 front/node_modules/

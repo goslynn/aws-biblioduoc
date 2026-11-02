@@ -5,7 +5,8 @@ info:
   summary: >-
     API interna de la Biblioteca Duoc: catalogo de libros, solicitudes de
     prestamo, gestion por empleados y avisos por correo, detras de API Gateway
-    con authorizer de Cognito.
+    con authorizer de Cognito. Incluye el administrador de RabbitMQ (otro
+    microservicio, solo por la VPN).
   version: 1.0.0
 
 # Autenticacion declarada UNA sola vez. Todas las peticiones heredan
@@ -36,6 +37,7 @@ docs: |
   | `solicitudes` | todos: crear y consultar las propias |
   | `avisos` | todos: activar o desactivar los correos |
   | `gestion` | solo empleados (403 para el resto) |
+  | `admin` | **otro microservicio**: el administrador de RabbitMQ (colas, exchanges, bindings). Solo empleados y solo por la VPN |
 
   ## La matriz de seguridad vive en los ENTORNOS
 
@@ -92,6 +94,16 @@ docs: |
   bru run --env aws-usuario-sin-scope   # 401
   bru run --env aws-id-token            # 401
   bru run --env aws-token-invalido      # 401
+  ```
+
+  La carpeta `admin` habla con otro servicio (`admin-rabbit`, puerto 8081 de
+  la EC2), que **no esta detras de API Gateway**. En estos cinco entornos se
+  **salta** (no tienen `ADMIN_URL`). Tiene sus propios dos entornos y se corre
+  sola, con la VPN levantada (`./aws/scripts/vpn-up.sh`):
+
+  ```sh
+  bru run admin --env aws-admin-vpn             # 201 / 200 / 204 (empleado)
+  bru run admin --env aws-admin-vpn-estudiante  # 403
   ```
 
   En NixOS, si OpenSSL se queja del directorio de certificados:

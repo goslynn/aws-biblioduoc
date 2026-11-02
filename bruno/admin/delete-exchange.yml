@@ -1,0 +1,68 @@
+info:
+  name: delete-exchange
+  type: http
+  seq: 7
+
+http:
+  method: DELETE
+  url: "{{ADMIN_URL}}/api/admin/exchanges/:nombre"
+  params:
+    - name: nombre
+      value: "demo.topic"
+      type: path
+      description: >-
+        El exchange a borrar. Con biblioteca.eventos se ve el 409 de la
+        topologia protegida.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 204 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Eliminar un exchange
+
+  `DELETE /api/admin/exchanges/{nombre}`. Sus bindings desaparecen con el.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 204 | borrado | entorno `aws-admin-vpn` |
+  | 400 | nombre invalido (`amq.*` incluido) | `nombre = amq.direct` |
+  | 404 | no existe | ejecutala dos veces |
+  | 409 | es parte de la topologia protegida | `nombre = biblioteca.eventos` |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 204 borrado
+    request:
+      url: "{{ADMIN_URL}}/api/admin/exchanges/demo.topic"
+      method: DELETE
+    response:
+      status: 204
+      statusText: No Content
+  - name: 409 topologia protegida
+    request:
+      url: "{{ADMIN_URL}}/api/admin/exchanges/biblioteca.eventos"
+      method: DELETE
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "biblioteca.eventos es parte de la topologia de la biblioteca y no se puede modificar",
+            "detalles": {}
+          }

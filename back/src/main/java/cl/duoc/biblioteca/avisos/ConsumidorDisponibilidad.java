@@ -13,6 +13,7 @@ import com.rabbitmq.client.Channel;
 
 import cl.duoc.biblioteca.catalogo.SuscripcionesLibro;
 import cl.duoc.biblioteca.eventos.Evento;
+import cl.duoc.biblioteca.eventos.Entregas;
 import cl.duoc.biblioteca.eventos.TopologiaRabbit;
 
 /**
@@ -67,12 +68,20 @@ public class ConsumidorDisponibilidad {
             log.info("{} repuesto: {} avisos encolados", libroId, interesados.size());
             canal.basicAck(tag, false);
         } catch (MensajeInvalido e) {
-            log.warn("mensaje invalido en {}, va a la DLQ: {}",
-                    TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, e.getMessage());
+            log.warn("mensaje invalido en {}, va a {}: {}",
+                    TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD_DLQ, e.getMessage());
             canal.basicNack(tag, false, false);
         } catch (RuntimeException e) {
-            log.warn("fallo transitorio en {}, se reintenta: {}",
-                    TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, e.toString());
+            if (Entregas.esUltima(mensaje)) {
+                // El requeue ya no reintenta: el broker lo aparta en la DLQ
+                // por x-delivery-limit. Se registra aqui, que es el ultimo
+                // momento en que la aplicacion lo ve.
+                log.error("fallo en {} tras {} reintentos, el broker lo aparta en {}: {}",
+                        TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, Entregas.previas(mensaje),
+                        TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD_DLQ, e.toString());
+            } else {
+                log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, e.toString());
+            }
             canal.basicNack(tag, false, true);
         }
     }

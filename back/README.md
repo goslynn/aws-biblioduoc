@@ -1,13 +1,17 @@
 # Backend · biblioteca-backend
 
 API de la Biblioteca Duoc. **Spring Boot 4.1 sobre Java 21**, compilada con el
-Maven Wrapper (no hace falta tener Maven instalado).
+Maven Wrapper (no hace falta tener Maven instalado). Es uno de los modulos del
+build multi-modulo de la raiz (`pom.xml`): junto a `comun/` (validacion del
+JWT, roles, errores) y `admin-rabbit/` (el administrador de RabbitMQ, el otro
+microservicio).
 
 El artefacto es un **fat jar** que corre como un proceso que vive siempre, en
-un contenedor de la EC2 de `aws/backend.yaml`, junto al broker **RabbitMQ**:
+un contenedor de la EC2 de `aws/backend.yaml`, junto al **cluster RabbitMQ**
+de dos nodos (`aws/backend/compose.yaml`):
 
 ```sh
-java -jar target/biblioteca-backend-0.0.1-SNAPSHOT.jar
+java -jar back/target/biblioteca-backend-0.0.1-SNAPSHOT.jar
 ```
 
 En ese mismo proceso conviven tres cosas:
@@ -50,7 +54,8 @@ src/main/java/cl/duoc/biblioteca/
 │   ├── Evento.java  TiposEvento.java   el sobre de todos los eventos y sus routing keys
 │   ├── BandejaDeSalida.java        outbox: el evento se escribe en la transaccion del negocio
 │   ├── RelayEventos.java           @Scheduled: publica la bandeja con publisher confirms
-│   └── TopologiaRabbit.java        exchanges, colas, DLX, TTL y fabricas de listeners (ACK manual)
+│   ├── Entregas.java               x-delivery-count: reconoce el ultimo intento antes de la DLQ
+│   └── TopologiaRabbit.java        exchanges, colas, una DLQ por cola, TTL y fabricas de listeners (ACK manual)
 ├── avisos/
 │   ├── ContactoController.java     GET|PUT|DELETE /api/avisos/correo (el consentimiento)
 │   ├── DirectorioUsuarios.java  DirectorioCognito.java   email verificado por sub (ListUsers)
@@ -65,11 +70,11 @@ src/main/java/cl/duoc/biblioteca/
 │   ├── ConsumidorBitacora.java     cola "bitacora" (binding #): copia de TODO evento
 │   ├── Bitacora.java  BitacoraController.java     GET /api/gestion/bitacora    (EMPLEADO)
 ├── web/
-│   ├── SaludController.java        GET /health, el health check del NLB
-│   └── ManejadorDeErrores.java     convierte los fallos de validacion en 400 utiles
+│   └── SaludController.java        GET /health, el health check del NLB
 └── config/
-    ├── SecurityConfig.java         segunda validacion del JWT, RBAC (rol EMPLEADO) y CORS
-    └── Roles.java
+    └── SecurityConfig.java         reglas de ruta (RBAC: rol EMPLEADO) y CORS. El
+                                    decodificador del JWT, el rol y ManejadorDeErrores
+                                    estan en ../comun (cl.duoc.biblioteca.comun)
 src/main/resources/
 ├── application.properties
 └── db/migration/                   las aplica Flyway al arrancar, como usuario maestro
@@ -79,7 +84,8 @@ src/main/resources/
 src/test/java/cl/duoc/biblioteca/
 ├── ServiciosDePrueba.java          PostgreSQL y RabbitMQ en Docker, GreenMail, Cognito falso
 ├── Tokens.java                     tokens simulados por actor, con el convertidor REAL de roles
-└── avisos/AvisosIntegracionTest.java  las historias de usuario de punta a punta
+├── avisos/AvisosIntegracionTest.java  las historias de usuario de punta a punta
+└── eventos/EntregasTest.java       cuando un NACK con requeue ya va a la DLQ
 ```
 
 ---
@@ -87,10 +93,10 @@ src/test/java/cl/duoc/biblioteca/
 ## 2. Compilar y probar
 
 ```sh
-cd back
-./mvnw package          # compila y pasa los 34 tests
-./mvnw test
-./mvnw test -Dtest=AvisosIntegracionTest
+# desde la RAIZ del repositorio (el wrapper y el pom padre estan ahi)
+./mvnw package                       # los tres modulos: 49 tests (36 de este)
+./mvnw -pl back -am package          # solo este modulo y comun
+./mvnw -pl back -am test -Dtest=AvisosIntegracionTest -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
 **Hace falta Docker**: los tests levantan un **PostgreSQL 16** y un **RabbitMQ
@@ -110,7 +116,8 @@ regla real de quien es empleado, no una lista de authorities escrita a mano.
 bandeja de salida → RabbitMQ → consumidor → correo en GreenMail), y tambien los
 fallos: SMTP parado (tres vueltas por `correo.espera` y a `correo.fallidos`),
 SMTP que vuelve a tiempo, direccion invalida (directo a la DLQ), evento con JSON
-roto (NACK sin requeue a `eventos.fallidos`).
+roto (NACK sin requeue a la DLQ de CADA cola que lo recibio: `notif.prestamos.dlq`
+y `bitacora.dlq`).
 
 ### Configuracion que recibe
 
@@ -132,7 +139,7 @@ archivo de entorno del contenedor (ver `aws/backend.yaml`).
 | `SPRING_DATASOURCE_USERNAME` / `_PASSWORD` | Rol `biblioteca_app` |
 | `SPRING_FLYWAY_USER` / `_PASSWORD` | Usuario maestro, solo para las migraciones |
 | `BIBLIOTECA_APP_PASSWORD` | La de `biblioteca_app`, para que V1 cree el rol |
-| `RABBITMQ_HOST` / `_USER` / `_PASSWORD` | El broker, en el contenedor vecino (`rabbitmq`) |
+| `RABBITMQ_ADDRESSES` / `_USER` / `_PASSWORD` | Los dos nodos del cluster (`rabbitmq-1:5672,rabbitmq-2:5672`), en la red de compose |
 | `SMTP_HOST` / `_PORT` / `_USER` / `_PASSWORD` / `_FROM` | El proveedor de correo (587 + STARTTLS) |
 
 Las credenciales de AWS (para `ListUsers` de Cognito) no son variables: el SDK
@@ -177,7 +184,14 @@ condicionales).
 |---|---|---|
 | `basicAck` | procesado (con correo encolado, o sin nada que hacer) | el broker lo borra |
 | `basicNack(requeue=false)` | el mensaje es invalido (`MensajeInvalido`) | va al DLX → DLQ, sin reintentos inutiles |
-| `basicNack(requeue=true)` | fallo del entorno (base caida) | vuelve a la cola; la cola **quorum** cuenta entregas y a la 5.ª lo aparta sola |
+| `basicNack(requeue=true)` | fallo del entorno (base caida) | vuelve a la cola; la cola **quorum** cuenta las devoluciones (`x-delivery-count`) y, pasado `x-delivery-limit` (5), la aparta sola en su DLQ. En el ultimo intento el consumidor lo registra con `log.error` (`Entregas.esUltima`): sin eso, lo que aparta el broker no dejaria rastro en los logs |
+
+**Una DLQ por cola de eventos.** Las tres colas de eventos mueren en el mismo
+exchange direct `eventos.dlx`, pero cada una con SU nombre como
+`x-dead-letter-routing-key`, y cada routing key lleva a su propia DLQ:
+`notif.prestamos.dlq`, `notif.disponibilidad.dlq`, `bitacora.dlq`. En el panel
+se ve de un vistazo QUE consumidor fallo. El correo conserva su esquema
+propio (reintento con espera y `correo.fallidos`, abajo).
 
 **Dos estrategias de reintento, a proposito.** Los consumidores de eventos
 fallan por causas internas y breves: reintento inmediato (requeue) con limite
@@ -288,5 +302,6 @@ atraveso el authorizer, el VPC Link y llego al controlador.
 |---|---|---|
 | La app no arranca: `PRECONDITION_FAILED - inequivalent arg 'x-message-ttl'` | Cambiaste `biblioteca.correo.espera-reintento` (u otro argumento de cola) con la cola ya creada | Borra esa cola desde el panel y reinicia la app: la vuelve a declarar |
 | Los correos no llegan y `correo.fallidos` crece | El SMTP rechaza (credenciales, remitente no verificado) | Lee el header `x-motivo-fallo` en el panel; corrige y mueve los mensajes de vuelta a `correo.transaccional` (*Move messages*) |
-| `eventos.fallidos` tiene mensajes | Un evento que ningun consumidor pudo procesar | Inspeccionalo en el panel; si era un fallo del entorno, muevelo de vuelta |
+| Una `*.dlq` de eventos tiene mensajes | Un evento que ESE consumidor no pudo procesar (invalido, o fallo 6 veces) | Inspeccionalo en el panel y busca el `log.warn`/`log.error` en el stream `app`; si era un fallo del entorno, muevelo de vuelta a su cola (*Move messages*) |
+| La app no arranca: `PRECONDITION_FAILED - inequivalent arg 'x-dead-letter-routing-key'` | Un broker que tenia las colas de eventos de antes (DLQ comun `eventos.fallidos`) | Borra `notif.prestamos`, `notif.disponibilidad` y `bitacora` en el panel (o los volumenes del cluster). En AWS no pasa: el cluster nuevo nace vacio |
 | Una solicitud creada no genera correo | Avisos no activados, o la bandeja de salida no se vacia (broker caido) | `GET /api/avisos/correo`; mira los logs de `RelayEventos` |

@@ -1,13 +1,13 @@
-package cl.duoc.biblioteca.config;
+package cl.duoc.biblioteca.comun.seguridad;
 
 import org.springframework.security.core.Authentication;
 
 /**
  * El unico rol de la aplicacion aparte del estudiante.
  *
- * No lo trae ningun token tal cual: lo DEDUCE SecurityConfig a partir del
+ * No lo trae ningun token tal cual: lo DEDUCE ValidacionJwt a partir del
  * grupo de Cognito (personas) o del scope de gestion (el cliente M2M
- * backoffice). Ver {@link SecurityConfig#autoridades}.
+ * backoffice). Ver {@link ValidacionJwt#autoridades}.
  */
 public final class Roles {
 

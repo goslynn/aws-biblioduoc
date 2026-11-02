@@ -4,26 +4,30 @@
 # ==============================================================================
 #
 #  QUE HACE, EN CINCO PASOS
-#    1. COMPILA    ./mvnw package  ->  back/target/biblioteca-backend-*.jar
-#                  (los tests levantan PostgreSQL y RabbitMQ en Docker: hace
-#                  falta Docker, o SKIP_TESTS=true)
-#    2. PUBLICA    sube el fat jar al bucket de artefactos y anota su VersionId
-#    3. DESPLIEGA  crea o actualiza el stack del backend (EC2 + RabbitMQ + NLB).
-#                  La PRIMERA vez, CloudFormation espera a que /health responda
-#                  dentro de la instancia (CreationPolicy) antes de darlo por
-#                  creado.
+#    1. COMPILA    ./mvnw package en la raiz: los modulos comun, back y
+#                  admin-rabbit (los tests levantan PostgreSQL y RabbitMQ en
+#                  Docker: hace falta Docker, o SKIP_TESTS=true)
+#    2. PUBLICA    empaqueta los DOS fat jars (API y administrador) con
+#                  aws/backend/compose.yaml, rabbitmq.conf y enabled_plugins en
+#                  un .tar.gz, lo sube al bucket de artefactos y anota su
+#                  VersionId
+#    3. DESPLIEGA  crea o actualiza el stack del backend (EC2 + NLB).
+#                  Cuando se crea la instancia, CloudFormation espera a que
+#                  /health responda dentro de ella (CreationPolicy) antes de
+#                  darla por creada.
 #    4. REINICIA   si la instancia ya existia, le pide por SSM Run Command que
-#                  anote la version nueva del jar y reinicie el servicio
-#                  biblioteca-app. El script de arranque vuelve a leer TODO:
-#                  jar, configuracion (SSM) y secretos.
+#                  anote la version nueva del paquete y reinicie el servicio
+#                  biblioteca. El script de arranque vuelve a leer TODO:
+#                  paquete, configuracion (SSM) y secretos, y relanza
+#                  docker compose.
 #    5. ESPERA     a que el NLB vuelva a dar la instancia por sana. Es estado
 #                  del despliegue, no una prueba de la API.
 #
 #  POR QUE EL PASO 4 Y NO "RECREAR LA INSTANCIA"
-#    Recrear la EC2 en cada despliegue tardaria minutos y borraria el volumen
-#    de RabbitMQ (colas y mensajes pendientes). El stack sigue siendo la fuente
+#    Recrear la EC2 en cada despliegue tardaria minutos y borraria los
+#    volumenes del cluster RabbitMQ (colas y mensajes pendientes). El stack sigue siendo la fuente
 #    de la verdad de la INFRAESTRUCTURA y de la configuracion (parametro de
-#    SSM); el jar es un artefacto versionado en S3, y la version que corre
+#    SSM); el paquete es un artefacto versionado en S3, y la version que corre
 #    queda escrita en /etc/biblioteca/version.
 #
 #  USO
@@ -53,10 +57,10 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/_comun.sh"
 
 SKIP_TESTS="${SKIP_TESTS:-false}"
-OBJECT_KEY="backend/${PROJECT_NAME}-backend.jar"
+OBJECT_KEY="backend/${PROJECT_NAME}-backend.tar.gz"
 
-requiere aws curl jq
-[ -x "${ROOT}/back/mvnw" ] || die "no encuentro back/mvnw"
+requiere aws curl jq tar
+[ -x "${ROOT}/mvnw" ] || die "no encuentro ./mvnw en la raiz del repositorio"
 
 cuenta_aws >/dev/null
 
@@ -104,35 +108,51 @@ JWKS="$(curl -fsS "${ISSUER_URL}/.well-known/jwks.json" | jq -ce 'select((.keys 
   || die "no pude descargar el JWKS de ${ISSUER_URL}"
 info "$(jq -r '.keys | map(.kid) | "claves: " + join(", ")' <<<"$JWKS")"
 
-# --- 1. Compilar --------------------------------------------------------------
-log "Compilando el backend con Maven"
+# --- 1. Compilar ---------------------------------------------------------------
+log "Compilando los microservicios con Maven (comun, back, admin-rabbit)"
 if [ "$SKIP_TESTS" = "true" ]; then
-  ( cd "${ROOT}/back" && ./mvnw -q -B -DskipTests package )
+  ( cd "$ROOT" && ./mvnw -q -B -DskipTests package )
 else
-  ( cd "${ROOT}/back" && ./mvnw -q -B package )
+  ( cd "$ROOT" && ./mvnw -q -B package )
 fi
 
 # El plugin de Spring Boot deja tambien un .jar.original, que es el jar SIN las
 # dependencias dentro. Ese no arranca solo: hay que quedarse con el fat jar.
-JAR="$(find "${ROOT}/back/target" -maxdepth 1 -name '*.jar' ! -name '*.original' ! -name '*-sources.jar' | head -n1)"
-[ -n "$JAR" ] || die "no encontre el jar en back/target/"
-info "jar $(basename "$JAR") ($(du -h "$JAR" | cut -f1))"
+fat_jar() {
+  find "${ROOT}/$1/target" -maxdepth 1 -name '*.jar' ! -name '*.original' ! -name '*-sources.jar' | head -n1
+}
+JAR_API="$(fat_jar back)"
+JAR_ADMIN="$(fat_jar admin-rabbit)"
+[ -n "$JAR_API" ] || die "no encontre el jar en back/target/"
+[ -n "$JAR_ADMIN" ] || die "no encontre el jar en admin-rabbit/target/"
+info "api   $(basename "$JAR_API") ($(du -h "$JAR_API" | cut -f1))"
+info "admin $(basename "$JAR_ADMIN") ($(du -h "$JAR_ADMIN" | cut -f1))"
 
-# --- 2. Publicar en S3 --------------------------------------------------------
+# --- 2. Empaquetar y publicar en S3 -----------------------------------------
+# Los nombres de dentro del paquete son los que espera aws/backend/compose.yaml.
+PAQUETE_DIR="$(mktemp -d)"
+trap 'rm -rf "$PAQUETE_DIR"' EXIT
+cp "$JAR_API" "${PAQUETE_DIR}/biblioteca-backend.jar"
+cp "$JAR_ADMIN" "${PAQUETE_DIR}/biblioteca-admin-rabbit.jar"
+cp "${ROOT}/aws/backend/compose.yaml" "${ROOT}/aws/backend/rabbitmq.conf" "${ROOT}/aws/backend/enabled_plugins" "$PAQUETE_DIR/"
+tar -czf "${PAQUETE_DIR}/paquete.tar.gz" -C "$PAQUETE_DIR" \
+  biblioteca-backend.jar biblioteca-admin-rabbit.jar compose.yaml rabbitmq.conf enabled_plugins
+info "paquete $(du -h "${PAQUETE_DIR}/paquete.tar.gz" | cut -f1)"
+
 log "Subiendo a s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}"
 # put-object en vez de "s3 cp" porque devuelve el VersionId: es lo que la EC2
 # descarga exactamente, y lo que queda anotado como version en ejecucion.
 VERSION_ID="$(aws s3api put-object \
   --bucket "$ARTIFACTS_BUCKET" \
   --key "$OBJECT_KEY" \
-  --body "$JAR" \
+  --body "${PAQUETE_DIR}/paquete.tar.gz" \
   --region "$AWS_REGION" \
   --query VersionId --output text)"
 info "VersionId ${VERSION_ID}"
 
 # --- 3. Desplegar el stack ----------------------------------------------------
 log "Desplegando el stack '${STACK_BACKEND}'"
-[ "$EXISTIA" = "true" ] || info "primera vez: la instancia instala Docker y arranca (~5 min)"
+[ "$EXISTIA" = "true" ] || info "primera vez: la instancia instala Docker y compose y forma el cluster (~6 min)"
 
 PARAMETROS=(
   "ProjectName=${PROJECT_NAME}"
@@ -170,15 +190,15 @@ INSTANCE_ID="$(output_obligatorio "$STACK_BACKEND" InstanceId)"
 TARGET_GROUP="$(output_obligatorio "$STACK_BACKEND" TargetGroupArn)"
 LOG_GROUP="$(output_obligatorio "$STACK_BACKEND" LogGroupName)"
 
-# --- 4. Reiniciar con el jar nuevo ----------------------------------------------
+# --- 4. Reiniciar con el paquete nuevo -------------------------------------------
 if [ "$EXISTIA" = "true" ]; then
   log "Reiniciando la aplicacion en ${INSTANCE_ID} (SSM Run Command)"
   COMANDOS="$(jq -nc --arg v "$VERSION_ID" \
-    '{commands: ["echo \($v) > /etc/biblioteca/version", "systemctl restart biblioteca-app"]}')"
+    '{commands: ["echo \($v) > /etc/biblioteca/version", "systemctl restart biblioteca"]}')"
   COMMAND_ID="$(aws ssm send-command \
     --instance-ids "$INSTANCE_ID" \
     --document-name AWS-RunShellScript \
-    --comment "biblioteca: desplegar jar ${VERSION_ID}" \
+    --comment "biblioteca: desplegar paquete ${VERSION_ID}" \
     --parameters "$COMANDOS" \
     --region "$AWS_REGION" \
     --query Command.CommandId --output text)" \
@@ -188,8 +208,9 @@ if [ "$EXISTIA" = "true" ]; then
   info "servicio reiniciado con la version ${VERSION_ID}"
 
   # --- 5. Esperar a que el NLB la de por sana ----------------------------------
-  # Spring tarda unos segundos en levantar; durante ese rato el NLB la marca
-  # como no sana y API Gateway responderia 500. Se espera a que vuelva.
+  # compose espera a los dos nodos y Spring tarda unos segundos en levantar;
+  # durante ese rato el NLB la marca como no sana y API Gateway responderia
+  # 500. Se espera a que vuelva.
   log "Esperando a que el NLB vuelva a dar la instancia por sana"
   sleep 30
   aws elbv2 wait target-in-service --target-group-arn "$TARGET_GROUP" \
@@ -203,7 +224,7 @@ cat <<EOF
     Instancia ${INSTANCE_ID}
     Codigo    s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY} (version ${VERSION_ID})
 
-    Logs de la app y de RabbitMQ:
+    Logs (streams app, admin-rabbit, rabbitmq-1, rabbitmq-2):
         aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}
 
     Si cambiaste rutas o metodos, acuerdate de volver a publicar la API:

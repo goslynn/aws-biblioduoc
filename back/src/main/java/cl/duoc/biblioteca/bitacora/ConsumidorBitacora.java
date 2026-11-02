@@ -13,6 +13,7 @@ import com.rabbitmq.client.Channel;
 
 import cl.duoc.biblioteca.avisos.LectorEventos;
 import cl.duoc.biblioteca.avisos.MensajeInvalido;
+import cl.duoc.biblioteca.eventos.Entregas;
 import cl.duoc.biblioteca.eventos.TopologiaRabbit;
 
 /**
@@ -44,10 +45,20 @@ public class ConsumidorBitacora {
             bitacora.anotar(lector.evento(mensaje), new String(mensaje.getBody(), StandardCharsets.UTF_8));
             canal.basicAck(tag, false);
         } catch (MensajeInvalido e) {
-            log.warn("mensaje invalido en {}, va a la DLQ: {}", TopologiaRabbit.COLA_BITACORA, e.getMessage());
+            log.warn("mensaje invalido en {}, va a {}: {}",
+                    TopologiaRabbit.COLA_BITACORA, TopologiaRabbit.COLA_BITACORA_DLQ, e.getMessage());
             canal.basicNack(tag, false, false);
         } catch (RuntimeException e) {
-            log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_BITACORA, e.toString());
+            if (Entregas.esUltima(mensaje)) {
+                // El requeue ya no reintenta: el broker lo aparta en la DLQ
+                // por x-delivery-limit. Se registra aqui, que es el ultimo
+                // momento en que la aplicacion lo ve.
+                log.error("fallo en {} tras {} reintentos, el broker lo aparta en {}: {}",
+                        TopologiaRabbit.COLA_BITACORA, Entregas.previas(mensaje),
+                        TopologiaRabbit.COLA_BITACORA_DLQ, e.toString());
+            } else {
+                log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_BITACORA, e.toString());
+            }
             canal.basicNack(tag, false, true);
         }
     }

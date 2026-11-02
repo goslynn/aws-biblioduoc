@@ -1,0 +1,89 @@
+info:
+  name: create-exchange
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{ADMIN_URL}}/api/admin/exchanges"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "nombre": "demo.topic",
+        "tipo": "TOPIC",
+        "durable": true
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN") === "exito" ? 201 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 201) {
+          test("devuelve el exchange creado y su ubicacion", function () {
+            const enviado = req.getBody();
+            expect(res.getBody().nombre).to.equal(enviado.nombre);
+            expect(res.getHeader("location")).to.equal("/api/admin/exchanges/" + enviado.nombre);
+          });
+        }
+
+docs: |
+  # Crear un exchange
+
+  `POST /api/admin/exchanges` con `{nombre, tipo, durable}`.
+  `tipo`: `DIRECT`, `TOPIC`, `FANOUT` o `HEADERS` (obligatorio). `durable`
+  es `true` si no se indica.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 201 | creado; `Location` apunta a el | entorno `aws-admin-vpn` |
+  | 400 | nombre vacio o invalido, `amq.*`, tipo ausente o desconocido | `"nombre": "amq.mio"`, o quita `tipo` |
+  | 409 | ya existe | ejecutala dos veces |
+  | 403 | el token no es de empleado | entorno `aws-admin-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 201 creado
+    request:
+      url: "{{ADMIN_URL}}/api/admin/exchanges"
+      method: POST
+    response:
+      status: 201
+      statusText: Created
+      headers:
+        - name: Location
+          value: /api/admin/exchanges/demo.topic
+      body:
+        type: json
+        data: '{"nombre": "demo.topic", "tipo": "TOPIC", "durable": true}'
+  - name: 400 nombre reservado
+    request:
+      url: "{{ADMIN_URL}}/api/admin/exchanges"
+      method: POST
+    response:
+      status: 400
+      statusText: Bad Request
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-01T14:00:00Z",
+            "status": 400,
+            "error": "Bad Request",
+            "mensaje": "La solicitud no es valida",
+            "detalles": {
+              "nombre": "el nombre solo admite minusculas, digitos, '.', '-' y '_', debe empezar por letra o digito y no puede empezar por 'amq.' (reservado de RabbitMQ)"
+            }
+          }

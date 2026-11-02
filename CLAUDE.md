@@ -59,15 +59,19 @@ sslip.io.
 **Un cambio en `api.yaml` no llega al stage solo**: `AWS::ApiGateway::Deployment`
 es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
 
-### Backend
+### Backend (Maven multi-modulo, desde la RAIZ)
+
+Dos microservicios Spring Boot y una libreria: `comun/` (ValidacionJwt, Roles,
+ManejadorDeErrores), `back/` (la API) y `admin-rabbit/` (el administrador de
+RabbitMQ). El wrapper y el pom padre estan en la raiz.
 
 ```sh
-cd back
-./mvnw package                                          # compila y corre los 34 tests (necesita Docker:
-                                                        #  PostgreSQL y RabbitMQ con Testcontainers, GreenMail)
-./mvnw test
-./mvnw test -Dtest=AvisosIntegracionTest                # una clase
-./mvnw test -Dtest=LibroControllerTest#nombreDelMetodo  # un test
+./mvnw package                                          # los tres modulos, 49 tests (36 back + 13 admin;
+                                                        #  necesita Docker: PostgreSQL y RabbitMQ con
+                                                        #  Testcontainers, GreenMail)
+./mvnw -pl back -am package                             # solo la API (y comun)
+./mvnw -pl back -am test -Dtest=AvisosIntegracionTest -Dsurefire.failIfNoSpecifiedTests=false
+./mvnw -pl admin-rabbit -am test -Dtest=AdminRabbitTest#seguridad -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
 ### Frontend
@@ -94,7 +98,15 @@ bru run --env aws-usuario-sin-scope             # 401
 bru run --env aws-id-token                      # 401
 bru run --env aws-token-invalido                # 401
 SSL_CERT_DIR=/etc/ssl/certs bru run --env aws   # NixOS, si OpenSSL se queja
+
+# administrador de RabbitMQ: otro servicio, solo por la VPN (vpn-up.sh)
+bru run admin --env aws-admin-vpn               # 201 / 200 / 204 (empleado)
+bru run admin --env aws-admin-vpn-estudiante    # 403
 ```
+
+La carpeta `admin/` se salta sola en los entornos de la API (no tienen
+`ADMIN_URL`). El runner `bru` 4.2.1 **solo envia los query params que estan
+tambien en la `url`** (medido): si agregas uno activo, ponlo en los dos sitios.
 
 Los entornos **se generan** con `bruno-env.sh` y llevan tokens reales: estan en
 `.gitignore`. **Ningun script prueba la API**: los scripts construyen; la
@@ -103,7 +115,7 @@ verificacion es Bruno y el navegador.
 ### Diagnostico
 
 ```sh
-aws logs tail /biblioteca/backend --follow --region us-east-1   # streams app y rabbitmq
+aws logs tail /biblioteca/backend --follow --region us-east-1   # streams app, admin-rabbit, rabbitmq-1, rabbitmq-2
 aws ec2 get-console-output --instance-id <id> --latest --output text   # primer arranque de la EC2
 aws cloudformation describe-stacks --stack-name biblioteca-api --query 'Stacks[0].Outputs' --output table
 aws cloudformation validate-template --template-body file://aws/api.yaml
@@ -126,9 +138,13 @@ Navegador ─HTTPS─▶ Caddy (EC2, IP elastica, <ip>.sslip.io, Let's Encrypt)
                                           │ :8080, health check /health
                                           ▼
                               EC2 (subred PUBLICA, SG: entra solo la VPC)   ── SMTP 587 ──▶ correo
-                               [app]      Spring Boot: revalida el token, RBAC,
-                                          consumidores @RabbitListener, @Scheduled
-                               [rabbitmq] 4.1 + panel (solo por la VPN)
+                               docker compose (aws/backend/compose.yaml):
+                               [app]          Spring Boot: revalida el token, RBAC,
+                                              consumidores @RabbitListener, @Scheduled
+                               [rabbitmq-1]   cluster RabbitMQ 4.1 de DOS nodos
+                               [rabbitmq-2]   + paneles :15672/:15673 (solo por la VPN)
+                               [admin-rabbit] :8081, administra colas/exchanges/bindings
+                                              (solo por la VPN, JWT de empleado)
                                           │ TLS verify-full
                                           ▼
                               RDS PostgreSQL 16 (subredes privadas, sin IP publica)
@@ -138,14 +154,25 @@ Por que EC2 y no Lambda: RabbitMQ necesita consumidores vivos todo el tiempo, y
 Lambda solo consume colas de **Amazon MQ**, que el lab bloquea (`mq:*`, `kafka:*`
 y `ses:*` con *explicitDeny*, medido con `simulate-principal-policy`). El broker
 va en la misma EC2; el backend no se parte entre Lambda y EC2 (decision del
-usuario).
+usuario). El cluster son dos contenedores del mismo compose (decision del
+usuario): replica las quorum, pero no tolera la caida de un nodo (con 2, la
+mayoria exige los dos). El compose y la configuracion del cluster viajan en el
+paquete de `build-backend.sh` (`.tar.gz` con los dos jars), no en el UserData.
 
 Los avisos por correo viajan asi: cambio de negocio + evento en la MISMA
 transaccion (`evento_pendiente`, outbox) → `RelayEventos` lo publica con
 publisher confirms en el topic `biblioteca.eventos` → consumidores con ACK
 manual → exchange direct `correo` (carriles `transaccional`/`masivo`) →
-`EnviadorSmtp`. Reintento con espera por DLX + TTL (`correo.espera`); DLQ en
-`correo.fallidos` y `eventos.fallidos`. Detalle en `back/README.md` §4.
+`EnviadorSmtp`. Reintento con espera por DLX + TTL (`correo.espera`). DLQ: una
+por cola de eventos (`notif.prestamos.dlq`, `notif.disponibilidad.dlq`,
+`bitacora.dlq`, por el direct `eventos.dlx` con el nombre de la cola como
+routing key) y `correo.fallidos`. Detalle en `back/README.md` §4.
+
+El administrador de RabbitMQ (`admin-rabbit/`) es el segundo microservicio:
+toda la logica en `RabbitAdminService` (unico que toca `RabbitAdmin`); la
+topologia de la API esta protegida por nombre en `admin.rabbit.protegidos` de
+su `application.properties`. **Si agregas una cola o un exchange en
+`TopologiaRabbit`, agregalo tambien ahi.**
 
 Siete stacks, uno por plantilla, sin `Export`/`Fn::ImportValue`: se encadenan
 con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
@@ -176,7 +203,8 @@ otro stack o a un script.
 Dos scopes y un grupo. `biblioteca-api/acceso` (estudiantes) tiene que
 coincidir **caracter por caracter** en: el Resource Server y los App Clients SPA
 y M2M de `cognito.yaml`, `AuthorizationScopes` en `api.yaml`, `SecurityConfig`
-(por `BIBLIOTECA_SCOPE`) y la lista de scopes de Amplify. `biblioteca-api/gestion`
+(por `BIBLIOTECA_SCOPE`, leido en `comun/.../ValidacionJwt`) y la lista de
+scopes de Amplify. `biblioteca-api/gestion`
 (solo el App Client backoffice) en: Resource Server, `api.yaml` y `SecurityConfig`
 (por `BIBLIOTECA_SCOPE_GESTION`). Se propagan desde los Outputs `ScopeCompleto`
 y `ScopeGestion`. El grupo `empleados` en `cognito.yaml`,
@@ -261,7 +289,9 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 * **Toda desviacion se declara**, no se esconde: README §7 (canon de la guia,
   EC2 en subred publica, SMTP externo, JWKS fijado al desplegar, contrasenas
   como variables del contenedor, backoffice como empleado en Bruno, VPN,
-  React, Managed Login, frontend en Caddy sobre EC2).
+  React, Managed Login, frontend en Caddy sobre EC2, cluster RabbitMQ de dos
+  nodos en la misma EC2, administrador de RabbitMQ solo por la VPN, Erlang
+  cookie por variable de entorno).
 * **La base no se expone.** Nada de `PubliclyAccessible: true`, NAT ni
   bastion. RDS vive en las subredes PRIVADAS, que no tienen ruta a Internet: la
   unica via permanente es el SG de la EC2 de la app. La subred PUBLICA de
@@ -348,5 +378,7 @@ La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 | `README.md` | Vision general, arquitectura, matriz de seguridad, desviaciones declaradas |
 | `aws/README.md` | Contrato de cada stack, orden de despliegue, restricciones del Learner Lab, tabla de problemas |
 | `back/README.md` | Historias de usuario, RabbitMQ (topologia, ACK/NACK, DLQ), decisiones y quien produce cada codigo |
+| `admin-rabbit/README.md` | El administrador de RabbitMQ: API, validacion, topologia protegida |
+| `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3/EP4) |
 | `front/README.md` | Estructura React y recorrido de comprobacion en navegador |
 | `bruno/README.md` | Por que la matriz vive en los entornos y no en peticiones duplicadas |

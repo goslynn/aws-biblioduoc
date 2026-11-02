@@ -222,7 +222,8 @@ psql "postgresql://${BD_USUARIO}:${BD_CLAVE}@${DB_ENDPOINT}:${DB_PORT}/${DB_NAME
 EOF
 )
 
-# El panel de RabbitMQ, si el backend esta desplegado: misma VPN, otro puerto.
+# Los paneles de RabbitMQ y el administrador, si el backend esta desplegado:
+# misma VPN, otros puertos (aws/backend/compose.yaml).
 PANEL=""
 APP_IP="$(output_de "$STACK_BACKEND" AppPrivateIp)"
 RABBIT_SECRET="$(output_de "$STACK_BACKEND" RabbitSecretArn)"
@@ -231,10 +232,14 @@ if [ -n "$APP_IP" ] && [ -n "$RABBIT_SECRET" ]; then
     --region "$AWS_REGION" --query SecretString --output text)" || RABBIT_JSON=""
   if [ -n "$RABBIT_JSON" ]; then
     PANEL="
-    RabbitMQ:    http://${APP_IP}:15672
+    RabbitMQ:    http://${APP_IP}:15672   (nodo 1)
+                 http://${APP_IP}:15673   (nodo 2, el mismo cluster)
     Usuario:     $(printf '%s' "$RABBIT_JSON" | jq -r .username)
     Contrasena:  $(printf '%s' "$RABBIT_JSON" | jq -r .password)
-                 (colas, DLQ correo.fallidos / eventos.fallidos, mensajes)
+                 (nodos, colas, DLQ *.dlq y correo.fallidos, mensajes)
+
+    Admin Rabbit: http://${APP_IP}:8081/api/admin/...   (JWT de empleado)
+                 bru run admin --env aws-admin-vpn   (tras ./aws/pipeline/bruno-env.sh)
 "
   fi
 fi

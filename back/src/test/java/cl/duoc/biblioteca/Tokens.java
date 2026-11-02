@@ -12,7 +12,7 @@ import org.springframework.security.test.web.servlet.request.SecurityMockMvcRequ
 
 /**
  * Tokens simulados para cada actor, pasados por el MISMO convertidor de
- * autoridades que usa la aplicacion (SecurityConfig#autoridades). Asi los
+ * autoridades que usa la aplicacion (ValidacionJwt#autoridades, en comun). Asi los
  * tests prueban la regla real de "quien es empleado", no una lista de
  * autoridades escrita a mano.
  */
