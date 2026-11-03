@@ -44,6 +44,10 @@
 
 * { box-sizing: border-box; }
 
+/* La barra de scroll siempre reservada: si no, al pasar de una pantalla corta a
+   una larga (o cuando llega la lista) toda la pagina salta unos pixeles. */
+html { overflow-y: scroll; }
+
 body {
   margin: 0;
   background: var(--fondo);
@@ -214,7 +218,7 @@ button.selector-boton:focus-visible, button.selector-boton[aria-expanded='true']
 .etiqueta.no { background: var(--error-fondo); color: var(--error); }
 .etiqueta.bajo { background: var(--amarillo-fondo); color: var(--amarillo-tinta); }
 
-.contador.oculto { visibility: hidden; }
+.oculto { visibility: hidden; }
 .contador {
   display: inline-block; min-width: 22px; height: 22px; padding: 0 6px;
   border-radius: 999px; background: var(--amarillo); color: var(--negro);
@@ -230,11 +234,12 @@ button.chip {
 }
 button.chip:hover:not(:disabled) { background: #fff; border-color: var(--negro); color: var(--negro); }
 
-/* Mientras llega la primera respuesta. El retraso evita que asome si la API
-   responde rapido; el pulso se apaga si la persona pidio menos movimiento. */
-.esqueletos { display: flex; flex-direction: column; gap: 1rem; animation: aparecer .2s .15s both; }
+/* Mientras llega la primera respuesta. Solo asoma si la API tarda de verdad:
+   con menos retraso, una respuesta normal lo muestra un instante y lo quita, y
+   eso es justamente un parpadeo. El pulso se apaga si la persona pidio menos
+   movimiento. */
+.esqueletos { display: flex; flex-direction: column; gap: 1rem; animation: aparecer .2s .6s both; }
 .esqueleto { height: 150px; border-radius: var(--radio); background: var(--gris-fondo); animation: pulso 1.4s ease-in-out infinite; }
-.avisos .esqueleto { height: 84px; }
 @keyframes aparecer { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pulso { 50% { background: var(--linea); } }
 @media (prefers-reduced-motion: reduce) { .esqueleto { animation: none; } }
@@ -550,7 +555,8 @@ button.enlace:hover:not(:disabled) { background: transparent; color: var(--negro
 }
 .interruptor[aria-checked='true'], .interruptor[aria-checked='true']:hover:not(:disabled) { background: var(--negro); }
 .interruptor[aria-checked='true']::after { left: 25px; background: var(--amarillo); }
-.avisos { display: flex; flex-direction: column; gap: 1rem; }
+/* Alto reservado: el panel no crece cuando llega el estado de los avisos. */
+.avisos { display: flex; flex-direction: column; gap: 1rem; min-height: 17.5rem; }
 .avisos .cabeza { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 30px; }
 .avisos ul { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: .35rem; color: var(--negro-2); }
 

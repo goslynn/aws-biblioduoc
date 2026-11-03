@@ -208,7 +208,7 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 11. En Network: todas las llamadas van a `/api/...` **del mismo origen**, sin
     ningun `OPTIONS`; el `Authorization: Bearer` en cada peticion **sin que
     ningun componente lo haya puesto**. En la consola, **ni un aviso de la
-    CSP**. En la respuesta de `/`, las cabeceras `Strict-Transport-Security` y
+    CSP ni de `HydrateFallback`**. En la respuesta de `/`, las cabeceras `Strict-Transport-Security` y
     `Content-Security-Policy`, y el candado con un certificado de Let's
     Encrypt.
 

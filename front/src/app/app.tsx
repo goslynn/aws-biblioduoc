@@ -118,12 +118,46 @@ export function App() {
         <Outlet />
       </main>
 
-      <footer>
+      <Pie />
+    </>
+  );
+}
+
+function Pie() {
+  return (
+    <footer>
+      <div className="contenedor">
+        <span>Biblioteca Duoc · Prestamos en linea</span>
+        <span>DSY1107 · EA1 Cloud Native en AWS</span>
+      </div>
+    </footer>
+  );
+}
+
+/**
+ * El HydrateFallback de la ruta raiz: lo que se ve en el primer arranque (F5,
+ * vuelta del login) hasta que terminan la guarda y el import() de la ruta. Sin
+ * el, React Router no pinta NADA, ni la cabecera: la pagina queda en blanco y
+ * luego aparece de golpe. Es el marco de App sin lo que depende de la sesion,
+ * que todavia no se conoce.
+ */
+export function CargaInicial() {
+  const canjeando = useCanjeando();
+  if (canjeando) {
+    return <PantallaCarga />;
+  }
+  return (
+    <>
+      <header className="cabecera">
         <div className="contenedor">
-          <span>Biblioteca Duoc · Prestamos en linea</span>
-          <span>DSY1107 · EA1 Cloud Native en AWS</span>
+          <span className="marca">
+            <span className="logo"><IconoLibro /></span>
+            <strong>Biblioteca <span>Duoc</span></strong>
+          </span>
         </div>
-      </footer>
+      </header>
+      <main />
+      <Pie />
     </>
   );
 }

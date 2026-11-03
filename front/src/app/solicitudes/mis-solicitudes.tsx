@@ -86,10 +86,10 @@ export function MisSolicitudes() {
           </div>
           <div className="pestanas" role="tablist" aria-label="Solicitudes">
             <button type="button" role="tab" aria-selected={pestana === 'curso'} onClick={() => setPestana('curso')}>
-              En curso{lista && ` (${cuantasEnCurso})`}
+              En curso <span className={lista ? undefined : 'oculto'}>({cuantasEnCurso})</span>
             </button>
             <button type="button" role="tab" aria-selected={pestana === 'historial'} onClick={() => setPestana('historial')}>
-              Historial{lista && ` (${lista.length - cuantasEnCurso})`}
+              Historial <span className={lista ? undefined : 'oculto'}>({(lista?.length ?? 0) - cuantasEnCurso})</span>
             </button>
           </div>
         </div>
@@ -143,10 +143,8 @@ export function MisSolicitudes() {
               Estan desactivados. Activalos para recibir el comprobante, la resolucion y los
               recordatorios en el correo con el que te registraste. Puedes desactivarlos cuando quieras.
             </p>
-          ) : avisos === null ? (
+          ) : avisos === null && (
             <p className="tenue">No se pudo consultar el estado de los avisos.</p>
-          ) : (
-            <Esqueleto filas={1} />
           )}
           {errorAvisos && <p className="fallo">{errorAvisos}</p>}
         </aside>

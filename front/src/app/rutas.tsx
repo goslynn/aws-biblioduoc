@@ -1,6 +1,6 @@
 import { createBrowserRouter, redirect, type RouteObject } from 'react-router';
 
-import { App } from './app';
+import { App, CargaInicial } from './app';
 import { requiereEmpleado, requiereSesion } from './auth/guardas';
 import { rutasDiagnostico } from './diagnostico/rutas';
 import { Inicio } from './inicio';
@@ -76,4 +76,4 @@ const hijas: RouteObject[] = [
  * index.html y React Router pinta la vista. Cuando el sitio estaba en el
  * endpoint REST de S3 eso no era posible, y por eso las rutas llevaban "#".
  */
-export const router = createBrowserRouter([{ path: '/', Component: App, children: hijas }]);
+export const router = createBrowserRouter([{ path: '/', Component: App, HydrateFallback: CargaInicial, children: hijas }]);
