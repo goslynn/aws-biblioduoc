@@ -20,7 +20,7 @@ export const librosService = {
     });
   },
 
-  /** GET /api/libros/generos, para poblar el desplegable del filtro. */
+  /** GET /api/libros/generos, para poblar el filtro. */
   generos(): Promise<string[]> {
     return http.get<string[]>(`${base}/generos`);
   },

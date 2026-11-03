@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 
 import { cuerpoDe, statusDe } from '../auth/http';
 import { librosService } from '../catalogo/libros.service';
+import { Esqueleto } from '../esqueleto';
 import { diasHasta, fechaHora } from '../formato';
 import { IconoAlerta, IconoCheck } from '../iconos';
 import { NOMBRE_SEDE, claseEstado, type EstadoSolicitud, type Solicitud } from '../solicitudes/solicitud';
@@ -45,8 +46,8 @@ const MOTIVOS_RAPIDOS = [
 export function Bandeja() {
   const [filtro, setFiltro] = useState<EstadoSolicitud | ''>('RECIBIDA');
 
-  const [lista, setLista] = useState<Solicitud[]>([]);
-  const [cargando, setCargando] = useState(false);
+  // null = todavia no hay respuesta para esta pestana (ver mis-solicitudes.tsx).
+  const [lista, setLista] = useState<Solicitud[] | null>(null);
   const [error, setError] = useState('');
   const [exito, setExito] = useState('');
 
@@ -57,16 +58,12 @@ export function Bandeja() {
   const [motivo, setMotivo] = useState('');
 
   const cargar = (estado = filtro) => {
-    setCargando(true);
     setError('');
     gestionService.solicitudes(estado).then(
-      (solicitudes) => {
-        setLista(solicitudes);
-        setCargando(false);
-      },
+      setLista,
       (fallo) => {
         setError(describir(fallo));
-        setCargando(false);
+        setLista((actual) => actual ?? []);
       },
     );
     librosService.buscar('', '', false).then(
@@ -81,6 +78,8 @@ export function Bandeja() {
     setFiltro(estado);
     setExito('');
     setRechazando('');
+    // Otra pestana, otra lista: no se dejan a la vista las filas de la anterior.
+    setLista(null);
     cargar(estado);
   };
 
@@ -110,8 +109,8 @@ export function Bandeja() {
     tras(gestionService.rechazar(s.id, motivo), `${s.id} rechazada. El estudiante recibira el motivo por correo.`);
   };
 
-  const recibidas = lista.filter((s) => s.estado === 'RECIBIDA');
-  const resueltas = lista.filter((s) => s.estado !== 'RECIBIDA');
+  const recibidas = (lista ?? []).filter((s) => s.estado === 'RECIBIDA');
+  const resueltas = (lista ?? []).filter((s) => s.estado !== 'RECIBIDA');
 
   return (
     <>
@@ -132,7 +131,8 @@ export function Bandeja() {
               <button key={p.nombre} type="button" role="tab" aria-selected={filtro === p.estado}
                       onClick={() => elegir(p.estado)}>
                 {p.nombre}
-                {filtro === p.estado && !cargando && <span className="contador">{lista.length}</span>}
+                {/* Todas las pestanas reservan el sitio del contador: asi no se mueven al cambiar. */}
+                <span className={filtro === p.estado && lista ? 'contador' : 'contador oculto'}>{lista?.length ?? 0}</span>
               </button>
             ))}
           </div>
@@ -142,9 +142,9 @@ export function Bandeja() {
       <div className="contenedor cuerpo" role="tabpanel">
         {exito && <p className="exito" role="status"><IconoCheck /> {exito}</p>}
         {error && <p className="fallo" role="alert">{error}</p>}
-        {cargando && <p className="tenue">Cargando…</p>}
+        {lista === null && <Esqueleto />}
 
-        {!cargando && lista.length === 0 && !error && (
+        {lista?.length === 0 && !error && (
           <div className="vacio">
             <h2>{filtro === 'RECIBIDA' ? 'Bandeja al dia' : 'Nada por aqui'}</h2>
             <p>{filtro === 'RECIBIDA' ? 'No quedan solicitudes por revisar.' : 'No hay solicitudes en este estado.'}</p>

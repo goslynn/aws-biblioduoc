@@ -4,6 +4,7 @@ import { Link } from 'react-router';
 import { statusDe } from '../auth/http';
 import { avisosService, type EstadoAvisos } from '../avisos/avisos.service';
 import { Tapa } from '../catalogo/tapa';
+import { Esqueleto } from '../esqueleto';
 import { diasHasta, fechaHora } from '../formato';
 import { IconoReloj } from '../iconos';
 import { NOMBRE_ESTADO, NOMBRE_SEDE, claseEstado, type Solicitud } from './solicitud';
@@ -23,26 +24,25 @@ const enCurso = (s: Solicitud) => s.estado === 'RECIBIDA' || s.estado === 'APROB
  * de Cognito.
  */
 export function MisSolicitudes() {
-  const [lista, setLista] = useState<Solicitud[]>([]);
-  const [cargando, setCargando] = useState(false);
+  // null = todavia no hay respuesta. Es distinto de [] (no hay solicitudes): si
+  // se confunden, la pantalla dice "no tienes prestamos" antes de mostrarlos.
+  const [lista, setLista] = useState<Solicitud[] | null>(null);
   const [error, setError] = useState('');
 
-  const [avisos, setAvisos] = useState<EstadoAvisos | null>(null);
+  // undefined = consultando; null = la consulta fallo.
+  const [avisos, setAvisos] = useState<EstadoAvisos | null | undefined>(undefined);
   const [errorAvisos, setErrorAvisos] = useState('');
 
   const [pestana, setPestana] = useState<'curso' | 'historial'>('curso');
 
+  /** Recargar deja la lista a la vista hasta que llega la nueva: nada salta. */
   const cargar = () => {
-    setCargando(true);
     setError('');
     solicitudesService.mias().then(
-      (solicitudes) => {
-        setLista(solicitudes);
-        setCargando(false);
-      },
+      setLista,
       (fallo) => {
         setError(`HTTP ${statusDe(fallo)}: no se pudieron cargar las solicitudes.`);
-        setCargando(false);
+        setLista((actual) => actual ?? []);
       },
     );
   };
@@ -67,8 +67,8 @@ export function MisSolicitudes() {
     );
   };
 
-  const vista = lista.filter((s) => (pestana === 'curso') === enCurso(s));
-  const cuantasEnCurso = lista.filter(enCurso).length;
+  const vista = (lista ?? []).filter((s) => (pestana === 'curso') === enCurso(s));
+  const cuantasEnCurso = (lista ?? []).filter(enCurso).length;
 
   return (
     <>
@@ -86,10 +86,10 @@ export function MisSolicitudes() {
           </div>
           <div className="pestanas" role="tablist" aria-label="Solicitudes">
             <button type="button" role="tab" aria-selected={pestana === 'curso'} onClick={() => setPestana('curso')}>
-              En curso ({cuantasEnCurso})
+              En curso{lista && ` (${cuantasEnCurso})`}
             </button>
             <button type="button" role="tab" aria-selected={pestana === 'historial'} onClick={() => setPestana('historial')}>
-              Historial ({lista.length - cuantasEnCurso})
+              Historial{lista && ` (${lista.length - cuantasEnCurso})`}
             </button>
           </div>
         </div>
@@ -98,9 +98,9 @@ export function MisSolicitudes() {
       <div className="contenedor columnas">
         <div className="principal" role="tabpanel">
           {error && <p className="fallo">{error}</p>}
-          {cargando && <p className="tenue">Cargando…</p>}
+          {lista === null && <Esqueleto />}
 
-          {!cargando && vista.length === 0 && !error && (
+          {lista !== null && vista.length === 0 && !error && (
             <div className="vacio">
               {pestana === 'curso' ? (
                 <>
@@ -143,8 +143,10 @@ export function MisSolicitudes() {
               Estan desactivados. Activalos para recibir el comprobante, la resolucion y los
               recordatorios en el correo con el que te registraste. Puedes desactivarlos cuando quieras.
             </p>
-          ) : (
+          ) : avisos === null ? (
             <p className="tenue">No se pudo consultar el estado de los avisos.</p>
+          ) : (
+            <Esqueleto filas={1} />
           )}
           {errorAvisos && <p className="fallo">{errorAvisos}</p>}
         </aside>

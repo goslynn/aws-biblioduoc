@@ -91,6 +91,8 @@ src/
     ├── almacen.ts              estado compartido fuera de React (useSyncExternalStore)
     ├── formato.ts              fechas como dd-MM-yyyy HH:mm, dias hasta un vencimiento
     ├── iconos.tsx              iconos de trazo (decorativos, aria-hidden)
+    ├── selector.tsx            EL desplegable de la aplicacion (no se usa <select> ni <datalist>)
+    ├── esqueleto.tsx           lo que se ve mientras llega la primera respuesta
     ├── auth/
     │   ├── sesion.ts           entrar, registrarse, salir, ¿empleado? (+ hook useSesion)
     │   ├── http.ts             UNICO cliente de la API (/api, mismo origen): anade el Bearer
@@ -180,11 +182,12 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 2. **Mis solicitudes → interruptor *Avisos por correo*** → PUT 200 con tu
    email, y llega el correo de bienvenida.
 3. **Catalogo**: buscar; en el panel **Filtros** (se oculta y se muestra)
-   elegir un genero o *Con ejemplares*: cada cambio es una peticion real.
-   Autor, *Publicado entre*, ubicacion, *Agotados* y **Ordenar** afinan la
-   respuesta sin pedirla otra vez; cada filtro activo aparece como chip
-   quitable.
-4. **Agregar** libros (un ejemplar por libro; la ✕ lo quita) → **Continuar con la solicitud** → elegir sede y dias →
+   elegir *Con ejemplares*: cada cambio es una peticion real. Los generos (se
+   pueden marcar varios), Autor, *Publicado entre*, *Agotados* y **Ordenar**
+   afinan la respuesta sin pedirla otra vez; cada filtro activo aparece como
+   chip quitable.
+4. **Agregar** libros (un ejemplar por libro; otro clic en el boton no hace
+   nada, la ✕ del resumen lo quita) → **Continuar con la solicitud** → elegir sede y dias →
    **Enviar solicitud** → 201 al instante; el comprobante llega por correo
    segundos despues.
 5. En un libro agotado (*Building Microservices*, *Terraform*): **Avisame

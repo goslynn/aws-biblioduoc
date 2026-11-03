@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { statusDe } from '../auth/http';
 import type { Libro } from '../catalogo/libro';
 import { librosService } from '../catalogo/libros.service';
+import { Esqueleto } from '../esqueleto';
 import { gestionService } from './gestion.service';
 
 /**
@@ -12,6 +13,8 @@ import { gestionService } from './gestion.service';
  */
 export function Stock() {
   const [lista, setLista] = useState<Libro[]>([]);
+  // Empieza en true: si no, el primer pintado dice "Nada que reponer".
+  const [cargando, setCargando] = useState(true);
   const [error, setError] = useState('');
   const [exito, setExito] = useState('');
 
@@ -23,8 +26,14 @@ export function Stock() {
 
   const cargar = () => {
     librosService.buscar('', '', false).then(
-      (libros) => setLista([...libros].sort((a, b) => a.ejemplares - b.ejemplares)),
-      (fallo) => setError(`HTTP ${statusDe(fallo)}: no se pudo cargar el catalogo.`),
+      (libros) => {
+        setLista([...libros].sort((a, b) => a.ejemplares - b.ejemplares));
+        setCargando(false);
+      },
+      (fallo) => {
+        setError(`HTTP ${statusDe(fallo)}: no se pudo cargar el catalogo.`);
+        setCargando(false);
+      },
     );
   };
 
@@ -89,7 +98,7 @@ export function Stock() {
         {exito && <p className="exito" role="status">{exito}</p>}
         {error && <p className="fallo" role="alert">{error}</p>}
 
-        {vista.length === 0 && !error ? (
+        {cargando ? <Esqueleto /> : vista.length === 0 && !error ? (
           <div className="vacio">
             <h2>Nada que reponer</h2>
             <p>Ningun libro coincide con este filtro.</p>

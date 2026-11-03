@@ -2,23 +2,24 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 
 import { statusDe } from '../auth/http';
-import { IconoCampana, IconoCerrar, IconoCheck, IconoFiltros, IconoFlechaAbajo, IconoLupa, IconoMas } from '../iconos';
+import { Esqueleto } from '../esqueleto';
+import { IconoCampana, IconoCerrar, IconoCheck, IconoFiltros, IconoLupa, IconoMas } from '../iconos';
+import { Selector, type OpcionSelector } from '../selector';
 import type { Libro } from './libro';
 import { librosService } from './libros.service';
 import { Quitar } from './quitar';
-import { agregarASeleccion, quitarDeSeleccion, useSeleccion } from './seleccion';
+import { agregarASeleccion, useSeleccion } from './seleccion';
 import { Tapa } from './tapa';
 
 type Disponibilidad = 'todos' | 'disponibles' | 'agotados';
-type Orden = 'relevancia' | 'titulo' | 'recientes' | 'antiguos' | 'ejemplares';
+type Orden = 'relevancia' | 'titulo' | 'recientes' | 'antiguos';
 
-const ORDENES: Record<Orden, string> = {
-  relevancia: 'Relevancia',
-  titulo: 'Titulo (A-Z)',
-  recientes: 'Mas recientes',
-  antiguos: 'Mas antiguos',
-  ejemplares: 'Mas ejemplares',
-};
+const ORDENES: OpcionSelector<Orden>[] = [
+  { valor: 'relevancia', texto: 'Relevancia' },
+  { valor: 'titulo', texto: 'Titulo (A-Z)' },
+  { valor: 'recientes', texto: 'Mas recientes' },
+  { valor: 'antiguos', texto: 'Mas antiguos' },
+];
 
 /** Si el panel de filtros queda abierto entre visitas. Es comodidad: si falla, se abre segun el ancho. */
 const CLAVE_PANEL = 'catalogo.filtros-abiertos';
@@ -35,18 +36,16 @@ function panelInicial(): boolean {
   return window.matchMedia('(min-width: 900px)').matches;
 }
 
-/** Sin tildes ni mayusculas: "garcia" encuentra "Garcia" y "García". */
-const normalizar = (texto: string) => texto.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
-
 /**
  * El catalogo: buscador, panel de filtros y la lista de libros.
  *
  * El filtrado se reparte en dos capas, y a proposito:
- *   * El texto, el genero y "con ejemplares" los resuelve el BACKEND: cada
- *     cambio es una peticion real que atraviesa auth/http.ts, API Gateway, el
- *     authorizer y Spring (GET /api/libros?q=&genero=&soloDisponibles=).
- *   * Autor, fecha de publicacion, ubicacion, "agotados" y el orden AFINAN en el
- *     navegador la lista que devolvio la API, que no recibe esos parametros.
+ *   * El texto y "con ejemplares" los resuelve el BACKEND: cada cambio es una
+ *     peticion real que atraviesa auth/http.ts, API Gateway, el authorizer y
+ *     Spring (GET /api/libros?q=&soloDisponibles=).
+ *   * Generos, autor, fecha de publicacion, "agotados" y el orden AFINAN en el
+ *     navegador la lista que devolvio la API. La API solo filtra por UN genero
+ *     (?genero=) y aqui se pueden marcar varios.
  *     Son 20 libros: pedirlos otra vez para reordenarlos no aporta nada.
  */
 export function Catalogo() {
@@ -54,21 +53,21 @@ export function Catalogo() {
 
   // Filtros que viajan a la API.
   const [texto, setTexto] = useState('');
-  const [genero, setGenero] = useState('');
   const [disponibilidad, setDisponibilidad] = useState<Disponibilidad>('todos');
 
   // Filtros que afinan la respuesta en el navegador.
+  const [generosElegidos, setGenerosElegidos] = useState<string[]>([]);
   const [autor, setAutor] = useState('');
   const [anioDesde, setAnioDesde] = useState('');
   const [anioHasta, setAnioHasta] = useState('');
-  const [ubicacion, setUbicacion] = useState('');
   const [orden, setOrden] = useState<Orden>('relevancia');
 
   const [panelAbierto, setPanelAbierto] = useState(panelInicial);
 
   const [resultados, setResultados] = useState<Libro[]>([]);
   const [generos, setGeneros] = useState<string[]>([]);
-  const [cargando, setCargando] = useState(false);
+  // Empieza en true: si no, el primer pintado dice "Ningun libro coincide".
+  const [cargando, setCargando] = useState(true);
   const [error, setError] = useState('');
 
   /** Ids de los libros agotados que este usuario espera ("avisame"). */
@@ -76,10 +75,10 @@ export function Catalogo() {
 
   // Los filtros van como argumentos y no se leen del estado: "Limpiar" busca
   // con los valores vacios en el mismo clic, antes de que React repinte.
-  const buscar = (q = texto, g = genero, disp = disponibilidad) => {
+  const buscar = (q = texto, disp = disponibilidad) => {
     setCargando(true);
     setError('');
-    librosService.buscar(q, g, disp === 'disponibles').then(
+    librosService.buscar(q, '', disp === 'disponibles').then(
       (libros) => {
         setResultados(libros);
         setCargando(false);
@@ -139,69 +138,63 @@ export function Catalogo() {
     );
   };
 
-  const elegirGenero = (g: string) => {
-    setGenero(g);
-    buscar(texto, g, disponibilidad);
+  const alternarGenero = (g: string) => {
+    setGenerosElegidos((actuales) => (actuales.includes(g) ? actuales.filter((x) => x !== g) : [...actuales, g]));
   };
 
   /** "Agotados" no es un parametro de la API: se piden todos y se afina aqui. */
   const elegirDisponibilidad = (disp: Disponibilidad) => {
     setDisponibilidad(disp);
     if ((disp === 'disponibles') !== (disponibilidad === 'disponibles')) {
-      buscar(texto, genero, disp);
+      buscar(texto, disp);
     }
   };
 
   const limpiar = () => {
     setTexto('');
-    setGenero('');
+    setGenerosElegidos([]);
     setDisponibilidad('todos');
     setAutor('');
     setAnioDesde('');
     setAnioHasta('');
-    setUbicacion('');
-    buscar('', '', 'todos');
+    buscar('', 'todos');
   };
 
   // Lo que ofrece cada filtro sale de la respuesta: no hay listas fijas.
   const autores = useMemo(() => [...new Set(resultados.map((l) => l.autor))].sort(), [resultados]);
-  const ubicaciones = useMemo(() => [...new Set(resultados.map((l) => l.ubicacion))].sort(), [resultados]);
   const anios = resultados.map((l) => l.anio);
   const anioMin = anios.length ? Math.min(...anios) : undefined;
   const anioMax = anios.length ? Math.max(...anios) : undefined;
 
   const visibles = useMemo(() => {
-    const buscado = normalizar(autor.trim());
     const desde = anioDesde ? Number(anioDesde) : -Infinity;
     const hasta = anioHasta ? Number(anioHasta) : Infinity;
     const filtrados = resultados.filter((l) =>
       (disponibilidad !== 'agotados' || !l.disponible)
-      && (!buscado || normalizar(l.autor).includes(buscado))
-      && l.anio >= desde && l.anio <= hasta
-      && (!ubicacion || l.ubicacion === ubicacion));
+      && (generosElegidos.length === 0 || generosElegidos.includes(l.genero))
+      && (!autor || l.autor === autor)
+      && l.anio >= desde && l.anio <= hasta);
     const comparar: Record<Orden, ((a: Libro, b: Libro) => number) | null> = {
       relevancia: null,
       titulo: (a, b) => a.titulo.localeCompare(b.titulo, 'es'),
       recientes: (a, b) => b.anio - a.anio,
       antiguos: (a, b) => a.anio - b.anio,
-      ejemplares: (a, b) => b.ejemplares - a.ejemplares,
     };
     const criterio = comparar[orden];
     return criterio ? [...filtrados].sort(criterio) : filtrados;
-  }, [resultados, disponibilidad, autor, anioDesde, anioHasta, ubicacion, orden]);
+  }, [resultados, disponibilidad, generosElegidos, autor, anioDesde, anioHasta, orden]);
 
   /** Cada filtro activo, como chip que se quita de un toque. */
   const activos: { clave: string; texto: string; quitar: () => void }[] = [
-    ...(genero ? [{ clave: 'genero', texto: genero, quitar: () => elegirGenero('') }] : []),
+    ...generosElegidos.map((g) => ({ clave: `genero-${g}`, texto: g, quitar: () => alternarGenero(g) })),
     ...(disponibilidad !== 'todos' ? [{
       clave: 'disp',
       texto: disponibilidad === 'disponibles' ? 'Con ejemplares' : 'Agotados',
       quitar: () => elegirDisponibilidad('todos'),
     }] : []),
-    ...(autor.trim() ? [{ clave: 'autor', texto: `Autor: ${autor.trim()}`, quitar: () => setAutor('') }] : []),
+    ...(autor ? [{ clave: 'autor', texto: `Autor: ${autor}`, quitar: () => setAutor('') }] : []),
     ...(anioDesde ? [{ clave: 'desde', texto: `Desde ${anioDesde}`, quitar: () => setAnioDesde('') }] : []),
     ...(anioHasta ? [{ clave: 'hasta', texto: `Hasta ${anioHasta}`, quitar: () => setAnioHasta('') }] : []),
-    ...(ubicacion ? [{ clave: 'ubic', texto: ubicacion, quitar: () => setUbicacion('') }] : []),
   ];
   const hayFiltros = texto.trim() !== '' || activos.length > 0;
   const rangoInvalido = anioDesde !== '' && anioHasta !== '' && Number(anioDesde) > Number(anioHasta);
@@ -242,13 +235,10 @@ export function Catalogo() {
 
             <fieldset>
               <legend>Genero</legend>
-              <label className="opcion">
-                <input type="radio" name="genero" checked={genero === ''} onChange={() => elegirGenero('')} />
-                Todos
-              </label>
               {generos.map((g) => (
                 <label key={g} className="opcion">
-                  <input type="radio" name="genero" checked={genero === g} onChange={() => elegirGenero(g)} />
+                  <input type="checkbox" name="genero" value={g} checked={generosElegidos.includes(g)}
+                         onChange={() => alternarGenero(g)} />
                   {g}
                 </label>
               ))}
@@ -267,11 +257,8 @@ export function Catalogo() {
 
             <div className="campo">
               <label htmlFor="autor">Autor</label>
-              <input id="autor" name="autor" list="autores" value={autor} autoComplete="off"
-                     onChange={(e) => setAutor(e.target.value)} placeholder="Ej. Martin" />
-              <datalist id="autores">
-                {autores.map((a) => <option key={a} value={a} />)}
-              </datalist>
+              <Selector id="autor" valor={autor} alCambiar={setAutor}
+                        opciones={[{ valor: '', texto: 'Todos' }, ...autores.map((a) => ({ valor: a, texto: a }))]} />
             </div>
 
             <fieldset>
@@ -293,17 +280,6 @@ export function Catalogo() {
               </div>
               {rangoInvalido && <p className="ayuda error-campo">"Desde" no puede ser mayor que "Hasta".</p>}
             </fieldset>
-
-            <div className="campo">
-              <label htmlFor="ubicacion">Ubicacion</label>
-              <div className="desplegable">
-                <select id="ubicacion" name="ubicacion" value={ubicacion} onChange={(e) => setUbicacion(e.target.value)}>
-                  <option value="">Todas</option>
-                  {ubicaciones.map((u) => <option key={u} value={u}>{u}</option>)}
-                </select>
-                <IconoFlechaAbajo />
-              </div>
-            </div>
           </aside>
         )}
 
@@ -319,15 +295,10 @@ export function Catalogo() {
                 ? <><strong>{resultados.length}</strong> titulo(s)</>
                 : <><strong>{visibles.length}</strong> de {resultados.length} titulo(s)</>}
             </p>
-            <label className="ordenar">
-              <span>Ordenar</span>
-              <span className="desplegable">
-                <select name="orden" value={orden} onChange={(e) => setOrden(e.target.value as Orden)}>
-                  {(Object.keys(ORDENES) as Orden[]).map((o) => <option key={o} value={o}>{ORDENES[o]}</option>)}
-                </select>
-                <IconoFlechaAbajo />
-              </span>
-            </label>
+            <div className="ordenar">
+              <label htmlFor="orden">Ordenar</label>
+              <Selector id="orden" valor={orden} opciones={ORDENES} alCambiar={setOrden} />
+            </div>
           </div>
 
           {activos.length > 0 && (
@@ -344,6 +315,8 @@ export function Catalogo() {
           )}
 
           {error && <p className="fallo">{error}</p>}
+
+          {cargando && resultados.length === 0 && <Esqueleto />}
 
           {!cargando && visibles.length === 0 && !error && (
             <div className="vacio">
@@ -370,8 +343,10 @@ export function Catalogo() {
                   <>
                     <span className="etiqueta si">{libro.ejemplares} disponible(s)</span>
                     {seleccion.contiene(libro.id) ? (
-                      <button type="button" className="hecho" onClick={() => quitarDeSeleccion(libro.id)}
-                              aria-label={`${libro.titulo} esta en tu solicitud. Quitar`}>
+                      // Sin accion a proposito: se quita con la X de "Tu solicitud". Es
+                      // aria-disabled y no disabled para no perder el foco del teclado.
+                      <button type="button" className="hecho" aria-disabled="true"
+                              aria-label={`${libro.titulo} ya esta en tu solicitud`}>
                         <IconoCheck />En tu solicitud
                       </button>
                     ) : (

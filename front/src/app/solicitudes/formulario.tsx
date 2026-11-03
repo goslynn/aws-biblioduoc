@@ -6,7 +6,8 @@ import { Quitar } from '../catalogo/quitar';
 import { useSeleccion, vaciarSeleccion } from '../catalogo/seleccion';
 import { Tapa } from '../catalogo/tapa';
 import { fecha } from '../formato';
-import { IconoCalendario, IconoCheck, IconoFlechaAbajo } from '../iconos';
+import { IconoCalendario, IconoCheck } from '../iconos';
+import { Selector } from '../selector';
 import { NOMBRE_ESTADO, NOMBRE_SEDE, SEDES, type ErrorApi, type Sede, type Solicitud } from './solicitud';
 import { solicitudesService } from './solicitudes.service';
 
@@ -148,13 +149,8 @@ export function FormularioSolicitud() {
           <div className="panel bloque">
             <label htmlFor="sede">¿Donde la retiras?</label>
             <p id="sede-ayuda" className="ayuda">La sede donde un empleado te entregara los libros.</p>
-            <div className="desplegable">
-              <select id="sede" name="sede" aria-describedby="sede-ayuda" value={sede}
-                      onChange={(e) => setSede(e.target.value as Sede)}>
-                {SEDES.map((s) => <option key={s} value={s}>{NOMBRE_SEDE[s]}</option>)}
-              </select>
-              <IconoFlechaAbajo />
-            </div>
+            <Selector id="sede" valor={sede} alCambiar={setSede} describidoPor="sede-ayuda"
+                      opciones={SEDES.map((s) => ({ valor: s, texto: NOMBRE_SEDE[s] }))} />
           </div>
 
           <fieldset className="panel bloque">

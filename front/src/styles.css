@@ -66,7 +66,7 @@ p { margin: 0; }
 a { color: var(--tinta); }
 a:hover { color: var(--tinta-2); }
 
-a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible {
   outline: 3px solid var(--amarillo);
   outline-offset: 2px;
 }
@@ -103,34 +103,59 @@ button.peligro { background: var(--error); border-color: var(--error); }
 button.peligro:hover:not(:disabled) { background: #8a1e17; border-color: #8a1e17; }
 
 button.hecho { background: var(--exito-fondo); border-color: var(--exito-fondo); color: var(--exito); }
-button.hecho:hover:not(:disabled) { background: #d2eadc; border-color: #d2eadc; color: var(--exito); }
+button.hecho:hover:not(:disabled) { background: var(--exito-fondo); border-color: var(--exito-fondo); color: var(--exito); cursor: default; }
 
 .grande { min-height: 52px; padding: 0 1.6rem; font-size: 1rem; }
 .icono { width: 44px; padding: 0; }
 
 /* ---- Campos ---- */
-input, select, textarea {
+input, textarea {
   font: inherit; width: 100%;
   padding: .7rem .9rem;
   border: 1.5px solid var(--linea-2); border-radius: 10px;
   background: #fff; color: inherit;
 }
-input:hover, select:hover, textarea:hover { border-color: var(--negro); }
-input:focus, select:focus, textarea:focus {
+input:hover, textarea:hover { border-color: var(--negro); }
+input:focus, textarea:focus {
   outline: none; border-color: var(--negro);
   box-shadow: 0 0 0 3px rgba(255, 184, 0, .45);
 }
 input[type='checkbox'] { width: 20px; height: 20px; accent-color: var(--negro); }
 label { display: block; font-weight: 700; margin-bottom: .35rem; }
 
-/* El select nativo con una flecha propia. */
-.desplegable { position: relative; max-width: 420px; }
-.desplegable select {
-  appearance: none; -webkit-appearance: none;
-  min-height: 52px; padding-right: 3rem;
-  font-weight: 700; cursor: pointer;
+/* El selector (app/selector.tsx): el mismo boton y la misma lista en toda la
+   aplicacion. Cambia el ancho segun donde esta, nunca el aspecto. */
+.selector { position: relative; width: 100%; max-width: 420px; }
+button.selector-boton {
+  width: 100%; min-height: 44px; padding: .4rem .75rem .4rem .9rem;
+  justify-content: space-between; gap: .75rem;
+  border: 1.5px solid var(--linea-2); border-radius: 10px;
+  background: #fff; color: var(--tinta);
+  font: 700 .95rem/1.3 var(--texto); text-align: left;
 }
-.desplegable svg { position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); pointer-events: none; }
+button.selector-boton:hover:not(:disabled) { background: #fff; border-color: var(--negro); color: var(--tinta); }
+button.selector-boton:focus-visible, button.selector-boton[aria-expanded='true'] {
+  outline: none; border-color: var(--negro);
+  box-shadow: 0 0 0 3px rgba(255, 184, 0, .45);
+}
+.selector-boton > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selector-boton svg { flex: 0 0 auto; transition: transform .15s; }
+.selector-boton[aria-expanded='true'] svg { transform: rotate(180deg); }
+.selector-lista {
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 0; right: 0;
+  max-height: 15rem; overflow-y: auto;
+  margin: 0; padding: .3rem; list-style: none;
+  background: #fff; border: 1.5px solid var(--negro); border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .16);
+}
+.selector-lista li {
+  display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  min-height: 40px; padding: .4rem .6rem; border-radius: 6px;
+  font-size: .95rem; line-height: 1.3; cursor: pointer;
+}
+.selector-lista li.activa { background: var(--amarillo-fondo); }
+.selector-lista li[aria-selected='true'] { font-weight: 700; }
+.selector-lista svg { flex: 0 0 auto; }
 
 /* ---- Bloques comunes ---- */
 .contenedor { width: 100%; max-width: var(--ancho); margin: 0 auto; padding: 0 2rem; }
@@ -189,6 +214,7 @@ label { display: block; font-weight: 700; margin-bottom: .35rem; }
 .etiqueta.no { background: var(--error-fondo); color: var(--error); }
 .etiqueta.bajo { background: var(--amarillo-fondo); color: var(--amarillo-tinta); }
 
+.contador.oculto { visibility: hidden; }
 .contador {
   display: inline-block; min-width: 22px; height: 22px; padding: 0 6px;
   border-radius: 999px; background: var(--amarillo); color: var(--negro);
@@ -203,6 +229,15 @@ button.chip {
   font-size: .9rem;
 }
 button.chip:hover:not(:disabled) { background: #fff; border-color: var(--negro); color: var(--negro); }
+
+/* Mientras llega la primera respuesta. El retraso evita que asome si la API
+   responde rapido; el pulso se apaga si la persona pidio menos movimiento. */
+.esqueletos { display: flex; flex-direction: column; gap: 1rem; animation: aparecer .2s .15s both; }
+.esqueleto { height: 150px; border-radius: var(--radio); background: var(--gris-fondo); animation: pulso 1.4s ease-in-out infinite; }
+.avisos .esqueleto { height: 84px; }
+@keyframes aparecer { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pulso { 50% { background: var(--linea); } }
+@media (prefers-reduced-motion: reduce) { .esqueleto { animation: none; } }
 button.chip[aria-pressed='true'] { background: var(--negro); border-color: var(--negro); color: #fff; }
 
 /* Pestanas: subrayado amarillo en la activa. */
@@ -397,7 +432,7 @@ footer .contenedor {
   padding-top: 1.25rem; border-top: 1px solid var(--linea);
 }
 .panel-filtros .campo { padding-top: 1.25rem; border-top: 1px solid var(--linea); }
-.panel-filtros .desplegable { max-width: none; }
+.panel-filtros .selector { max-width: none; }
 .opcion { display: flex; align-items: center; gap: .6rem; min-height: 36px; margin: 0; font-weight: 400; cursor: pointer; }
 .opcion input { width: 18px; height: 18px; margin: 0; accent-color: var(--negro); flex: 0 0 auto; }
 .opcion:has(input:checked) { font-weight: 700; }
@@ -415,9 +450,9 @@ button.enlace:hover:not(:disabled) { background: transparent; color: var(--negro
 .barra-resultados { display: flex; align-items: center; gap: .75rem 1rem; flex-wrap: wrap; }
 .barra-resultados > p { margin-right: auto; }
 .barra-resultados .contador { margin-left: .1rem; }
-.ordenar { display: flex; align-items: center; gap: .6rem; margin: 0; font-weight: 400; color: var(--tinta-2); font-size: .9rem; }
-.ordenar .desplegable { display: inline-block; }
-.ordenar .desplegable select { min-height: 44px; padding-top: .4rem; padding-bottom: .4rem; width: auto; }
+.ordenar { display: flex; align-items: center; gap: .6rem; }
+.ordenar label { margin: 0; font-weight: 400; color: var(--tinta-2); font-size: .9rem; }
+.ordenar .selector { width: 11.5rem; }
 .activos { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 .activos button.chip { min-height: 34px; padding: 0 .75rem 0 .9rem; background: var(--amarillo-fondo); border-color: var(--amarillo); }
 .activos button.chip:hover:not(:disabled) { background: var(--amarillo-fondo); border-color: var(--negro); }
@@ -516,7 +551,7 @@ button.enlace:hover:not(:disabled) { background: transparent; color: var(--negro
 .interruptor[aria-checked='true'], .interruptor[aria-checked='true']:hover:not(:disabled) { background: var(--negro); }
 .interruptor[aria-checked='true']::after { left: 25px; background: var(--amarillo); }
 .avisos { display: flex; flex-direction: column; gap: 1rem; }
-.avisos .cabeza { display: flex; justify-content: space-between; align-items: center; gap: .75rem; }
+.avisos .cabeza { display: flex; justify-content: space-between; align-items: center; gap: .75rem; min-height: 30px; }
 .avisos ul { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: .35rem; color: var(--negro-2); }
 
 .fila-bandeja { display: flex; flex-wrap: wrap; gap: 1.25rem 2rem; align-items: flex-start; padding: 1.25rem 1.5rem; }
