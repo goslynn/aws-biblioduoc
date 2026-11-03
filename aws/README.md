@@ -145,9 +145,13 @@ No son plantillas: viajan en el paquete que arma `build-backend.sh`
 | `scripts/vpn-down.sh` | Baja la interfaz local, borra el stack `vpn` y los archivos locales con secretos |
 | `scripts/_comun.sh` | No se ejecuta solo: funciones compartidas (mensajes, requisitos, lectura de Outputs) |
 | `pipeline/build-backend.sh` | `./mvnw package` (raiz: `comun`, `back`, `admin-rabbit`) → JWKS de Cognito → `.tar.gz` con los dos jars y `backend/*` a S3 → stack del backend → (si ya existia) `systemctl restart biblioteca` por SSM → espera al health check del NLB |
-| `pipeline/api-deploy.sh` | `create-deployment` al stage. **Imprescindible tras cada cambio de la API** |
+| `pipeline/api-deploy.sh` | Stack de la API → `create-deployment` al stage. **Imprescindible tras cada cambio de la API** |
 | `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `tsc` + `vite build` → `.tar.gz` con `dist/`, `front/Caddyfile` y la API/Cognito → bucket de artefactos → reinicio de Caddy por SSM |
 | `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno (los cinco de la API y los dos del administrador, con la IP privada de la EC2) |
+| `pipeline/rota-credenciales-lab.sh` | Sube las credenciales del lab de este equipo como secretos de GitHub Actions. Solo eso |
+| `pipeline/rota-claves-demo.sh` | Cambia las contrasenas de los usuarios de demo en Cognito, en `aws/.local/usuario-demo.env` y en los secretos de GitHub. Solo eso |
+| `../.github/workflows/ci.yml` | Compila y prueba en cada push a `main` y en cada PR. Sin secretos ni AWS |
+| `../.github/workflows/despliegue.yml` | Lanzado a mano: llama a `build-backend.sh`, `publish-web.sh`, `api-deploy.sh` o `bootstrap.sh` desde un runner |
 
 Ningun script prueba la API. Eso es trabajo de Bruno y del navegador.
 
@@ -303,13 +307,13 @@ Orden que sigue, y por que:
    (network) y el endpoint y los secretos (database). Descarga el JWKS de
    Cognito. La primera vez la EC2 instala Docker, baja las imagenes y arranca:
    CloudFormation **espera a que `/health` responda** (CreationPolicy).
-5. `api`: necesita el ARN del pool y el NLB. La primera vez el **VPC Link**
-   tarda varios minutos en quedar disponible.
-6. `api-deploy.sh`: publica al stage.
-7. Usuarios de demostracion (estudiante y empleado, este en el grupo), con
-   contrasenas aleatorias.
-8. `bruno-env.sh`: entornos de prueba con tokens reales.
-9. `publish-web.sh`: configura, compila, empaqueta y publica el frontend en el
+5. `api-deploy.sh`: stack `api` (necesita el ARN del pool y el NLB; la primera
+   vez el **VPC Link** tarda varios minutos en quedar disponible) y publicacion
+   al stage.
+6. Usuarios de demostracion (estudiante y empleado, este en el grupo), con
+   contrasenas aleatorias la primera vez. Si ya existen, conservan la suya.
+7. `bruno-env.sh`: entornos de prueba con tokens reales (en CI se salta).
+8. `publish-web.sh`: configura, compila, empaqueta y publica el frontend en el
    servidor.
 
 El primer arranque de la aplicacion aplica las migraciones de Flyway (esquema,
@@ -342,10 +346,37 @@ por defecto esa vista ni siquiera se compila (README raiz §5).
 ./aws/pipeline/build-backend.sh    # cambiaste codigo Java (o la config del backend)
 ./aws/pipeline/publish-web.sh      # cambiaste el frontend
 DEBUG=true ./aws/pipeline/publish-web.sh   # + la vista /diagnostico (no entregable)
-./aws/pipeline/api-deploy.sh       # cambiaste rutas, metodos o scopes
+./aws/pipeline/api-deploy.sh       # cambiaste rutas, metodos o scopes (stack + stage)
 ./aws/pipeline/bruno-env.sh        # los tokens caducaron (60 min)
 REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh   # recordatorios rapidos para la demo
 ```
+
+### Desde GitHub Actions
+
+Sirve para que el paquete del backend (~72 MB) no salga de tu conexion: compila y
+sube el runner. `ci.yml` corre solo y sin credenciales. `despliegue.yml` se lanza
+a mano, porque las credenciales caducan y las EC2 se apagan con el lab:
+
+```sh
+awsacademy start && ./aws/pipeline/rota-credenciales-lab.sh
+gh workflow run despliegue.yml -f objetivo=backend      # backend | web | api | bootstrap
+gh run watch
+./aws/pipeline/bruno-env.sh                             # los entornos de Bruno son siempre locales
+```
+
+| Secreto | Lo sube | Cuando |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | `rota-credenciales-lab.sh` | Antes de cada tanda de despliegues: caducan con la sesion del lab |
+| `DEMO_USER`, `DEMO_EMPLOYEE`, `DEMO_PASSWORD`, `EMPLOYEE_PASSWORD` | `rota-claves-demo.sh` | Antes del primer `objetivo=bootstrap`, y cuando quieras cambiarlas |
+| `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | `grep -E '^SMTP_' aws/.env \| gh secret set -f -` | Una vez, para crear el backend desde cero; repetir si cambian |
+
+Son variables de entorno, sin perfil: la CLI v2 las toma sola. Si caducan a medio
+despliegue este falla; se rotan y se relanza, porque los scripts son idempotentes.
+`teardown.sh` no esta en el workflow: borrar todo se hace solo en local.
+
+Los logs de este repositorio son **publicos**. GitHub oculta los secretos y el
+workflow oculta el id de la cuenta; siguen viendose datos que ya son publicos,
+como la URL del sitio o el endpoint de la API.
 
 ### Dominio propio
 
@@ -547,7 +578,8 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
    medido). Por eso el sitio lo sirve Caddy en una EC2 y no un bucket con
    CloudFront delante (README raiz §7).
 6. **Las credenciales caducan cada ~4 horas.** Es la causa numero uno de fallos
-   inexplicables. `awsacademy start`.
+   inexplicables. `awsacademy start`, y para GitHub Actions ademas
+   `rota-credenciales-lab.sh`.
 7. **Los nombres globales llevan `${AWS::AccountId}`**: los buckets y el dominio
    de Cognito son unicos en todo AWS, no solo en tu cuenta.
 8. **RDS y EC2 solo en clases pequenas.** Al cerrar la sesion del lab, AWS
@@ -573,6 +605,8 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 | Activar avisos responde 500 | La app no consiguio credenciales para Cognito: el contenedor no alcanza IMDS | `HttpPutResponseHopLimit: 2` en `backend.yaml` (ya esta) |
 | Los correos no llegan; `correo.fallidos` crece | El proveedor SMTP rechaza (credenciales, remitente no verificado, limite diario) | Header `x-motivo-fallo` en el panel; corrige con `SMTP_*` en `build-backend.sh` y mueve los mensajes de vuelta |
 | `build-backend.sh` falla en el reinicio por SSM | La instancia esta detenida (el lab la paro) o el agente de SSM aun no se registro | Espera a que este `running` y repite |
+| `despliegue.yml` falla en "Comprobar credenciales" | Los secretos caducaron o el lab esta abajo | `awsacademy start && ./aws/pipeline/rota-credenciales-lab.sh`, y relanzar |
+| `objetivo=bootstrap` falla: *faltan los secretos DEMO_PASSWORD* | En un runner, una contrasena generada se perderia | `./aws/pipeline/rota-claves-demo.sh`, y relanzar |
 | El preflight `OPTIONS` devuelve 401 | Se le puso authorizer | `AuthorizationType: NONE` en OPTIONS, siempre |
 | `scope does not exist` al crear Cognito | Los App Clients se crearon antes que el Resource Server | `DependsOn: ResourceServer` (ya esta en la plantilla) |
 | 401 con un token recien pedido por CLI | Vino de `admin-initiate-auth`, que **no emite custom scopes** | Usa los clientes M2M: `./aws/pipeline/bruno-env.sh` |

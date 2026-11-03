@@ -190,8 +190,9 @@ EOF
 tar -czf "${PAQUETE_DIR}/sitio.tar.gz" -C "$PAQUETE_DIR" srv Caddyfile sitio.env
 
 log "Subiendo a s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}"
-# put-object y no "s3 cp": devuelve el VersionId, que es lo que la EC2 baja
-# exactamente (como el jar del backend).
+# put-object: devuelve el VersionId, que es lo que la EC2 baja exactamente. El
+# paquete pesa menos de 1 MB, asi que no gana nada subiendolo por partes (el
+# del backend si: ver build-backend.sh).
 VERSION_ID="$(aws s3api put-object \
   --bucket "$ARTIFACTS_BUCKET" \
   --key "$OBJECT_KEY" \

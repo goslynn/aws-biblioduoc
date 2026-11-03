@@ -15,21 +15,24 @@
 #                                           SiteUrl de web) para los callbacks
 #    2. pipeline/build-backend.sh        -> compila, sube el jar y crea la EC2
 #                                           con RabbitMQ y el NLB
-#    3. api                              -> necesita el pool y el NLB (VPC Link)
-#    4. pipeline/api-deploy.sh           -> publica la API en el stage
-#    5. usuarios de demostracion         -> un estudiante y un EMPLEADO (en el
+#    3. pipeline/api-deploy.sh           -> stack de la API (necesita el pool y
+#                                           el NLB) y publicacion en el stage
+#    4. usuarios de demostracion         -> un estudiante y un EMPLEADO (en el
 #                                           grupo de Cognito), para el login y
 #                                           para el caso "token sin el custom
-#                                           scope"
-#    6. pipeline/bruno-env.sh            -> entornos de prueba con tokens reales
-#    7. pipeline/publish-web.sh          -> configura, compila, empaqueta y
+#                                           scope". Si ya existen, conservan su
+#                                           contrasena (rota-claves-demo.sh la
+#                                           cambia)
+#    5. pipeline/bruno-env.sh            -> entornos de prueba con tokens reales
+#                                           (no en CI: se perderian con el runner)
+#    6. pipeline/publish-web.sh          -> configura, compila, empaqueta y
 #                                           publica el frontend en el servidor
 #
 #  >>> POR QUE NO HAY CICLO ENTRE COGNITO Y EL SITIO <<<
 #    Cognito necesita la URL del sitio (lista blanca de callbacks) y el sitio
 #    necesita los datos de Cognito. Pero el stack web solo crea la MAQUINA y
 #    su nombre (<ip-elastica>.sslip.io, o SITE_DOMAIN): los datos de Cognito
-#    y de la API llegan despues, dentro del artefacto que publica el paso 7.
+#    y de la API llegan despues, dentro del artefacto que publica el paso 6.
 #    Asi que el orden es simplemente web -> cognito -> ... -> publish-web.
 #
 #  ES IDEMPOTENTE: se puede volver a ejecutar tantas veces como haga falta.
@@ -59,6 +62,10 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_comun.sh"
 
+# Credenciales ya generadas de los usuarios de demostracion. Lo que venga en el
+# entorno (los secretos, en GitHub Actions) gana sobre este archivo.
+carga_env "${LOCAL_DIR}/usuario-demo.env"
+
 DEMO_USER="${DEMO_USER:-alumno@duoc.cl}"
 DEMO_EMPLOYEE="${DEMO_EMPLOYEE:-empleado@duoc.cl}"
 SKIP_WEB="${SKIP_WEB:-false}"
@@ -70,6 +77,13 @@ requiere aws curl jq python3
 [ "$SKIP_WEB" = "true" ] || requiere npm
 
 ACCOUNT_ID="$(cuenta_aws)"
+
+# En un runner, una contrasena generada aqui se perderia con la maquina: nadie
+# podria entrar al sitio. Mejor fallar ahora que al final.
+if [ "${CI:-false}" = "true" ] && { [ -z "${DEMO_PASSWORD:-}" ] || [ -z "${EMPLOYEE_PASSWORD:-}" ]; }; then
+  die "faltan los secretos DEMO_PASSWORD o EMPLOYEE_PASSWORD. En tu equipo:
+        ./aws/pipeline/rota-claves-demo.sh"
+fi
 
 info "cuenta   ${ACCOUNT_ID}"
 info "region   ${AWS_REGION}"
@@ -156,32 +170,11 @@ log "Backend: compilar, publicar y desplegar (EC2 + RabbitMQ + NLB)"
 "${ROOT}/aws/pipeline/build-backend.sh"
 
 # ------------------------------------------------------------------ paso 3 ----
-log "Desplegando la API"
-info "la primera vez, el VPC Link tarda varios minutos en quedar disponible"
-USER_POOL_ARN="$(output_obligatorio "$STACK_COGNITO" UserPoolArn)"
-SCOPE_COMPLETO="$(output_obligatorio "$STACK_COGNITO" ScopeCompleto)"
-SCOPE_GESTION="$(output_obligatorio "$STACK_COGNITO" ScopeGestion)"
-NLB_ARN="$(output_obligatorio "$STACK_BACKEND" NlbArn)"
-NLB_DNS="$(output_obligatorio "$STACK_BACKEND" NlbDnsName)"
-SITE_ORIGIN="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
-
-despliega_stack api.yaml "$STACK_API" \
-  "ProjectName=${PROJECT_NAME}" \
-  "UserPoolArn=${USER_POOL_ARN}" \
-  "NlbArn=${NLB_ARN}" \
-  "NlbDnsName=${NLB_DNS}" \
-  "RequiredScope=${SCOPE_COMPLETO}" \
-  "ManagementScope=${SCOPE_GESTION}" \
-  "AllowOrigin=${SITE_ORIGIN}" \
-  "StageName=${STAGE_NAME}" \
-  || { por_que_fallo "$STACK_API"; die "fallo el despliegue de la API"; }
-
-# ------------------------------------------------------------------ paso 4 ----
 # Siempre, aunque el stack no haya cambiado: el Deployment es inmutable y el
 # stage podria estar sirviendo una version anterior. Ver api-deploy.sh.
 "${ROOT}/aws/pipeline/api-deploy.sh"
 
-# ------------------------------------------------------------------ paso 5 ----
+# ------------------------------------------------------------------ paso 4 ----
 # Crear el usuario de demostracion NO es infraestructura, es un dato: por eso
 # se hace con la CLI y no con CloudFormation (que ademas no sabe crear
 # usuarios de Cognito con contrasena).
@@ -189,17 +182,26 @@ log "Usuarios de demostracion"
 USER_POOL_ID="$(output_obligatorio "$STACK_COGNITO" UserPoolId)"
 GRUPO_EMPLEADOS="$(output_obligatorio "$STACK_COGNITO" GrupoEmpleados)"
 
-# Contrasena aleatoria en cada ejecucion: asi no hay ninguna credencial
-# escrita en el repositorio, ni siquiera de mentira.
-contrasena() {
-  printf 'Duoc%s1a' "$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(14)))')"
-}
+# Las contrasenas son estables: repetir el bootstrap, aqui o en GitHub Actions,
+# no las cambia. Solo se generan si no hay ninguna conocida (primera vez, o se
+# perdio el archivo); entonces se aplican tambien a los usuarios que ya existan.
+# Para cambiarlas a proposito: rota-claves-demo.sh.
+CLAVES_NUEVAS=false
+if [ -z "${DEMO_PASSWORD:-}" ] || [ -z "${EMPLOYEE_PASSWORD:-}" ]; then
+  DEMO_PASSWORD="$(contrasena)"
+  EMPLOYEE_PASSWORD="$(contrasena)"
+  CLAVES_NUEVAS=true
+fi
 
 # Crea (si falta) un usuario con el email ya verificado y le fija la clave.
 usuario_demo() {
   local usuario="$1" clave="$2"
   if aws cognito-idp admin-get-user --user-pool-id "$USER_POOL_ID" --username "$usuario" \
        --region "$AWS_REGION" >/dev/null 2>&1; then
+    if [ "$CLAVES_NUEVAS" = "false" ]; then
+      info "el usuario ${usuario} ya existe; conserva su contrasena"
+      return 0
+    fi
     info "el usuario ${usuario} ya existe; se le pone una contrasena nueva"
   else
     aws cognito-idp admin-create-user \
@@ -220,8 +222,6 @@ usuario_demo() {
     --region "$AWS_REGION"
 }
 
-DEMO_PASSWORD="$(contrasena)"
-EMPLOYEE_PASSWORD="$(contrasena)"
 usuario_demo "$DEMO_USER" "$DEMO_PASSWORD"
 usuario_demo "$DEMO_EMPLOYEE" "$EMPLOYEE_PASSWORD"
 
@@ -234,22 +234,21 @@ aws cognito-idp admin-add-user-to-group \
   --region "$AWS_REGION"
 info "${DEMO_EMPLOYEE} esta en el grupo ${GRUPO_EMPLEADOS}"
 
-cat > "${LOCAL_DIR}/usuario-demo.env" <<EOF
-# Generado por aws/scripts/bootstrap.sh. Esta en .gitignore.
-# Lo lee bruno-env.sh para pedir los tokens del usuario, y te sirve a ti para
-# entrar por la pantalla de login de Cognito.
-DEMO_USER='${DEMO_USER}'
-DEMO_PASSWORD='${DEMO_PASSWORD}'
-DEMO_EMPLOYEE='${DEMO_EMPLOYEE}'
-EMPLOYEE_PASSWORD='${EMPLOYEE_PASSWORD}'
-EOF
-chmod 600 "${LOCAL_DIR}/usuario-demo.env"
-info "credenciales guardadas en aws/.local/usuario-demo.env"
+if [ "${CI:-false}" != "true" ]; then
+  guarda_usuarios_demo
+  info "credenciales guardadas en aws/.local/usuario-demo.env"
+fi
+
+# ------------------------------------------------------------------ paso 5 ----
+# Los entornos llevan tokens reales: en un runner se perderian al terminar. Los
+# genera quien va a probar, en su equipo, con el mismo script.
+if [ "${CI:-false}" = "true" ]; then
+  log "CI: los entornos de Bruno se generan en local (./aws/pipeline/bruno-env.sh)"
+else
+  "${ROOT}/aws/pipeline/bruno-env.sh"
+fi
 
 # ------------------------------------------------------------------ paso 6 ----
-"${ROOT}/aws/pipeline/bruno-env.sh"
-
-# ------------------------------------------------------------------ paso 7 ----
 if [ "$SKIP_WEB" = "true" ]; then
   log "SKIP_WEB=true: el frontend no se compila ni se publica"
   SOLO_CONFIG=true "${ROOT}/aws/pipeline/publish-web.sh"

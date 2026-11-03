@@ -50,11 +50,26 @@ SKIP_WEB=true    ./aws/scripts/bootstrap.sh
 REMINDER_LEAD=PT23H58M ./aws/pipeline/build-backend.sh   # recordatorio a los ~2 min (demo)
 ```
 
+Desde GitHub Actions (`.github/workflows/`): `ci.yml` corre solo, sin secretos;
+`despliegue.yml` se lanza a mano y llama a estos mismos scripts, para que el
+paquete del backend no salga de la conexion de casa:
+
+```sh
+awsacademy start && ./aws/pipeline/rota-credenciales-lab.sh   # credenciales del lab -> secretos
+./aws/pipeline/rota-claves-demo.sh                 # cambia las contrasenas de demo (Cognito, aws/.local, secretos)
+grep -E '^SMTP_' aws/.env | gh secret set -f -     # una vez, para crear el backend desde cero
+gh workflow run despliegue.yml -f objetivo=backend # backend | web | api | bootstrap (teardown: solo local)
+```
+
 Variables comunes a todos los scripts: `PROJECT_NAME` (biblioteca),
 `AWS_REGION` (us-east-1), `STAGE_NAME` (test), `DEMO_USER`, `DEMO_EMPLOYEE`.
 `SITE_DOMAIN` (vacio = `<ip-elastica>.sslip.io`) lo usa `bootstrap.sh` para el
 dominio propio del sitio; va en `aws/.env`, o el siguiente bootstrap vuelve a
 sslip.io.
+
+`bootstrap.sh` no cambia la contrasena de un usuario de demo que ya existe; en
+CI (`CI=true`) las exige como secretos y se salta `bruno-env.sh`. Los entornos de
+Bruno se generan siempre en local.
 
 **Un cambio en `api.yaml` no llega al stage solo**: `AWS::ApiGateway::Deployment`
 es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
@@ -291,7 +306,8 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   como variables del contenedor, backoffice como empleado en Bruno, VPN,
   React, Managed Login, frontend en Caddy sobre EC2, cluster RabbitMQ de dos
   nodos en la misma EC2, administrador de RabbitMQ solo por la VPN, Erlang
-  cookie por variable de entorno).
+  cookie por variable de entorno, credenciales del lab como secretos de GitHub
+  en vez de OIDC).
 * **La base no se expone.** Nada de `PubliclyAccessible: true`, NAT ni
   bastion. RDS vive en las subredes PRIVADAS, que no tienen ruta a Internet: la
   unica via permanente es el SG de la EC2 de la app. La subred PUBLICA de

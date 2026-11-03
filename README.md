@@ -39,6 +39,7 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 | `front/` | Frontend React 19 (Vite) con AWS Amplify, servido por Caddy en una EC2 con HTTPS (`front/Caddyfile`). Tiene su propio [README](front/README.md) |
 | `aws/` | Las siete plantillas de CloudFormation, el `docker-compose` de la EC2 de la app (`aws/backend/`), los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
 | `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa y la carpeta del administrador. Tiene su propio [README](bruno/README.md) |
+| `.github/workflows/` | CI (compila y prueba en cada push y PR) y despliegue manual desde GitHub Actions, que llama a los mismos scripts de `aws/` |
 | `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3 y EP4): que esta hecho y que falta |
 
 ---
@@ -466,6 +467,7 @@ Se declaran aqui en lugar de esconderlas.
 | **Hosted UI** clasica de Cognito | **Managed Login** con marca propia y en castellano | La clasica solo existe en ingles y su logo no se puede poner desde CloudFormation. Exige el plan **Essentials** del User Pool, que ya era el de por defecto (medido) |
 | `ng serve` en `localhost:4200` | **Sitio publicado** (hoy en Caddy, ver la fila siguiente) | Se pidio construir solo el acceso publico: no se entrega ningun entorno de desarrollo. `localhost` no esta en las listas blancas de Cognito ni en el CORS |
 | Frontend como sitio estatico en **S3** | **Caddy en Docker sobre una EC2** con IP elastica, HTTPS de Let's Encrypt en `<ip>.sslip.io` y proxy de `/api` | Decision del usuario: cabeceras de seguridad, rutas limpias y un dominio propio futuro, que S3 sin CloudFront no permite (CloudFront esta **denegado** en el lab, medido). Es la unica instancia que acepta trafico de Internet (80 y 443, su propio security group); la de la app sigue cerrada. Costo: una EC2 t3.micro y una IP elastica, que se cobran aunque el lab este apagado |
+| Federacion **OIDC** para desplegar desde GitHub Actions (lo habitual) | **Credenciales de sesion del lab como secretos del repositorio**, rotadas con `rota-credenciales-lab.sh` | OIDC exige crear un rol IAM y el lab no lo permite. Caducan solas con la sesion; por eso el despliegue es manual y no automatico en cada push |
 
 ---
 

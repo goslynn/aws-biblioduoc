@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  biblioteca / api-deploy.sh   --   Publicar la REST API en su stage
+#  biblioteca / api-deploy.sh   --   Actualizar la REST API y publicarla en su stage
 # ==============================================================================
 #
 #  POR QUE EXISTE ESTE SCRIPT (la trampa clasica de REST API v1)
@@ -17,6 +17,13 @@
 #    stack de la API. Eso es exactamente lo que hace este script, y es la razon
 #    por la que en HTTP API (v2, con AutoDeploy) este paso no existe.
 #
+#  QUE HACE, EN DOS PASOS
+#    1. DESPLIEGA  crea o actualiza el stack de la API con aws/api.yaml. La
+#                  primera vez, el VPC Link tarda varios minutos.
+#    2. PUBLICA    hace la foto nueva y la deja en el stage.
+#
+#  DEPENDE DE que ya existan los stacks de Cognito, backend y web.
+#
 #  USO
 #    ./aws/pipeline/api-deploy.sh
 #
@@ -28,6 +35,25 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)/_comun.sh"
 
 requiere aws
 cuenta_aws >/dev/null
+
+log "Desplegando el stack '${STACK_API}'"
+USER_POOL_ARN="$(output_obligatorio "$STACK_COGNITO" UserPoolArn)"
+SCOPE_COMPLETO="$(output_obligatorio "$STACK_COGNITO" ScopeCompleto)"
+SCOPE_GESTION="$(output_obligatorio "$STACK_COGNITO" ScopeGestion)"
+NLB_ARN="$(output_obligatorio "$STACK_BACKEND" NlbArn)"
+NLB_DNS="$(output_obligatorio "$STACK_BACKEND" NlbDnsName)"
+SITE_ORIGIN="$(output_obligatorio "$STACK_WEB" SiteOrigin)"
+
+despliega_stack api.yaml "$STACK_API" \
+  "ProjectName=${PROJECT_NAME}" \
+  "UserPoolArn=${USER_POOL_ARN}" \
+  "NlbArn=${NLB_ARN}" \
+  "NlbDnsName=${NLB_DNS}" \
+  "RequiredScope=${SCOPE_COMPLETO}" \
+  "ManagementScope=${SCOPE_GESTION}" \
+  "AllowOrigin=${SITE_ORIGIN}" \
+  "StageName=${STAGE_NAME}" \
+  || { por_que_fallo "$STACK_API"; die "fallo el despliegue de la API"; }
 
 API_ID="$(output_obligatorio "$STACK_API" ApiId)"
 API_ENDPOINT="$(output_obligatorio "$STACK_API" ApiEndpoint)"

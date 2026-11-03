@@ -82,13 +82,55 @@ requiere() {
 # Credenciales del laboratorio. Caducan cada ~4 horas y son, de lejos, la
 # causa numero uno de errores raros.
 cuenta_aws() {
-  local id
+  local id pista
+  pista="Arranca el laboratorio y vuelve a intentarlo:
+        awsacademy start"
+  # En GitHub Actions las credenciales son secretos del repositorio.
+  [ "${CI:-false}" != "true" ] || pista="Los secretos AWS_* caducaron o el lab esta abajo. En tu equipo:
+        awsacademy start && ./aws/pipeline/rota-credenciales-lab.sh
+    y vuelve a lanzar el despliegue."
   id="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" || die \
 "no hay credenciales de AWS validas.
 
-    Arranca el laboratorio y vuelve a intentarlo:
-        awsacademy start"
+    ${pista}"
   printf '%s' "$id"
+}
+
+# Contrasena aleatoria de un usuario de demostracion: asi no hay ninguna
+# credencial escrita en el repositorio, ni siquiera de mentira.
+contrasena() {
+  printf 'Duoc%s1a' "$(python3 -c 'import secrets,string; a=string.ascii_letters+string.digits; print("".join(secrets.choice(a) for _ in range(14)))')"
+}
+
+# Deja las credenciales de los usuarios de demostracion donde las leen
+# bruno-env.sh y bootstrap.sh, y donde las buscas tu para entrar al sitio.
+guarda_usuarios_demo() {
+  mkdir -p "$LOCAL_DIR"
+  ( umask 077
+    cat > "${LOCAL_DIR}/usuario-demo.env" <<EOF
+# Generado por los scripts de aws/. Esta en .gitignore.
+# Lo lee bruno-env.sh para pedir los tokens del usuario, y te sirve a ti para
+# entrar por la pantalla de login de Cognito.
+DEMO_USER='${DEMO_USER}'
+DEMO_PASSWORD='${DEMO_PASSWORD}'
+DEMO_EMPLOYEE='${DEMO_EMPLOYEE}'
+EMPLOYEE_PASSWORD='${EMPLOYEE_PASSWORD}'
+EOF
+  )
+}
+
+# Repositorio de GitHub de este proyecto (dueno/nombre).
+repo_github() {
+  [ -z "${GITHUB_REPO:-}" ] || { printf '%s' "$GITHUB_REPO"; return 0; }
+  ( cd "$ROOT" && gh repo view --json nameWithOwner --jq .nameWithOwner )
+}
+
+# Sube un secreto a GitHub Actions: sube_secreto <repo> <nombre> <valor>. El
+# valor va por stdin (printf es interno de bash), asi que no aparece en la lista
+# de procesos ni en el log.
+sube_secreto() {
+  printf '%s' "$3" | gh secret set "$2" --repo "$1" >/dev/null || die "GitHub no acepto el secreto $2"
+  info "secreto $2 actualizado"
 }
 
 # Lee un Output de un stack. Si el stack o el Output no existen, devuelve

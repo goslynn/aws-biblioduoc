@@ -1,0 +1,104 @@
+# ==============================================================================
+#  despliegue.yml   --   Despliega desde GitHub, para no subir el paquete de casa
+# ==============================================================================
+#  SOLO SE LANZA A MANO, y solo desde main: las credenciales del lab caducan a
+#  las ~4 h y las EC2 se apagan con el lab, asi que un despliegue automatico
+#  fallaria casi siempre. Antes de lanzarlo, en tu equipo:
+#
+#      awsacademy start && ./aws/pipeline/rota-credenciales-lab.sh
+#      gh workflow run despliegue.yml -f objetivo=backend
+#
+#  No tiene logica de despliegue: llama a los mismos scripts que se usan en
+#  local. Los scripts NO prueban nada; despues se prueba con Bruno y el navegador.
+#  El teardown no esta aqui a proposito: borrar todo se hace solo en local.
+#
+#  SECRETOS (aws/README.md §4)
+#    AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+#        -> rota-credenciales-lab.sh
+#    DEMO_USER, DEMO_EMPLOYEE, DEMO_PASSWORD, EMPLOYEE_PASSWORD
+#        -> rota-claves-demo.sh (solo los usa objetivo=bootstrap)
+#    SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM
+#        -> una vez, desde aws/.env (solo hacen falta al crear el backend)
+#
+#  LOS LOGS DE ESTE REPOSITORIO SON PUBLICOS
+#    GitHub oculta los secretos, y el primer paso oculta ademas el id de la
+#    cuenta. No se suben artefactos, y DEBUG no se ofrece como entrada: publicaria
+#    la vista que ensena el access token.
+# ==============================================================================
+name: despliegue
+
+on:
+  workflow_dispatch:
+    inputs:
+      objetivo:
+        description: Que desplegar
+        type: choice
+        required: true
+        default: backend
+        options: [backend, web, api, bootstrap]
+      skip_tests:
+        description: Saltar los tests del backend
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Dos despliegues a la vez se pisarian los stacks. El segundo espera su turno.
+concurrency:
+  group: despliegue-aws
+  cancel-in-progress: false
+
+jobs:
+  desplegar:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_FROM: ${{ secrets.SMTP_FROM }}
+      DEMO_USER: ${{ secrets.DEMO_USER }}
+      DEMO_EMPLOYEE: ${{ secrets.DEMO_EMPLOYEE }}
+      DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+      EMPLOYEE_PASSWORD: ${{ secrets.EMPLOYEE_PASSWORD }}
+    steps:
+      - name: Comprobar credenciales y ocultar la cuenta
+        run: |
+          if ! CUENTA="$(aws sts get-caller-identity --query Account --output text)"; then
+            echo "::error::Credenciales caducadas o lab abajo. En tu equipo: awsacademy start && ./aws/pipeline/rota-credenciales-lab.sh"
+            exit 1
+          fi
+          echo "::add-mask::${CUENTA}"
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Desplegar
+        env:
+          OBJETIVO: ${{ inputs.objetivo }}
+          SKIP_TESTS: ${{ inputs.skip_tests }}
+        run: |
+          case "$OBJETIVO" in
+            backend)   ./aws/pipeline/build-backend.sh ;;
+            web)       ./aws/pipeline/publish-web.sh ;;
+            api)       ./aws/pipeline/api-deploy.sh ;;
+            bootstrap) ./aws/scripts/bootstrap.sh ;;
+            *)         echo "::error::objetivo desconocido: $OBJETIVO"; exit 1 ;;
+          esac

@@ -140,12 +140,19 @@ tar -czf "${PAQUETE_DIR}/paquete.tar.gz" -C "$PAQUETE_DIR" \
 info "paquete $(du -h "${PAQUETE_DIR}/paquete.tar.gz" | cut -f1)"
 
 log "Subiendo a s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}"
-# put-object en vez de "s3 cp" porque devuelve el VersionId: es lo que la EC2
-# descarga exactamente, y lo que queda anotado como version en ejecucion.
-VERSION_ID="$(aws s3api put-object \
+# "s3 cp" y no put-object: sube por partes y con varias conexiones, reintenta
+# solo la parte que falla y ensena el avance. Con un unico PUT, cualquier corte
+# de red pierde todo lo subido (medido: mas de una hora para 72 MB desde casa).
+# Sin terminal (CI) el avance solo ensuciaria el log.
+SIN_AVANCE=()
+[ -t 1 ] || SIN_AVANCE=(--no-progress)
+aws s3 cp "${PAQUETE_DIR}/paquete.tar.gz" "s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}" \
+  --region "$AWS_REGION" "${SIN_AVANCE[@]}"
+# "s3 cp" no devuelve el VersionId: es lo que la EC2 descarga exactamente, y lo
+# que queda anotado como version en ejecucion.
+VERSION_ID="$(aws s3api head-object \
   --bucket "$ARTIFACTS_BUCKET" \
   --key "$OBJECT_KEY" \
-  --body "${PAQUETE_DIR}/paquete.tar.gz" \
   --region "$AWS_REGION" \
   --query VersionId --output text)"
 info "VersionId ${VERSION_ID}"
