@@ -34,7 +34,8 @@ import cl.duoc.biblioteca.solicitudes.Solicitud;
  *                          termina en notif.prestamos.dlq para revisarlo a mano.
  *   NACK con requeue       fallo del entorno (base caida, broker sin confirmar):
  *                          vuelve a la cola al instante. La cola quorum cuenta
- *                          las entregas y a la quinta lo manda sola a la DLQ.
+ *                          las devoluciones y, si la sexta entrega tambien
+ *                          falla, lo manda sola a la DLQ.
  */
 @Component
 public class ConsumidorPrestamos {

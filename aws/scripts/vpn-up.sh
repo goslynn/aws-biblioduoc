@@ -33,7 +33,7 @@
 #    VPN_ORIGEN   (tu IP/32)    rango desde el que se acepta el tunel. Si tu
 #                               IP cambia a menudo, puedes ampliarlo, pero cada
 #                               ampliacion es superficie expuesta.
-#    VPN_USUARIO_BD (app)       "app" -> biblioteca_app (solo SELECT/INSERT);
+#    VPN_USUARIO_BD (app)       "app" -> biblioteca_app (permisos minimos);
 #                               "maestro" -> el usuario de Flyway. Con el
 #                               maestro se puede romper el esquema: evitalo.
 #

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  biblioteca / publish-web.sh   --   Pipeline del frontend: config, build, sync
+#  biblioteca / publish-web.sh   --   Pipeline del frontend: config, build, publish
 # ==============================================================================
 #
 #  QUE HACE, EN TRES PASOS

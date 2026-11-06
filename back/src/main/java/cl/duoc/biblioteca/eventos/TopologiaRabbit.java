@@ -51,7 +51,8 @@ import org.springframework.context.annotation.Configuration;
  * POR QUE DOS ESTRATEGIAS DE REINTENTO
  *   * Los consumidores de EVENTOS fallan por causas internas y breves (la base
  *     reiniciando). Reintentan al instante (NACK con requeue) y la cola quorum
- *     cuenta las entregas: a la quinta, el broker la aparta solo a la DLQ.
+ *     cuenta las devoluciones: tras la quinta, si la sexta entrega tambien
+ *     falla, el broker lo aparta solo en la DLQ.
  *   * El envio de CORREO falla por el proveedor SMTP, que suele necesitar
  *     minutos para recuperarse. Reintentar al instante seria martillarlo.
  *     El NACK sin requeue manda el mensaje a correo.espera, donde nadie lo
@@ -153,8 +154,8 @@ public class TopologiaRabbit {
     }
 
     /**
-     * Cola QUORUM (replicada por Raft; en un broker de un nodo, igual de
-     * durable) con limite de entregas. Es el tipo recomendado para datos que
+     * Cola QUORUM (replicada con Raft en los nodos del cluster) con limite de
+     * entregas. Es el tipo recomendado para datos que
      * no se pueden perder, y el unico que cuenta las reentregas por si solo.
      */
     private static Queue colaDeEventos(String nombre) {

@@ -5,22 +5,23 @@ AWSTemplateFormatVersion: "2010-09-09"
 # ==============================================================================
 #
 #  QUE HACE
-#    * ArtifactsBucket -> bucket S3 PRIVADO y versionado donde el pipeline deja
-#                         el fat jar del backend antes de publicar una version
-#                         nueva.
+#    * ArtifactsBucket -> bucket S3 PRIVADO y versionado donde los pipelines dejan
+#                         el paquete del backend y el del sitio antes de
+#                         publicar una version nueva.
 #
 #  EL FLUJO QUE HABILITA
-#    1. aws/pipeline/build-backend.sh compila el JAR.
-#    2. Lo sube aqui con "s3api put-object", que devuelve un VersionId.
+#    1. aws/pipeline/build-backend.sh arma el paquete (.tar.gz con los jars).
+#    2. Lo sube aqui con "s3 cp" (por partes) y lee su VersionId con head-object.
+#       publish-web.sh hace lo mismo con el sitio, con "s3api put-object".
 #    3. Le pide a la EC2 de backend.yaml (SSM Run Command) que anote ese
 #       VersionId y reinicie la aplicacion.
-#    4. Al arrancar, la EC2 LEE el jar de este bucket con su perfil de
+#    4. Al arrancar, la EC2 LEE el paquete de este bucket con su perfil de
 #       instancia (LabInstanceProfile / LabRole). En ningun momento del
 #       proceso existe una Access Key estatica: solo credenciales temporales.
 #
 #  TRAMPAS
-#    * Un bucket versionado guarda TODAS las versiones anteriores. Cada JAR de
-#      Spring Boot pesa ~21 MB, asi que sin la regla de ciclo de vida el bucket
+#    * Un bucket versionado guarda TODAS las versiones anteriores. El paquete
+#      del backend pesa ~72 MB, asi que sin la regla de ciclo de vida el bucket
 #      crece sin freno. La regla borra las versiones no vigentes a los 7 dias.
 #    * CloudFormation NO puede borrar un bucket con objetos dentro. Por eso
 #      aws/scripts/teardown.sh lo vacia (versiones y delete markers) primero.
@@ -29,7 +30,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    Nada. Es el primer stack que se despliega.
 #
 #  ENTREGA (Outputs)
-#    ArtifactsBucketName -> aws/pipeline/build-backend.sh y aws/backend.yaml
+#    ArtifactsBucketName -> build-backend.sh, publish-web.sh, backend.yaml y web.yaml
 #
 #  DESPLIEGUE MANUAL (bootstrap.sh ya lo hace por ti)
 #    aws cloudformation deploy \
@@ -59,7 +60,7 @@ Parameters:
     MinValue: 1
     MaxValue: 90
     Description: >-
-      Dias que sobrevive una version NO vigente del ZIP antes de borrarse.
+      Dias que sobrevive una version NO vigente de un paquete antes de borrarse.
       7 basta para poder volver atras un despliegue fallido sin acumular GB.
 
 Resources:
@@ -77,7 +78,7 @@ Resources:
       BucketName: !Sub "${ProjectName}-artifacts-${AWS::AccountId}"
 
       # Cada subida crea una version nueva. Eso da dos cosas: poder volver a un
-      # JAR anterior, y un VersionId exacto que la EC2 descarga y deja
+      # paquete anterior, y un VersionId exacto que la EC2 descarga y deja
       # anotado (/etc/biblioteca/version): se sabe que version corre.
       VersioningConfiguration:
         Status: Enabled
@@ -99,7 +100,7 @@ Resources:
 
       LifecycleConfiguration:
         Rules:
-          # Limpia versiones viejas del ZIP.
+          # Limpia versiones viejas de los paquetes.
           - Id: BorrarVersionesAntiguas
             Status: Enabled
             NoncurrentVersionExpiration:
@@ -117,7 +118,7 @@ Resources:
 
 Outputs:
 
-  # Lo consumen el pipeline (destino de la subida) y backend.yaml (origen del codigo).
+  # Lo consumen los pipelines (destino de la subida), backend.yaml y web.yaml (origen).
   ArtifactsBucketName:
     Description: Nombre del bucket de artefactos.
     Value: !Ref ArtifactsBucket

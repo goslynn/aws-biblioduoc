@@ -10,8 +10,9 @@ import org.springframework.stereotype.Component;
  * Registro de correos que ya salieron (tabla correo_enviado).
  *
  * RabbitMQ garantiza entrega "al menos una vez": un mensaje puede llegar dos
- * veces (por ejemplo, si la aplicacion muere despues de enviar el correo y
- * antes del ACK). Mirar aqui antes de enviar evita el correo repetido.
+ * veces (por ejemplo, si la aplicacion muere despues de registrar el correo y
+ * antes del ACK). Mirar aqui antes de enviar evita repetirlo. Si muere entre el
+ * envio y el registro no hay como saberlo, y el correo puede salir dos veces.
  */
 @Component
 public class CorreosEnviados {

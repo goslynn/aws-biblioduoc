@@ -90,7 +90,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    * web.yaml     -> SiteOrigin (para el CORS)
 #
 #  ENTREGA (Outputs)
-#    ApiEndpoint -> el frontend y Bruno
+#    ApiEndpoint -> publish-web.sh (sitio.env, para el proxy de Caddy) y Bruno
 #    ApiId       -> aws/pipeline/api-deploy.sh
 #
 #  DESPLIEGUE MANUAL
@@ -268,8 +268,8 @@ Resources:
       PathPart: v1
 
   # /v1/{proxy+}
-  #  El versionado (Fase 14 del plan) se resuelve con UN recurso proxy en vez
-  #  de repetir los cuatro recursos de arriba. Lo importante del versionado no
+  #  El versionado se resuelve con UN recurso proxy en vez de repetir los
+  #  recursos de arriba. Lo importante del versionado no
   #  es la URL bonita: es poder enrutar /v1 y /v2 a integraciones DISTINTAS sin
   #  romper a los clientes existentes. Con este proxy, el dia que haya un /v2
   #  basta con otro recurso apuntando a otro destino.
@@ -319,7 +319,8 @@ Resources:
   #  Todos comparten el mismo destino (el NLB, por el VPC Link) y el mismo
   #  par (authorizer, scopes). Las rutas del estudiante se declaran una a una
   #  —y no con un proxy— para que esta plantilla documente exactamente que se
-  #  expone: cualquier ruta no listada aqui ni siquiera llega a la EC2.
+  #  expone: bajo /api, una ruta no listada ni siquiera llega a la EC2. Las
+  #  excepciones son /api/gestion/{proxy+} y /v1/{proxy+}: ahi enruta Spring.
   #  IntegrationHttpMethod es el MISMO que el del cliente: con HTTP_PROXY se
   #  reenvia la peticion tal cual.
   # ===========================================================================

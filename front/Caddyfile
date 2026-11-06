@@ -46,7 +46,7 @@
 		Strict-Transport-Security "max-age=31536000"
 		# Que puede cargar la pagina. connect-src es la lista corta de a quien
 		# puede llamar el JavaScript: este origen (/api incluido), Managed Login
-		# (canje del code por tokens) y la API de Cognito (refresco y atributos).
+		# (canje del code por tokens) y la API de Cognito (refresco de tokens).
 		# Si un fetch nuevo aparece bloqueado en la consola, es aqui.
 		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://{$COGNITO_HOST} https://cognito-idp.{$AWS_REGION}.amazonaws.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
 		X-Content-Type-Options "nosniff"

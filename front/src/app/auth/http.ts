@@ -35,7 +35,8 @@ type Parametros = Record<string, string | undefined>;
  * disimule el problema.
  *
  * Que el token se pida a Amplify en CADA peticion no cuesta nada: Amplify lo
- * tiene en memoria y solo vuelve a Cognito cuando hay que refrescarlo.
+ * tiene guardado en el navegador y solo vuelve a Cognito cuando hay que
+ * refrescarlo.
  *
  * Las rutas son relativas al propio sitio (/api/libros): Caddy las reenvia a
  * API Gateway (front/Caddyfile). Para el navegador es el MISMO origen, asi

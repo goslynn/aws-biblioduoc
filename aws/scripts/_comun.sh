@@ -9,7 +9,7 @@
 #  los stacks.
 #
 #  Configuracion por variables de entorno, todas con valor por defecto:
-#    PROJECT_NAME   (biblioteca)   prefijo de stacks, buckets y funcion
+#    PROJECT_NAME   (biblioteca)   prefijo de stacks y buckets
 #    AWS_REGION     (us-east-1)    unica region utilizable en el Learner Lab
 #    STAGE_NAME     (test)         stage de API Gateway
 #

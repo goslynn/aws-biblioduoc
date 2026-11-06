@@ -84,7 +84,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    una persona no puede ser un scope, y es un grupo. Desviacion declarada en
 #    README §7: en Bruno, el backoffice hace de empleado.
 #
-#  >>> LAS DOS FUENTES DE TOKEN, Y POR QUE SON DOS <<<
+#  >>> DE DONDE SALE CADA TOKEN, Y POR QUE NO BASTA UNA VIA <<<
 #    * Navegador (SpaClient, code+PKCE)  -> access_token CON el custom scope.
 #      Exige una pantalla de login: no se puede automatizar.
 #    * M2mClient (client_credentials)    -> access_token CON el custom scope,
@@ -97,7 +97,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      no autorizado".
 #
 #  TRAMPAS
-#    * Los dos UserPoolClient necesitan DependsOn: ResourceServer. Sin eso
+#    * Los tres UserPoolClient necesitan DependsOn: ResourceServer. Sin eso
 #      CloudFormation los crea en paralelo y fallan con "scope does not exist".
 #    * client_credentials NO admite openid/email/profile: son scopes de OIDC y
 #      ahi no hay usuario. Solo el custom scope.

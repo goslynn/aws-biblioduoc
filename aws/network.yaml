@@ -12,8 +12,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    * PrivateRouteTable       -> la tabla de rutas de ambas, con UNA sola ruta:
 #                                 la local (10.20.0.0/16). Nada mas.
 #    * PublicSubnet            -> UNA subred con salida a Internet, para la EC2
-#      + InternetGateway          de la aplicacion (backend.yaml) y, si se
-#      + PublicRouteTable         levanta, el servidor VPN opcional (vpn.yaml).
+#      + InternetGateway          de la aplicacion (backend.yaml), el servidor
+#      + PublicRouteTable         web (web.yaml) y, si se levanta, el servidor
+#                                 VPN opcional (vpn.yaml).
 #    * AppSecurityGroup        -> el de la EC2: entra solo el 8080 desde la VPC
 #                                 (el NLB) y sale solo a lo que la app necesita.
 #    * DatabaseSecurityGroup   -> el de RDS: solo acepta el 5432 si viene del
@@ -23,7 +24,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    El backend era una Lambda en las subredes privadas, sin ninguna salida.
 #    Ahora es un proceso en EC2 (junto a RabbitMQ) que necesita SALIR:
 #      * al proveedor SMTP (587): el lab bloquea SES, el correo es externo;
-#      * a Docker Hub, S3, Secrets Manager, SSM y Cognito (443).
+#      * a ECR Public (imagenes), S3, Secrets Manager, SSM y Cognito (443).
 #    Un NAT Gateway cuesta por hora aunque el lab este apagado. La alternativa
 #    elegida: la EC2 en una subred publica, con IP publica SOLO para salir. Su
 #    security group no acepta NADA desde Internet. Es una desviacion declarada
@@ -66,6 +67,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    PrivateSubnetIds                          -> backend.yaml (NLB), database.yaml
 #    VpcCidr                                   -> vpn.yaml
 #    DatabaseSecurityGroupId                   -> database.yaml, vpn.yaml
+#    VpcId, PublicSubnetId                     -> web.yaml
 #    VpcId, PublicSubnetId, AppSecurityGroupId -> vpn.yaml (opcional)
 #
 #  DESPLIEGUE MANUAL
@@ -104,7 +106,7 @@ Parameters:
   PublicSubnetCidr:
     Type: String
     Default: 10.20.100.0/24
-    Description: Rango de la subred publica (EC2 de la aplicacion y VPN opcional).
+    Description: Rango de la subred publica (EC2 de la aplicacion, servidor web y VPN opcional).
 
   DatabasePort:
     Type: Number
@@ -258,7 +260,8 @@ Resources:
   #    Entrada: SOLO el puerto de la app desde el rango de la VPC, que es de
   #             donde llegan el NLB y sus health checks. Nada desde Internet:
   #             la IP publica de la instancia no responde a nada.
-  #             (vpn.yaml anade, mientras existe, el panel de RabbitMQ.)
+  #             (vpn.yaml anade, mientras existe, los paneles de RabbitMQ y
+  #             el administrador.)
   #    Salida:  443 (imagenes, S3, Secrets Manager, SSM, Cognito),
   #             587 (SMTP) y 5432 hacia la base (regla suelta, abajo).
   #             RabbitMQ no necesita reglas: app y broker hablan dentro de la

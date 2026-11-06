@@ -17,7 +17,7 @@ const enCurso = (s: Solicitud) => s.estado === 'RECIBIDA' || s.estado === 'APROB
  * Las solicitudes del usuario que tiene la sesion abierta, y el interruptor de
  * los avisos por correo.
  *
- * El filtro "mias" lo aplica el BACKEND comparando con el sujeto del token: el
+ * Que sean solo las propias lo decide el BACKEND con el sujeto del token: el
  * frontend no manda ningun identificador de usuario, porque un identificador
  * enviado por el cliente es un identificador que el cliente puede cambiar.
  * Por la misma razon, activar los avisos no manda el correo: el backend lo lee

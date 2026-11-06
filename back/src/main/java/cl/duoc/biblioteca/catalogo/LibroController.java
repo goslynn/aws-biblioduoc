@@ -16,11 +16,11 @@ import org.springframework.web.server.ResponseStatusException;
  * POR QUE DOS PREFIJOS EN @RequestMapping
  *   /api/libros      es la ruta historica, la que expone api.yaml recurso por
  *                    recurso con su scope por metodo.
- *   /v1/api/libros   es la ruta versionada (Fase 14 del plan). En API Gateway
+ *   /v1/api/libros   es la ruta versionada. En API Gateway
  *                    /v1 es un unico recurso proxy, asi que el enrutado fino
  *                    lo hace Spring aqui mismo. Cuando exista un /v2 con un
  *                    contrato incompatible, sera OTRA clase controladora y las
- *                    dos convivieran sin romper a nadie.
+ *                    dos convivirian sin romper a nadie.
  */
 @RestController
 @RequestMapping({ "/api/libros", "/v1/api/libros" })
@@ -58,8 +58,8 @@ public class LibroController {
      *
      * El 404 de aqui es IMPORTANTE para el laboratorio: la infraestructura no
      * lo puede producir (API Gateway responde 403 a una ruta que no conoce),
-     * asi que recibirlo demuestra que la peticion atraveso el authorizer, la
-     * Lambda y Spring, y llego hasta este metodo.
+     * asi que recibirlo demuestra que la peticion atraveso el authorizer, el
+     * VPC Link, el NLB y Spring, y llego hasta este metodo.
      */
     @GetMapping("/{id}")
     public Libro porId(@PathVariable String id) {

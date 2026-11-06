@@ -9,8 +9,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 #                          Manager. Solo los usa Flyway, al arrancar, para crear
 #                          el esquema y el rol de la aplicacion.
 #    * AppSecret        -> contrasena del rol biblioteca_app, el que usa la
-#                          aplicacion para atender peticiones (SELECT/INSERT y
-#                          nada mas; ver back/.../db/migration/V1__esquema.sql).
+#                          aplicacion para atender peticiones, con permisos
+#                          minimos (ver back/.../db/migration, V1 y V3).
 #    * DbSubnetGroup    -> las dos subredes privadas de network.yaml.
 #    * DbParameterGroup -> obliga a TLS y endurece la autenticacion.
 #    * DbInstance       -> la base: PostgreSQL 16, db.t3.micro, cifrada, SIN IP
@@ -25,8 +25,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #       aplicacion ademas verifica el certificado y el nombre (verify-full).
 #    4. Credenciales: aleatorias, de 32 caracteres, generadas aqui mismo.
 #       Nunca pasan por el repositorio ni por la terminal de nadie.
-#    5. Privilegios: la aplicacion no usa el maestro, sino biblioteca_app, que
-#       no puede ni borrar ni modificar nada.
+#    5. Privilegios: la aplicacion no usa el maestro, sino biblioteca_app, sin
+#       DDL: solo cambia columnas concretas (stock, ciclo de vida) y solo borra
+#       donde borrar es negocio.
 #    6. Reposo: almacenamiento y backups cifrados con la clave de RDS de la
 #       cuenta.
 #

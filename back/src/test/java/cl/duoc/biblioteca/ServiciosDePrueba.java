@@ -42,7 +42,7 @@ public class ServiciosDePrueba {
         return new PostgreSQLContainer("postgres:16-alpine");
     }
 
-    /** La misma imagen que levanta el UserData de aws/backend.yaml. */
+    /** La misma version que el cluster de aws/backend/compose.yaml. */
     @Bean
     RabbitMQContainer rabbit() {
         return new RabbitMQContainer("rabbitmq:4.1-management-alpine");

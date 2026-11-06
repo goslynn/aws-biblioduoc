@@ -1,7 +1,6 @@
 # Material de origen: la guia del profesor y los ZIP de la entrega anterior.
 # Se mantiene fuera de git (regla que ya existia en el commit inicial): son
-# archivos pesados y de terceros. El plan de trabajo se referencia desde el
-# README pero vive solo en local.
+# archivos pesados y de terceros.
 .context/
 
 # ---- Backend (Maven multi-modulo: comun, back, admin-rabbit) ----

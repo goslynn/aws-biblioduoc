@@ -2,12 +2,11 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 /**
- * Compilacion del sitio. Sale a dist/, que aws/pipeline/publish-web.sh sube
- * tal cual al bucket.
+ * Compilacion del sitio. Sale a dist/, que aws/pipeline/publish-web.sh empaqueta
+ * para el servidor de Caddy (front/Caddyfile).
  *
- * base: '/' porque el sitio vive en la RAIZ del bucket y se abre como
- * https://<bucket>.s3.<region>.amazonaws.com/index.html: los bundles quedan en
- * /assets/ del mismo bucket.
+ * base: '/' porque el sitio vive en la RAIZ del dominio: los bundles quedan en
+ * /assets/, que es lo que el Caddyfile deja cachear.
  *
  * No hay "server" configurado a proposito: el proyecto no tiene entorno de
  * desarrollo (localhost no esta en las listas blancas de Cognito ni en el

@@ -5,8 +5,9 @@
 #
 #  QUE HACE
 #    1. Baja la interfaz WireGuard local, si esta levantada (pide sudo).
-#    2. Borra el stack de la VPN: servidor, subred publica, Internet Gateway y
-#       la regla que abria la base al tunel. La VPC vuelve a quedar sin salida.
+#    2. Borra el stack de la VPN: el servidor y las reglas que abrian la base,
+#       los paneles y el administrador al tunel. La subred publica y el Internet
+#       Gateway son de network.yaml y se quedan.
 #    3. Borra los archivos locales que llevan secretos (configuracion del tunel
 #       y contrasena de la base). Conserva el par de llaves del equipo para la
 #       proxima vez; si quieres uno nuevo, borra aws/.local/vpn/ entero.

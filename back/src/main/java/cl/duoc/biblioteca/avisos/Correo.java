@@ -5,7 +5,7 @@ package cl.duoc.biblioteca.avisos;
  *
  * Lleva el texto ya redactado y la direccion ya resuelta, de modo que
  * {@link EnviadorSmtp} no consulte nada: solo envia. Si el SMTP falla y el
- * mensaje vuelve horas despues, sale exactamente el mismo correo.
+ * mensaje vuelve mas tarde, sale exactamente el mismo correo.
  *
  * @param mensajeId  unico por destinatario y evento; es la clave de
  *                   idempotencia en la tabla correo_enviado

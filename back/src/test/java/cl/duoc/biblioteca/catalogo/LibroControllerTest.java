@@ -114,7 +114,7 @@ class LibroControllerTest {
     }
 
     @Test
-    @DisplayName("/health sigue siendo publico: es la sonda del Lambda Web Adapter")
+    @DisplayName("/health sigue siendo publico: es la sonda del NLB")
     void healthPublico() throws Exception {
         mvc.perform(get("/health")).andExpect(status().isOk());
     }

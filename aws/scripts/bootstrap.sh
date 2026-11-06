@@ -13,7 +13,7 @@
 #                                           privado (~10 min la primera vez)
 #    1c. cognito                         -> recibe la URL REAL del sitio (Output
 #                                           SiteUrl de web) para los callbacks
-#    2. pipeline/build-backend.sh        -> compila, sube el jar y crea la EC2
+#    2. pipeline/build-backend.sh        -> compila, sube el paquete y crea la EC2
 #                                           con RabbitMQ y el NLB
 #    3. pipeline/api-deploy.sh           -> stack de la API (necesita el pool y
 #                                           el NLB) y publicacion en el stage

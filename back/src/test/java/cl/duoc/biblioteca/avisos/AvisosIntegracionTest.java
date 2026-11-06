@@ -334,7 +334,7 @@ class AvisosIntegracionTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("SMTP caido: el correo da 3 vueltas por correo.espera y termina en correo.fallidos")
+    @DisplayName("SMTP caido: 3 intentos, 2 vueltas por correo.espera, y termina en correo.fallidos")
     void smtpCaidoAgotaReintentos() throws Exception {
         String sub = alumnoConAvisos();
         smtp.stop();

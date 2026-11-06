@@ -61,7 +61,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      un salto mas) y el SDK de la app se queda sin credenciales: el PUT de
 #      activar avisos responderia 500 al llamar a Cognito.
 #    * CreationPolicy: CloudFormation espera la senal de cfn-signal, que el
-#      UserData manda cuando /health responde. Si en 15 min no llega, el stack
+#      UserData manda cuando /health responde. Si en 20 min no llega, el stack
 #      falla en vez de quedar "creado" con una aplicacion que no arranco. Para
 #      ver por que: aws ec2 get-console-output --instance-id <id> --latest
 #    * El NLB vive en dos AZ y la instancia en una: sin cross-zone, el nodo
@@ -125,7 +125,7 @@ Parameters:
       Perfil de instancia de la EC2. En AWS Academy NO se pueden crear roles
       IAM, asi que se usa el preexistente LabInstanceProfile (rol LabRole). Le
       da a la instancia —y al SDK de la app— credenciales temporales, sin
-      Access Keys: leer el jar en S3, los secretos, SSM y Cognito.
+      Access Keys: leer el paquete en S3, los secretos, SSM y Cognito.
 
   InstanceType:
     Type: String
@@ -384,7 +384,7 @@ Resources:
     CreationPolicy:
       ResourceSignal:
         Count: 1
-        # Instalar Docker y compose, bajar tres imagenes y formar el cluster.
+        # Instalar Docker y compose, bajar dos imagenes y formar el cluster.
         Timeout: PT20M
     Properties:
       ImageId: !Ref ImageId
@@ -394,7 +394,7 @@ Resources:
       NetworkInterfaces:
         - DeviceIndex: "0"
           SubnetId: !Ref PublicSubnetId
-          # IP publica SOLO para salir (SMTP, Docker Hub...). El security
+          # IP publica SOLO para salir (SMTP, imagenes, S3...). El security
           # group no acepta nada desde Internet.
           AssociatePublicIpAddress: true
           GroupSet: [!Ref AppSecurityGroupId]

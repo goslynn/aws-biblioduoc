@@ -181,7 +181,8 @@ Resources:
   #  Security group del servidor.
   #    Entrada: SOLO UDP de WireGuard, SOLO desde ClientCidr.
   #    Salida:  80/443 para instalar WireGuard con apt en el primer arranque,
-  #             y el puerto de la base hacia el security group de RDS.
+  #             el puerto de la base hacia el security group de RDS, y los
+  #             paneles y el administrador hacia la EC2 de la aplicacion.
   #  Las respuestas del tunel salen igual: los security groups son stateful.
   # ---------------------------------------------------------------------------
   VpnSecurityGroup:

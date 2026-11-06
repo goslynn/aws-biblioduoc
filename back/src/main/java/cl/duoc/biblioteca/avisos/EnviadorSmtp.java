@@ -128,7 +128,9 @@ public class EnviadorSmtp {
                 canal.basicNack(tag, false, false);
             }
         } catch (RuntimeException e) {
-            // La base (correo_enviado) no responde: tambien es transitorio.
+            // La base (correo_enviado) no responde: tambien es transitorio. Esta
+            // rama no mira max-intentos: da vueltas hasta que la base vuelva. Si
+            // fallo registrar, el correo ya salio y se enviara otra vez.
             log.warn("correo {}: fallo del entorno, a correo.espera: {}", correo.mensajeId(), e.toString());
             canal.basicNack(tag, false, false);
         }
