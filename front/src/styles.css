@@ -640,3 +640,33 @@ button.chip[aria-pressed='true']:hover:not(:disabled),
 }
 @keyframes girar { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .girando { animation-duration: 2.4s; } }
+
+/* Indicador de las vistas en vivo (stock del catalogo, bandeja del empleado),
+   que alimenta Kafka. El punto late para que se note que se actualiza solo. */
+.en-vivo {
+  display: inline-flex; align-items: center; gap: .4rem; margin-left: .75rem;
+  font-size: .82rem; color: var(--exito); white-space: nowrap;
+}
+.en-vivo::before {
+  content: ''; width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+  animation: latido 2s ease-in-out infinite;
+}
+@keyframes latido { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .en-vivo::before { animation: none; } }
+
+/* Resumen en vivo de la bandeja: pendientes por sede. */
+.resumen-vivo {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem;
+  padding: .75rem 1rem; margin-bottom: 1rem;
+  background: var(--panel); border: 1px solid var(--linea); border-radius: var(--radio);
+}
+.resumen-vivo .sede { font-size: .9rem; color: var(--tinta-2); }
+.resumen-vivo .sede strong { color: var(--tinta); }
+.resumen-vivo .sede.con-pendientes strong { color: var(--azul); }
+/* Una solicitud que llego mientras el empleado miraba la bandeja. */
+.solicitud.nueva { outline: 2px solid var(--amarillo); outline-offset: -2px; }
+.solicitud.nueva .id h2::after {
+  content: 'nueva'; margin-left: .5rem; padding: .1rem .5rem; border-radius: 999px;
+  font: 600 .72rem/1.4 var(--texto); background: var(--amarillo-fondo); color: var(--amarillo-tinta);
+  vertical-align: middle;
+}

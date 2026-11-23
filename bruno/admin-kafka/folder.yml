@@ -1,0 +1,83 @@
+info:
+  name: admin-kafka
+  type: folder
+  seq: 6
+  description: Microservicio administrador de Kafka - topicos, configuracion y consumer groups (solo por la VPN)
+
+request:
+  auth: inherit
+  scripts:
+    - type: before-request
+      code: |-
+        // Esta carpeta habla con OTRO servicio (admin-kafka, :8082), que no
+        // esta detras de API Gateway: solo se llega por la VPN. En los demas
+        // entornos no hay ADMIN_KAFKA_URL, y estas peticiones se saltan en
+        // vez de fallar.
+        if (!bru.getEnvVar("ADMIN_KAFKA_URL")) {
+          bru.runner.skipRequest();
+        }
+
+docs: |
+  # admin-kafka (administrador de Kafka)
+
+  El **tercer microservicio** Spring Boot (`admin-kafka/`): administra el
+  cluster Kafka de la EC2 (3 Zookeeper + 3 brokers). Toda la logica vive en
+  `KafkaAdminService`, la unica clase que habla con el `Admin` de Kafka; los
+  controladores solo reciben DTO validados.
+
+  | Que | Operaciones |
+  |---|---|
+  | Cluster | brokers vivos y controlador |
+  | Topicos | crear, listar, describir (lider, replicas, ISR, offsets), cambiar configuracion, aumentar particiones, borrar |
+  | Consumer groups | listar, ver miembros y **lag** por particion, mover offsets (INICIO, FIN, FECHA), borrar |
+
+  ## Donde esta
+
+  En la misma EC2 que la API, puerto **8082**, **sin** API Gateway: se llega
+  por la **VPN** (`./aws/scripts/vpn-up.sh`) y exige un **JWT de empleado**
+  (validacion del modulo `comun`, igual que `admin-rabbit`). Kafka UI, en
+  `:8090` de la misma IP, muestra lo mismo en un panel.
+
+  ## Entornos
+
+  | Entorno | Credencial | Resultado |
+  |---|---|---|
+  | `aws-admin-kafka-vpn` | cliente M2M backoffice (scope `gestion`) | el ciclo completo |
+  | `aws-admin-kafka-vpn-estudiante` | cliente M2M, scope `acceso` | **403** en todo |
+
+  Los genera `./aws/pipeline/bruno-env.sh`. Se corre SOLO esta carpeta:
+
+  ```sh
+  cd bruno
+  bru run admin-kafka --env aws-admin-kafka-vpn
+  bru run admin-kafka --env aws-admin-kafka-vpn-estudiante
+  ```
+
+  ## Orden en `bru run`
+
+  Ve el cluster y los topicos, crea `demo.kafka` (3 particiones, 3 replicas),
+  lo describe, le cambia `retention.ms`, le sube las particiones a 6, revisa
+  los grupos y el lag de `catalogo-vivo`, intenta mover los offsets de
+  `auditoria-kafka` (409 mientras la API este arriba: tiene consumidores) y
+  borra `demo.kafka`. Si una ejecucion se corta, la siguiente recibe 409 al
+  crear: borra `demo.kafka` con `delete-topic` y vuelve a correrla.
+
+  ## Reglas que aplica el servicio
+
+  * **Nombres**: minusculas, digitos, `.`, `-` y `_`; nada que empiece por
+    `__` (internos de Kafka). Si no, **400**.
+  * **Topicos protegidos** (`biblioteca.inventario`, `biblioteca.solicitudes`
+    y sus `.dlt`, mas los internos): no se borran, no cambian de particiones
+    (moveria cada clave de particion y romperia su orden) ni de
+    `cleanup.policy` (cambiaria lo que el topico es): **409**. Su
+    `retention.ms` si se puede ajustar.
+  * **Configuracion**: solo las claves de `admin.kafka.configuraciones-permitidas`;
+    otra clave, o un valor que Kafka rechaza, es **400**.
+  * **Particiones**: solo se aumentan (**409** si no).
+  * **Offsets**: solo con el grupo **vacio** (sin consumidores): **409** si no.
+  * **Cluster caido**: **503**.
+
+  | Codigo | Significado en esta carpeta |
+  |---|---|
+  | 401 | sin token, o token invalido |
+  | 403 | token valido de alguien que no es empleado |

@@ -8,6 +8,7 @@ import java.util.stream.Collectors;
 import org.springframework.stereotype.Component;
 
 import cl.duoc.biblioteca.eventos.Evento;
+import cl.duoc.biblioteca.eventos.MensajeInvalido;
 import cl.duoc.biblioteca.eventos.TiposEvento;
 import cl.duoc.biblioteca.solicitudes.LineaSolicitud;
 import cl.duoc.biblioteca.solicitudes.Sede;

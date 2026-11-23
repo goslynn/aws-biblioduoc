@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  El backend de la biblioteca: DOS microservicios Spring Boot y una libreria
+  El backend de la biblioteca: TRES microservicios Spring Boot y una libreria
   comun, en un solo build de Maven.
 
     comun         seguridad JWT (decodificador, autoridades, roles) y el
@@ -9,10 +9,12 @@
                   Productor y consumidor de RabbitMQ.
     admin-rabbit  el administrador de RabbitMQ: crea y borra colas, exchanges
                   y bindings por REST. Solo interno (por la VPN).
+    admin-kafka   el administrador de Kafka: topicos, su configuracion y los
+                  consumer groups (lag, offsets) por REST. Solo interno.
 
   Cada servicio es su propio fat jar y su propio contenedor
   (aws/backend/compose.yaml). Lo comun se comparte en el build, no en
-  tiempo de ejecucion: si cambia, se vuelven a construir los dos.
+  tiempo de ejecucion: si cambia, se vuelven a construir los tres.
 
   ./mvnw package                     todo, con los tests (necesita Docker)
   ./mvnw -pl back -am package        solo la API (y lo que necesita)
@@ -40,6 +42,7 @@
     <module>comun</module>
     <module>back</module>
     <module>admin-rabbit</module>
+    <module>admin-kafka</module>
   </modules>
 
   <properties>

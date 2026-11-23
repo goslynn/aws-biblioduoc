@@ -2,13 +2,13 @@ package cl.duoc.biblioteca.catalogo;
 
 import java.util.List;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
+
+import jakarta.validation.constraints.Size;
 
 /**
  * Catalogo de libros: la parte de solo lectura de la plataforma.
@@ -27,9 +27,11 @@ import org.springframework.web.server.ResponseStatusException;
 public class LibroController {
 
     private final CatalogoLibros catalogo;
+    private final ProyeccionStock stockVivo;
 
-    public LibroController(CatalogoLibros catalogo) {
+    public LibroController(CatalogoLibros catalogo, ProyeccionStock stockVivo) {
         this.catalogo = catalogo;
+        this.stockVivo = stockVivo;
     }
 
     /**
@@ -37,12 +39,15 @@ public class LibroController {
      *
      * Sin parametros devuelve el catalogo completo; con ellos, el resultado de
      * la busqueda. Siempre 200, aunque el resultado sea una lista vacia: "no
-     * encontre nada" no es un error del cliente.
+     * encontre nada" no es un error del cliente. Un texto de mas de 100
+     * caracteres es 400 (ManejadorDeErrores, validacion de parametros).
      */
     @GetMapping
     public List<Libro> buscar(
-            @RequestParam(name = "q", required = false) String q,
-            @RequestParam(name = "genero", required = false) String genero,
+            @RequestParam(name = "q", required = false)
+            @Size(max = CatalogoLibros.MAX_TEXTO, message = "la busqueda no puede superar 100 caracteres") String q,
+            @RequestParam(name = "genero", required = false)
+            @Size(max = 50, message = "el genero no puede superar 50 caracteres") String genero,
             @RequestParam(name = "soloDisponibles", defaultValue = "false") boolean soloDisponibles) {
         return catalogo.buscar(q, genero, soloDisponibles);
     }
@@ -51,6 +56,20 @@ public class LibroController {
     @GetMapping("/generos")
     public List<String> generos() {
         return catalogo.generos();
+    }
+
+    /**
+     * GET /api/libros/stock-vivo -> el stock que cambio, segun Kafka (H8).
+     *
+     * Lo consulta el catalogo del navegador cada pocos segundos para
+     * actualizar las tarjetas sin recargar. No toca la base: responde desde
+     * ProyeccionStock, que alimenta el grupo catalogo-vivo. En API Gateway
+     * entra por el recurso /api/libros/{id} (como /generos): Spring prefiere
+     * la ruta literal a la variable.
+     */
+    @GetMapping("/stock-vivo")
+    public ProyeccionStock.StockVivo stockVivo() {
+        return stockVivo.instantanea();
     }
 
     /**
@@ -63,7 +82,6 @@ public class LibroController {
      */
     @GetMapping("/{id}")
     public Libro porId(@PathVariable String id) {
-        return catalogo.porId(id).orElseThrow(() -> new ResponseStatusException(
-                HttpStatus.NOT_FOUND, "No existe el libro " + id));
+        return catalogo.existente(id);
     }
 }

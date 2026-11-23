@@ -1,112 +1,78 @@
 package cl.duoc.biblioteca.catalogo;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
+
+import cl.duoc.biblioteca.comun.errores.RecursoNoEncontrado;
 
 /**
- * El catalogo de libros, leido de la tabla {@code libro} de PostgreSQL.
+ * La LECTURA del catalogo: lo que necesitan los controladores y los demas
+ * servicios para encontrar un libro. Los cambios de stock son de
+ * {@link ServicioInventario}.
  *
  * DE DONDE SALEN LOS DATOS
  *   De la migracion db/migration/V2__catalogo_inicial.sql (el seed), que Flyway
- *   aplica al arrancar. La aplicacion se conecta con el rol biblioteca_app, que
- *   sobre esta tabla tiene SELECT y UPDATE de UNA columna, ejemplares (V3): el
- *   stock cambia al aprobar, devolver y cargar; titulo, autor o ISBN no se
- *   pueden modificar desde la API ni aunque hubiera un fallo en este codigo.
+ *   aplica al arrancar. Titulo, autor o ISBN no se pueden modificar desde la
+ *   API ni aunque hubiera un fallo en este codigo: biblioteca_app solo tiene
+ *   UPDATE de la columna ejemplares.
  */
-@Component
+@Service
 public class CatalogoLibros {
 
-    private static final String COLUMNAS =
-            "SELECT id, titulo, autor, genero, anio, isbn, ejemplares, ubicacion, sinopsis FROM libro ";
+    /** Busquedas mas largas no son de una persona: se cortan antes de llegar a la base. */
+    static final int MAX_TEXTO = 100;
 
-    private final JdbcClient jdbc;
+    private final RepositorioLibros libros;
 
-    public CatalogoLibros(JdbcClient jdbc) {
-        this.jdbc = jdbc;
-    }
-
-    /** Todos los libros, ordenados por titulo. */
-    public List<Libro> todos() {
-        return jdbc.sql(COLUMNAS + "ORDER BY titulo").query(Libro.class).list();
+    public CatalogoLibros(RepositorioLibros libros) {
+        this.libros = libros;
     }
 
     /**
-     * Busqueda del catalogo. Los tres filtros se combinan con Y logico y todos
-     * son opcionales: sin ninguno, devuelve el catalogo entero.
-     *
-     * Cada filtro va como parametro ligado (:texto, :genero), nunca concatenado
-     * en el SQL: es lo que hace imposible la inyeccion. Un filtro vacio se
-     * desactiva con "parametro = ''" en vez de armar el SQL a trozos.
-     *
      * @param texto           busca en titulo, autor e ISBN, sin distinguir
      *                        mayusculas ni tildes (extension unaccent, ver V1)
      * @param genero          coincidencia exacta de genero, sin distinguir mayusculas
      * @param soloDisponibles si es true, descarta los libros sin ejemplares
      */
     public List<Libro> buscar(String texto, String genero, boolean soloDisponibles) {
-        return jdbc.sql(COLUMNAS + """
-                WHERE (:texto = '' OR unaccent(lower(titulo)) LIKE '%' || unaccent(lower(:texto)) || '%'
-                                   OR unaccent(lower(autor))  LIKE '%' || unaccent(lower(:texto)) || '%'
-                                   OR lower(isbn)             LIKE '%' || lower(:texto) || '%')
-                  AND (:genero = '' OR lower(genero) = lower(:genero))
-                  AND (NOT :soloDisponibles OR ejemplares > 0)
-                ORDER BY titulo
-                """)
-                .param("texto", limpiar(texto))
-                .param("genero", limpiar(genero))
-                .param("soloDisponibles", soloDisponibles)
-                .query(Libro.class)
-                .list();
+        return libros.buscar(patronLike(texto), limpiar(genero), soloDisponibles);
     }
 
     /** Los generos presentes en el catalogo, para poblar el filtro del frontend. */
     public List<String> generos() {
-        return jdbc.sql("SELECT DISTINCT genero FROM libro ORDER BY genero").query(String.class).list();
+        return libros.generos();
     }
 
-    /** Vacio si el id no existe: quien llama decide si eso es un 404. */
+    /**
+     * Vacio si el id no existe: quien llama decide si eso es un 404.
+     *
+     * El id se acepta sin distinguir mayusculas ("l-001"), pero se normaliza
+     * AQUI y no con upper(id) en el SQL: asi la consulta usa la clave primaria
+     * en vez de recorrer la tabla entera.
+     */
     public Optional<Libro> porId(String id) {
-        return jdbc.sql(COLUMNAS + "WHERE upper(id) = upper(:id)")
-                .param("id", id)
-                .query(Libro.class)
-                .optional();
+        return id == null ? Optional.empty() : libros.findById(id.strip().toUpperCase(Locale.ROOT));
+    }
+
+    /** El libro, o un 404 con el id pedido. */
+    public Libro existente(String id) {
+        return porId(id).orElseThrow(() -> new RecursoNoEncontrado("No existe el libro " + id));
     }
 
     /**
-     * Resta ejemplares SOLO si alcanzan, en una sentencia atomica.
-     *
-     * Leer el stock, comprobarlo en Java y luego restar dejaria una ventana
-     * en la que dos aprobaciones simultaneas ven "queda 1" y se llevan 2. Con
-     * la condicion dentro del UPDATE, Postgres la evalua con la fila ya
-     * bloqueada: la segunda aprobacion cambia 0 filas.
-     *
-     * @return false si no quedaban suficientes ejemplares
+     * El texto del usuario como patron LIKE LITERAL. Sin escapar, un "%" o un
+     * "_" funcionarian como comodines: no es inyeccion SQL (va ligado), pero
+     * "_" encontraria cualquier titulo con al menos una letra.
      */
-    public boolean descontar(String libroId, int cantidad) {
-        return jdbc.sql("UPDATE libro SET ejemplares = ejemplares - :n WHERE id = :id AND ejemplares >= :n")
-                .param("id", libroId)
-                .param("n", cantidad)
-                .update() == 1;
-    }
-
-    /**
-     * Suma ejemplares (devolucion o carga de stock).
-     *
-     * @return los ejemplares que hay DESPUES de sumar, o vacio si el libro no existe
-     */
-    public Optional<Integer> sumar(String libroId, int cantidad) {
-        return jdbc.sql("UPDATE libro SET ejemplares = ejemplares + :n WHERE id = :id RETURNING ejemplares")
-                .param("id", libroId)
-                .param("n", cantidad)
-                .query(Integer.class)
-                .optional();
+    static String patronLike(String texto) {
+        return limpiar(texto).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     /** null y espacios cuentan como "sin filtro". */
     private static String limpiar(String texto) {
-        return texto == null ? "" : texto.trim();
+        return texto == null ? "" : texto.strip();
     }
 }

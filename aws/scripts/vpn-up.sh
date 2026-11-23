@@ -222,7 +222,7 @@ psql "postgresql://${BD_USUARIO}:${BD_CLAVE}@${DB_ENDPOINT}:${DB_PORT}/${DB_NAME
 EOF
 )
 
-# Los paneles de RabbitMQ y el administrador, si el backend esta desplegado:
+# Los paneles de RabbitMQ y Kafka y los administradores, si el backend esta desplegado:
 # misma VPN, otros puertos (aws/backend/compose.yaml).
 PANEL=""
 APP_IP="$(output_de "$STACK_BACKEND" AppPrivateIp)"
@@ -240,6 +240,24 @@ if [ -n "$APP_IP" ] && [ -n "$RABBIT_SECRET" ]; then
 
     Admin Rabbit: http://${APP_IP}:8081/api/admin/...   (JWT de empleado)
                  bru run admin --env aws-admin-vpn   (tras ./aws/pipeline/bruno-env.sh)
+"
+  fi
+fi
+
+# Kafka: el panel (Kafka UI, con su propio usuario) y el administrador.
+KAFKA_UI_SECRET="$(output_de "$STACK_BACKEND" KafkaUiSecretArn)"
+if [ -n "$APP_IP" ] && [ -n "$KAFKA_UI_SECRET" ]; then
+  KAFKA_UI_JSON="$(aws secretsmanager get-secret-value --secret-id "$KAFKA_UI_SECRET" \
+    --region "$AWS_REGION" --query SecretString --output text)" || KAFKA_UI_JSON=""
+  if [ -n "$KAFKA_UI_JSON" ]; then
+    PANEL="${PANEL}
+    Kafka UI:    http://${APP_IP}:8090
+    Usuario:     $(printf '%s' "$KAFKA_UI_JSON" | jq -r .username)
+    Contrasena:  $(printf '%s' "$KAFKA_UI_JSON" | jq -r .password)
+                 (brokers, topicos 3x3, mensajes, consumer groups y su lag)
+
+    Admin Kafka: http://${APP_IP}:8082/api/admin/...   (JWT de empleado)
+                 bru run admin-kafka --env aws-admin-kafka-vpn
 "
   fi
 fi

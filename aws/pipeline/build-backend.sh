@@ -4,11 +4,13 @@
 # ==============================================================================
 #
 #  QUE HACE, EN CINCO PASOS
-#    1. COMPILA    ./mvnw package en la raiz: los modulos comun, back y
-#                  admin-rabbit (los tests levantan PostgreSQL y RabbitMQ en
-#                  Docker: hace falta Docker, o SKIP_TESTS=true)
-#    2. PUBLICA    empaqueta los DOS fat jars (API y administrador) con
-#                  aws/backend/compose.yaml, rabbitmq.conf y enabled_plugins en
+#    1. COMPILA    ./mvnw package en la raiz: los modulos comun, back,
+#                  admin-rabbit y admin-kafka (los tests levantan PostgreSQL,
+#                  RabbitMQ y Kafka en Docker: hace falta Docker, o
+#                  SKIP_TESTS=true)
+#    2. PUBLICA    empaqueta los TRES fat jars (API y los dos administradores)
+#                  con los compose (compose.yaml, kafka.compose.yaml,
+#                  kafka-ui.compose.yaml), rabbitmq.conf y enabled_plugins en
 #                  un .tar.gz, lo sube al bucket de artefactos y anota su
 #                  VersionId
 #    3. DESPLIEGA  crea o actualiza el stack del backend (EC2 + NLB).
@@ -25,7 +27,7 @@
 #
 #  POR QUE EL PASO 4 Y NO "RECREAR LA INSTANCIA"
 #    Recrear la EC2 en cada despliegue tardaria minutos y borraria los
-#    volumenes del cluster RabbitMQ (colas y mensajes pendientes). El stack sigue siendo la fuente
+#    volumenes de los clusters RabbitMQ y Kafka (colas, topicos y offsets). El stack sigue siendo la fuente
 #    de la verdad de la INFRAESTRUCTURA y de la configuracion (parametro de
 #    SSM); el paquete es un artefacto versionado en S3, y la version que corre
 #    queda escrita en /etc/biblioteca/version.
@@ -41,7 +43,7 @@
 #  VARIABLES OPCIONALES
 #    PROJECT_NAME (biblioteca)  AWS_REGION (us-east-1)  SKIP_TESTS (false)
 #    REMINDER_LEAD (PT24H): antelacion del recordatorio de vencimiento
-#    INSTANCE_TYPE (t3.medium)
+#    INSTANCE_TYPE (t3.large; es el unico valor que admite la plantilla)
 #
 #  DESCARGA UNA COSA PUBLICA (lectura de configuracion, no una prueba)
 #    El JWKS de Cognito: las claves publicas con que se firman los tokens.
@@ -109,7 +111,7 @@ JWKS="$(curl -fsS "${ISSUER_URL}/.well-known/jwks.json" | jq -ce 'select((.keys 
 info "$(jq -r '.keys | map(.kid) | "claves: " + join(", ")' <<<"$JWKS")"
 
 # --- 1. Compilar ---------------------------------------------------------------
-log "Compilando los microservicios con Maven (comun, back, admin-rabbit)"
+log "Compilando los microservicios con Maven (comun, back, admin-rabbit, admin-kafka)"
 if [ "$SKIP_TESTS" = "true" ]; then
   ( cd "$ROOT" && ./mvnw -q -B -DskipTests package )
 else
@@ -123,10 +125,13 @@ fat_jar() {
 }
 JAR_API="$(fat_jar back)"
 JAR_ADMIN="$(fat_jar admin-rabbit)"
+JAR_ADMIN_KAFKA="$(fat_jar admin-kafka)"
 [ -n "$JAR_API" ] || die "no encontre el jar en back/target/"
 [ -n "$JAR_ADMIN" ] || die "no encontre el jar en admin-rabbit/target/"
-info "api   $(basename "$JAR_API") ($(du -h "$JAR_API" | cut -f1))"
-info "admin $(basename "$JAR_ADMIN") ($(du -h "$JAR_ADMIN" | cut -f1))"
+[ -n "$JAR_ADMIN_KAFKA" ] || die "no encontre el jar en admin-kafka/target/"
+info "api          $(basename "$JAR_API") ($(du -h "$JAR_API" | cut -f1))"
+info "admin-rabbit $(basename "$JAR_ADMIN") ($(du -h "$JAR_ADMIN" | cut -f1))"
+info "admin-kafka  $(basename "$JAR_ADMIN_KAFKA") ($(du -h "$JAR_ADMIN_KAFKA" | cut -f1))"
 
 # --- 2. Empaquetar y publicar en S3 -----------------------------------------
 # Los nombres de dentro del paquete son los que espera aws/backend/compose.yaml.
@@ -134,9 +139,13 @@ PAQUETE_DIR="$(mktemp -d)"
 trap 'rm -rf "$PAQUETE_DIR"' EXIT
 cp "$JAR_API" "${PAQUETE_DIR}/biblioteca-backend.jar"
 cp "$JAR_ADMIN" "${PAQUETE_DIR}/biblioteca-admin-rabbit.jar"
-cp "${ROOT}/aws/backend/compose.yaml" "${ROOT}/aws/backend/rabbitmq.conf" "${ROOT}/aws/backend/enabled_plugins" "$PAQUETE_DIR/"
+cp "$JAR_ADMIN_KAFKA" "${PAQUETE_DIR}/biblioteca-admin-kafka.jar"
+cp "${ROOT}/aws/backend/compose.yaml" "${ROOT}/aws/backend/kafka.compose.yaml" \
+   "${ROOT}/aws/backend/kafka-ui.compose.yaml" "${ROOT}/aws/backend/rabbitmq.conf" \
+   "${ROOT}/aws/backend/enabled_plugins" "$PAQUETE_DIR/"
 tar -czf "${PAQUETE_DIR}/paquete.tar.gz" -C "$PAQUETE_DIR" \
-  biblioteca-backend.jar biblioteca-admin-rabbit.jar compose.yaml rabbitmq.conf enabled_plugins
+  biblioteca-backend.jar biblioteca-admin-rabbit.jar biblioteca-admin-kafka.jar \
+  compose.yaml kafka.compose.yaml kafka-ui.compose.yaml rabbitmq.conf enabled_plugins
 info "paquete $(du -h "${PAQUETE_DIR}/paquete.tar.gz" | cut -f1)"
 
 log "Subiendo a s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY}"
@@ -159,7 +168,7 @@ info "VersionId ${VERSION_ID}"
 
 # --- 3. Desplegar el stack ----------------------------------------------------
 log "Desplegando el stack '${STACK_BACKEND}'"
-[ "$EXISTIA" = "true" ] || info "primera vez: la instancia instala Docker y compose y forma el cluster (~6 min)"
+[ "$EXISTIA" = "true" ] || info "primera vez: la instancia instala Docker y compose y forma los clusters (~10 min)"
 
 PARAMETROS=(
   "ProjectName=${PROJECT_NAME}"
@@ -215,7 +224,7 @@ if [ "$EXISTIA" = "true" ]; then
   info "servicio reiniciado con la version ${VERSION_ID}"
 
   # --- 5. Esperar a que el NLB la de por sana ----------------------------------
-  # compose espera a los dos nodos y Spring tarda unos segundos en levantar;
+  # compose espera a los nodos y Spring tarda unos segundos en levantar;
   # durante ese rato el NLB la marca como no sana y API Gateway responderia
   # 500. Se espera a que vuelva.
   log "Esperando a que el NLB vuelva a dar la instancia por sana"
@@ -231,7 +240,8 @@ cat <<EOF
     Instancia ${INSTANCE_ID}
     Codigo    s3://${ARTIFACTS_BUCKET}/${OBJECT_KEY} (version ${VERSION_ID})
 
-    Logs (streams app, admin-rabbit, rabbitmq-1, rabbitmq-2):
+    Logs (streams app, admin-rabbit, admin-kafka, rabbitmq-1, rabbitmq-2,
+          zookeeper-1..3, kafka-1..3, kafka-ui):
         aws logs tail ${LOG_GROUP} --follow --region ${AWS_REGION}
 
     Si cambiaste rutas o metodos, acuerdate de volver a publicar la API:

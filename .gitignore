@@ -3,7 +3,7 @@
 # archivos pesados y de terceros.
 .context/
 
-# ---- Backend (Maven multi-modulo: comun, back, admin-rabbit) ----
+# ---- Backend (Maven multi-modulo: comun, back, admin-rabbit, admin-kafka) ----
 # target/ de cada modulo y el jar del wrapper, que mvnw descarga solo.
 /*/target/
 /target/

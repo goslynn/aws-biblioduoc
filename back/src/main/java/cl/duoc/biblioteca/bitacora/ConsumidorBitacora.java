@@ -3,17 +3,13 @@ package cl.duoc.biblioteca.bitacora;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 import com.rabbitmq.client.Channel;
 
-import cl.duoc.biblioteca.avisos.LectorEventos;
-import cl.duoc.biblioteca.avisos.MensajeInvalido;
-import cl.duoc.biblioteca.eventos.Entregas;
+import cl.duoc.biblioteca.eventos.ProcesadorDeEventos;
 import cl.duoc.biblioteca.eventos.TopologiaRabbit;
 
 /**
@@ -23,43 +19,23 @@ import cl.duoc.biblioteca.eventos.TopologiaRabbit;
  * patron encaja, y "#" encaja con todo.
  *
  * El consumidor no sabe nada de correos: si manana se agrega otro tipo de
- * evento, aparece en la bitacora sin tocar esta clase.
+ * evento, aparece en la bitacora sin tocar esta clase. El ACK/NACK lo decide
+ * ProcesadorDeEventos.
  */
 @Component
 public class ConsumidorBitacora {
 
-    private static final Logger log = LoggerFactory.getLogger(ConsumidorBitacora.class);
-
-    private final LectorEventos lector;
+    private final ProcesadorDeEventos procesador;
     private final Bitacora bitacora;
 
-    public ConsumidorBitacora(LectorEventos lector, Bitacora bitacora) {
-        this.lector = lector;
+    public ConsumidorBitacora(ProcesadorDeEventos procesador, Bitacora bitacora) {
+        this.procesador = procesador;
         this.bitacora = bitacora;
     }
 
     @RabbitListener(queues = TopologiaRabbit.COLA_BITACORA, containerFactory = TopologiaRabbit.FABRICA_MANUAL)
     public void recibir(Message mensaje, Channel canal) throws IOException {
-        long tag = mensaje.getMessageProperties().getDeliveryTag();
-        try {
-            bitacora.anotar(lector.evento(mensaje), new String(mensaje.getBody(), StandardCharsets.UTF_8));
-            canal.basicAck(tag, false);
-        } catch (MensajeInvalido e) {
-            log.warn("mensaje invalido en {}, va a {}: {}",
-                    TopologiaRabbit.COLA_BITACORA, TopologiaRabbit.COLA_BITACORA_DLQ, e.getMessage());
-            canal.basicNack(tag, false, false);
-        } catch (RuntimeException e) {
-            if (Entregas.esUltima(mensaje)) {
-                // El requeue ya no reintenta: el broker lo aparta en la DLQ
-                // por x-delivery-limit. Se registra aqui, que es el ultimo
-                // momento en que la aplicacion lo ve.
-                log.error("fallo en {} tras {} reintentos, el broker lo aparta en {}: {}",
-                        TopologiaRabbit.COLA_BITACORA, Entregas.previas(mensaje),
-                        TopologiaRabbit.COLA_BITACORA_DLQ, e.toString());
-            } else {
-                log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_BITACORA, e.toString());
-            }
-            canal.basicNack(tag, false, true);
-        }
+        procesador.procesar(mensaje, canal, TopologiaRabbit.COLA_BITACORA, (evento, m) ->
+                bitacora.anotar(evento, new String(m.getBody(), StandardCharsets.UTF_8)));
     }
 }

@@ -126,6 +126,32 @@ bru run admin --env aws-admin-vpn-estudiante
 Las siete peticiones forman un ciclo que deja el broker como estaba (exchange
 `demo.topic`, cola `demo.cola`, binding `libro.*`, y su borrado).
 
+### El administrador de Kafka: lo mismo, puerto 8082
+
+La carpeta `admin-kafka/` habla con **`admin-kafka`**, el tercer
+microservicio (puerto **8082**, solo por la VPN), con `ADMIN_KAFKA_URL` en vez
+de `BASE_URL`. En los demas entornos se salta sola.
+
+| Entorno | Credencial | Resultado |
+|---|---|---|
+| `aws-admin-kafka-vpn` | cliente M2M backoffice (empleado) | cluster, ciclo de un topico 3x3, grupos y lag |
+| `aws-admin-kafka-vpn-estudiante` | cliente M2M de acceso (estudiante) | **403** en todo |
+
+```sh
+bru run admin-kafka --env aws-admin-kafka-vpn
+bru run admin-kafka --env aws-admin-kafka-vpn-estudiante
+```
+
+Las once peticiones dejan el cluster como estaba: crean `demo.kafka`, lo
+reconfiguran, le suben las particiones y lo borran. Dos aceptan mas de un
+codigo **a proposito**, porque dependen de si la API esta corriendo:
+`reset-offsets` (409 con consumidores activos, 200 sin ellos) y
+`delete-group` (404 si el grupo no existe, 204 si existia vacio).
+
+Ademas, dos peticiones de la API leen lo que mantiene Kafka y no la base:
+`libros/stock-vivo` (H8) y `gestion/bandeja-vivo` (H9). Siguen la matriz de
+entornos de siempre (`ESPERADO_LECTURA` y `ESPERADO_GESTION`).
+
 ---
 
 ## 4. Por que hacen falta TRES formas de conseguir un token

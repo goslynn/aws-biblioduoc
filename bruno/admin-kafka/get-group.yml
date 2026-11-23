@@ -1,0 +1,88 @@
+info:
+  name: get-group
+  type: http
+  seq: 8
+
+http:
+  method: GET
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos/:id"
+  params:
+    - name: id
+      value: "catalogo-vivo"
+      type: path
+      description: El grupo. bandeja-gestion y auditoria-kafka son los otros dos de la API.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("el lag total es la suma del lag de cada particion", function () {
+            const cuerpo = res.getBody();
+            const suma = cuerpo.offsets.reduce((a, o) => a + o.lag, 0);
+            expect(cuerpo.lagTotal).to.equal(suma);
+            cuerpo.offsets.forEach((o) => expect(o.lag).to.equal(o.fin - o.confirmado));
+          });
+        }
+
+docs: |
+  # Ver un consumer group: quien consume que, y cuanto le falta
+
+  `GET /api/admin/grupos/{id}`.
+
+  * `miembros`: cada consumidor (con `concurrency = 3`, la API pone tres
+    hilos en el grupo) y las particiones que le tocaron. Es el **balanceo**:
+    3 particiones, 3 consumidores, una cada uno.
+  * `offsets`: por particion, el ultimo offset **confirmado**, el **fin** del
+    topico y el **lag** (`fin - confirmado`): registros que el grupo aun no
+    procesa.
+  * `lagTotal`: la suma.
+
+  Lag 0 = el grupo esta al dia. Un lag que crece y no baja anticipa un
+  problema: el consumidor esta caido (estado `EMPTY`), es mas lento que el
+  productor, o se atasca en un registro (mirar su `.dlt` y los logs). Para
+  verlo: detener la API, cargar stock o crear solicitudes, y consultar este
+  grupo; al volver la API, el lag baja a 0.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | existe | entorno `aws-admin-kafka-vpn` |
+  | 400 | id con caracteres invalidos | `id = grupo!` |
+  | 404 | no existe | `id = no-existe` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 200 catalogo-vivo
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos/catalogo-vivo"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          {
+            "id": "catalogo-vivo", "estado": "STABLE", "coordinador": 2, "asignador": "cooperative-sticky",
+            "miembros": [
+              { "cliente": "biblioteca-backend-0", "host": "/172.18.0.9", "particiones": ["biblioteca.inventario-0"] },
+              { "cliente": "biblioteca-backend-1", "host": "/172.18.0.9", "particiones": ["biblioteca.inventario-1"] },
+              { "cliente": "biblioteca-backend-2", "host": "/172.18.0.9", "particiones": ["biblioteca.inventario-2"] }
+            ],
+            "offsets": [
+              { "topico": "biblioteca.inventario", "particion": 0, "confirmado": 14, "fin": 14, "lag": 0 },
+              { "topico": "biblioteca.inventario", "particion": 1, "confirmado": 9, "fin": 9, "lag": 0 },
+              { "topico": "biblioteca.inventario", "particion": 2, "confirmado": 11, "fin": 11, "lag": 0 }
+            ],
+            "lagTotal": 0
+          }

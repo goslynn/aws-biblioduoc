@@ -1,6 +1,6 @@
 import { http } from '../auth/http';
 import type { Libro } from '../catalogo/libro';
-import type { EstadoSolicitud, Solicitud } from '../solicitudes/solicitud';
+import type { EstadoSolicitud, Sede, Solicitud } from '../solicitudes/solicitud';
 
 /**
  * Las rutas de EMPLEADO (/api/gestion/**).
@@ -14,7 +14,24 @@ import type { EstadoSolicitud, Solicitud } from '../solicitudes/solicitud';
  */
 const base = '/api/gestion';
 
+/**
+ * GET /api/gestion/bandeja-vivo (ProyeccionBandeja.java): las solicitudes
+ * RECIBIDA segun el consumidor de Kafka, sin consultar la base (H9).
+ */
+export interface BandejaVivo {
+  pendientes: number;
+  porSede: Record<Sede, number>;
+  /** Las mas recientes primero, hasta 10. */
+  ultimas: { id: string; sede: Sede; ejemplares: number; titulos: string[]; recibidaEn: string }[];
+  actualizadoEn: string | null;
+}
+
 export const gestionService = {
+  /** GET /api/gestion/bandeja-vivo: lo pendiente, en vivo, desde Kafka. */
+  bandejaVivo(): Promise<BandejaVivo> {
+    return http.get<BandejaVivo>(`${base}/bandeja-vivo`);
+  },
+
   /** GET /api/gestion/solicitudes?estado= -> la bandeja completa, o filtrada. */
   solicitudes(estado: EstadoSolicitud | ''): Promise<Solicitud[]> {
     return http.get<Solicitud[]>(`${base}/solicitudes`, { estado: estado || undefined });

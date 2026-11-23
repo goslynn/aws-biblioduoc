@@ -128,4 +128,16 @@ class SolicitudControllerTest {
                         .content(VALIDA.replace("L-001", "L-005")).with(comoAlumno()))
                 .andExpect(status().isConflict());
     }
+
+    @Test
+    @DisplayName("repetir un libro en dos lineas responde 400: era la forma de pedir mas de 3 copias")
+    void libroRepetido() throws Exception {
+        String repetido = """
+                { "items": [ { "libroId": "L-001", "cantidad": 3 }, { "libroId": "l-001", "cantidad": 3 } ],
+                  "dias": 7, "sede": "SAN_JOAQUIN" }
+                """;
+        mvc.perform(post("/api/solicitudes").contentType(MediaType.APPLICATION_JSON).content(repetido).with(comoAlumno()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detalles.sinLibrosRepetidos").exists());
+    }
 }

@@ -1,0 +1,262 @@
+# ==============================================================================
+#  biblioteca / aws/backend/kafka.compose.yaml   --   Cluster Kafka: 3 Zookeeper + 3 brokers
+# ==============================================================================
+#
+#  QUE LEVANTA
+#    zookeeper-1..3   ensamble Zookeeper (quorum de 3): guarda QUIEN es el
+#                     broker controlador, que brokers estan vivos, los topicos
+#                     y su configuracion. Con 3 nodos tolera la caida de 1
+#                     (la mayoria es 2).
+#    kafka-1..3       tres brokers. Cada particion de un topico de la
+#                     biblioteca tiene 3 replicas, una en cada broker; una de
+#                     ellas es la LIDER (atiende lecturas y escrituras) y las
+#                     otras la siguen. Si cae el broker lider, el controlador
+#                     elige otra entre las sincronizadas (ISR).
+#
+#  QUIEN LO USA
+#    compose.yaml lo incluye (include:), asi que corre en el mismo proyecto y
+#    en la misma red que la API y admin-kafka: los brokers se llaman por nombre
+#    de servicio (kafka-1:9092). NINGUN puerto se publica en la maquina: solo
+#    los contenedores del proyecto llegan a los brokers. Kafka UI
+#    (kafka-ui.compose.yaml) es la ventana hacia el cluster, por la VPN.
+#
+#    Para verlo en la EC2 (por SSM):
+#      cd /opt/biblioteca/paquete && docker compose -p biblioteca ps
+#      docker exec biblioteca-kafka-1-1 kafka-topics --bootstrap-server kafka-1:9092 --describe
+#      docker exec biblioteca-kafka-1-1 kafka-consumer-groups --bootstrap-server kafka-1:9092 \
+#        --describe --group catalogo-vivo
+#
+#  DISPONIBILIDAD Y TOLERANCIA A FALLOS (lo que hay que poder explicar)
+#    * default.replication.factor=3 y min.insync.replicas=2: con acks=all
+#      (productor de la API) una escritura se confirma cuando la tienen al
+#      menos 2 de las 3 replicas. Cae un broker: se sigue escribiendo y
+#      leyendo. Caen dos: las lecturas siguen, las escrituras esperan
+#      (NotEnoughReplicas) y los registros aguardan en evento_kafka.
+#    * unclean.leader.election.enable=false: nunca se elige lider a una
+#      replica atrasada. Preferimos esperar a perder registros.
+#    * auto.create.topics.enable=false: los topicos los crea la API
+#      (TopologiaKafka) o admin-kafka, con su configuracion; un nombre mal
+#      escrito no crea un topico vacio con valores por defecto.
+#    * Los TRES brokers y los TRES Zookeeper estan en la MISMA EC2: replican
+#      y eligen lider de verdad (se ve parando un contenedor), pero si cae la
+#      maquina cae todo. Es la misma decision que el cluster RabbitMQ de dos
+#      nodos (README §7).
+#
+#  POR QUE ZOOKEEPER Y NO KRAFT
+#    La pauta pide Zookeeper. Kafka 4 ya no lo soporta, asi que la imagen es
+#    cp-kafka 7.9 (Kafka 3.9), la ultima linea con Zookeeper. El cliente de la
+#    API (kafka-clients 4.2) habla con brokers 3.9 sin problema.
+#
+#  MEMORIA (t3.large, 8 GiB; ver compose.yaml)
+#    3 x Zookeeper 256 MiB (heap 128) + 3 x broker 640 MiB (heap 384) = ~2,6 GiB.
+#
+#  TRAMPAS
+#    * Los volumenes guardan la identidad del cluster: zookeeper-N-datos el
+#      cluster.id y los metadatos, kafka-N-datos los registros y su
+#      meta.properties (con el mismo cluster.id). Si se borran los de
+#      Zookeeper y no los de Kafka, los brokers no arrancan
+#      (InconsistentClusterIdException): se borran todos juntos o ninguno.
+#    * KAFKA_ADVERTISED_LISTENERS es el nombre con que el CLIENTE vuelve a
+#      llamar al broker despues del primer contacto: tiene que resolverse
+#      desde la API (kafka-N, la red de compose), no "localhost".
+# ==============================================================================
+
+x-logs-kafka: &logs
+  awslogs-region: ${AWS_REGION}
+  awslogs-group: ${GRUPO_LOGS}
+
+# Lo comun a los tres nodos de Zookeeper.
+x-zookeeper: &zookeeper
+  image: confluentinc/cp-zookeeper:7.9.10
+  restart: unless-stopped
+  mem_limit: 256m
+  # Sano = forma parte del QUORUM: el comando de cuatro letras "srvr" (el
+  # unico de la lista blanca por defecto que sirve) responde "Mode: leader" o
+  # "Mode: follower" solo cuando el nodo ya voto lider con los demas. Por bash
+  # y /dev/tcp: la imagen no trae nc. (ZOOKEEPER_4LW_COMMANDS_WHITELIST no
+  # existe en cp-zookeeper: medido, "ruok" sigue fuera de la lista.)
+  healthcheck:
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/2181 && echo srvr >&3 && grep -qE 'Mode: (leader|follower)' <&3"]
+    interval: 10s
+    timeout: 5s
+    start_period: 20s
+    retries: 12
+
+# Lo comun a los tres brokers.
+x-kafka: &kafka
+  image: confluentinc/cp-kafka:7.9.10
+  restart: unless-stopped
+  mem_limit: 640m
+  # El broker acepta conexiones en su puerto: con eso ya puede atender a la
+  # API. Un "kafka-broker-api-versions" seria mas fino, pero levanta otra JVM
+  # cada 15 s en una maquina con la memoria justa.
+  healthcheck:
+    test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/9092"]
+    interval: 15s
+    timeout: 5s
+    start_period: 40s
+    retries: 20
+  depends_on:
+    zookeeper-1:
+      condition: service_healthy
+    zookeeper-2:
+      condition: service_healthy
+    zookeeper-3:
+      condition: service_healthy
+
+# Configuracion de broker comun (las variables KAFKA_* de cp-kafka son las
+# claves de server.properties en mayusculas y con "_": KAFKA_MIN_INSYNC_REPLICAS
+# = min.insync.replicas).
+x-kafka-config: &kafka-config
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+  KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  # Valores por defecto de los topicos nuevos (los de la biblioteca fijan los suyos).
+  KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+  KAFKA_MIN_INSYNC_REPLICAS: "2"
+  KAFKA_NUM_PARTITIONS: "3"
+  # Los topicos internos tambien replicados: __consumer_offsets guarda los
+  # offsets confirmados de cada consumer group; perderlo hace que todos los
+  # grupos vuelvan a empezar.
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+  # Retencion por defecto de 7 dias para lo que no fije la suya.
+  KAFKA_LOG_RETENTION_HOURS: "168"
+  # El primer rebalanceo de un grupo nuevo espera 3 s a que se unan sus
+  # consumidores, en vez de repartir uno por uno.
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "3000"
+  KAFKA_HEAP_OPTS: "-Xms384m -Xmx384m"
+
+services:
+
+  zookeeper-1:
+    <<: *zookeeper
+    hostname: zookeeper-1
+    environment:
+      ZOOKEEPER_SERVER_ID: "1"
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+      ZOOKEEPER_INIT_LIMIT: "5"
+      ZOOKEEPER_SYNC_LIMIT: "2"
+      # Los tres miembros del ensamble: 2888 replica, 3888 elige lider.
+      ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx128m"
+    volumes:
+      - zookeeper-1-datos:/var/lib/zookeeper/data
+      - zookeeper-1-log:/var/lib/zookeeper/log
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: zookeeper-1
+
+  zookeeper-2:
+    <<: *zookeeper
+    hostname: zookeeper-2
+    environment:
+      ZOOKEEPER_SERVER_ID: "2"
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+      ZOOKEEPER_INIT_LIMIT: "5"
+      ZOOKEEPER_SYNC_LIMIT: "2"
+      ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx128m"
+    volumes:
+      - zookeeper-2-datos:/var/lib/zookeeper/data
+      - zookeeper-2-log:/var/lib/zookeeper/log
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: zookeeper-2
+
+  zookeeper-3:
+    <<: *zookeeper
+    hostname: zookeeper-3
+    environment:
+      ZOOKEEPER_SERVER_ID: "3"
+      ZOOKEEPER_CLIENT_PORT: "2181"
+      ZOOKEEPER_TICK_TIME: "2000"
+      ZOOKEEPER_INIT_LIMIT: "5"
+      ZOOKEEPER_SYNC_LIMIT: "2"
+      ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx128m"
+    volumes:
+      - zookeeper-3-datos:/var/lib/zookeeper/data
+      - zookeeper-3-log:/var/lib/zookeeper/log
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: zookeeper-3
+
+  kafka-1:
+    <<: *kafka
+    hostname: kafka-1
+    environment:
+      <<: *kafka-config
+      KAFKA_BROKER_ID: "1"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092
+    volumes:
+      - kafka-1-datos:/var/lib/kafka/data
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: kafka-1
+
+  kafka-2:
+    <<: *kafka
+    hostname: kafka-2
+    environment:
+      <<: *kafka-config
+      KAFKA_BROKER_ID: "2"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+    volumes:
+      - kafka-2-datos:/var/lib/kafka/data
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: kafka-2
+
+  kafka-3:
+    <<: *kafka
+    hostname: kafka-3
+    environment:
+      <<: *kafka-config
+      KAFKA_BROKER_ID: "3"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+    volumes:
+      - kafka-3-datos:/var/lib/kafka/data
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: kafka-3
+
+# Un volumen por nodo, con nombre fijo (no depende del nombre del proyecto).
+# Ver TRAMPAS: se borran todos juntos o ninguno.
+volumes:
+  zookeeper-1-datos:
+    name: zookeeper-1-datos
+  zookeeper-1-log:
+    name: zookeeper-1-log
+  zookeeper-2-datos:
+    name: zookeeper-2-datos
+  zookeeper-2-log:
+    name: zookeeper-2-log
+  zookeeper-3-datos:
+    name: zookeeper-3-datos
+  zookeeper-3-log:
+    name: zookeeper-3-log
+  kafka-1-datos:
+    name: kafka-1-datos
+  kafka-2-datos:
+    name: kafka-2-datos
+  kafka-3-datos:
+    name: kafka-3-datos

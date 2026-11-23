@@ -1,0 +1,67 @@
+info:
+  name: delete-topic
+  type: http
+  seq: 11
+
+http:
+  method: DELETE
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/:nombre"
+  params:
+    - name: nombre
+      value: "demo.kafka"
+      type: path
+      description: El topico a borrar. Con biblioteca.inventario se ve el 409 de un topico protegido.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 204 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+docs: |
+  # Borrar un topico
+
+  `DELETE /api/admin/topicos/{nombre}`. Borra el topico y TODOS sus
+  registros, en los tres brokers.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 204 | borrado | entorno `aws-admin-kafka-vpn` |
+  | 400 | nombre invalido | `nombre = Mayusculas` |
+  | 404 | no existe | ejecutala dos veces |
+  | 409 | es de la biblioteca o interno de Kafka | `nombre = biblioteca.inventario` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 204 borrado
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/demo.kafka"
+      method: DELETE
+    response:
+      status: 204
+      statusText: No Content
+  - name: 409 topico protegido
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/biblioteca.inventario"
+      method: DELETE
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-23T15:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "biblioteca.inventario es parte de la topologia de la biblioteca (o interno de Kafka) y no se puede modificar asi: la API dejaria de publicar o de consumir",
+            "detalles": {}
+          }

@@ -52,12 +52,17 @@
       <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
     </dependency>
 
-    <!-- PERSISTENCIA. JDBC a secas (JdbcClient), no JPA: Hibernate anade
-         segundos al arranque y aqui no aporta nada, porque
-         el modelo ya son records inmutables y las consultas caben en SQL. -->
+    <!-- PERSISTENCIA. Spring Data JDBC: los repositorios son INTERFACES
+         (ListCrudRepository, consultas derivadas del nombre del metodo) y
+         Spring genera la implementacion. No es JPA: no hay Hibernate, ni
+         sesion, ni lazy loading, ni dirty checking; un agregado se lee y se
+         escribe entero, y el modelo sigue siendo de records inmutables.
+         Solo se escribe SQL (@Query) donde la sentencia ES la regla de negocio:
+         las transiciones condicionales (UPDATE ... WHERE estado = ...), el
+         descuento atomico de stock y los INSERT ... ON CONFLICT idempotentes. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-jdbc</artifactId>
+      <artifactId>spring-boot-starter-data-jdbc</artifactId>
     </dependency>
     <dependency>
       <groupId>org.postgresql</groupId>
@@ -84,11 +89,29 @@
       <artifactId>spring-boot-starter-amqp</artifactId>
     </dependency>
 
+    <!-- STREAMING. Cliente de Kafka (KafkaTemplate, @KafkaListener, KafkaAdmin).
+         Kafka NO reemplaza a RabbitMQ: RabbitMQ reparte TAREAS (un correo que
+         alguien tiene que mandar una vez); Kafka guarda HECHOS (el stock de un
+         libro, una solicitud que llego) que varios lectores leen cada uno a su
+         ritmo y que se pueden releer. Ver kafka/ y back/README.md. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-kafka</artifactId>
+    </dependency>
+
     <!-- Envio de correo por SMTP (JavaMailSender). El proveedor se elige al
          desplegar: host, puerto, usuario y contrasena llegan por variables. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-mail</artifactId>
+    </dependency>
+    <!-- La implementacion SMTP que trae el starter (en runtime), declarada en
+         compile: EnviadorSmtp lee el codigo de respuesta del servidor
+         (SMTPSendFailedException.getReturnCode) para distinguir un 4xx
+         (reintentar) de un 5xx (no insistir). Version gestionada por Boot. -->
+    <dependency>
+      <groupId>org.eclipse.angus</groupId>
+      <artifactId>angus-mail</artifactId>
     </dependency>
 
     <!-- Para leer el email VERIFICADO de un usuario desde Cognito al activar
@@ -119,6 +142,14 @@
     <dependency>
       <groupId>org.testcontainers</groupId>
       <artifactId>testcontainers-rabbitmq</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Un broker Kafka real en Docker (imagen apache/kafka-native, KRaft:
+         arranca en ~1 s). En los tests los topicos van con 1 replica: hay un
+         solo broker. -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers-kafka</artifactId>
       <scope>test</scope>
     </dependency>
     <!-- Servidor SMTP en memoria: recibe los correos de los tests. -->

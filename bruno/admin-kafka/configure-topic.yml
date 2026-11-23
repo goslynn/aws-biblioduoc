@@ -1,0 +1,91 @@
+info:
+  name: configure-topic
+  type: http
+  seq: 5
+
+http:
+  method: PATCH
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/:nombre/configuracion"
+  params:
+    - name: nombre
+      value: "demo.kafka"
+      type: path
+      description: >-
+        El topico. Con biblioteca.inventario y cleanup.policy se ve el 409 de
+        un topico protegido; su retention.ms si se puede cambiar.
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "establecer": { "retention.ms": "86400000" },
+        "restablecer": ["min.insync.replicas"]
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("lo establecido queda, lo restablecido vuelve al valor del broker", function () {
+            const enviado = req.getBody();
+            const config = res.getBody().configuracion;
+            Object.entries(enviado.establecer || {}).forEach(([k, v]) => expect(config[k]).to.equal(v));
+            (enviado.restablecer || []).forEach((k) => expect(config).to.not.have.property(k));
+          });
+        }
+
+docs: |
+  # Cambiar la configuracion de un topico
+
+  `PATCH /api/admin/topicos/{nombre}/configuracion`. Cambio **incremental**
+  (`incrementalAlterConfigs` de Kafka): lo que no se nombra queda igual.
+
+  | Campo | Que hace |
+  |---|---|
+  | `establecer` | clave -> valor nuevo |
+  | `restablecer` | claves que vuelven al valor por defecto del broker |
+
+  Ejemplos utiles en la presentacion: subir `retention.ms` de
+  `biblioteca.solicitudes` (cuanto historial se guarda), o bajar el
+  `segment.ms` de `biblioteca.inventario` para que la compactacion actue
+  antes. Kafka UI refleja el cambio al instante.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | aplicado; devuelve el topico con su configuracion | entorno `aws-admin-kafka-vpn` |
+  | 400 | clave no permitida, valor invalido o cuerpo vacio | `"establecer": {"retention.ms": "mucho"}` |
+  | 404 | el topico no existe | `nombre = no.existe` |
+  | 409 | `cleanup.policy` de un topico protegido | `nombre = biblioteca.inventario` con `"establecer": {"cleanup.policy": "delete"}` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 409 cleanup.policy protegido
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/biblioteca.inventario/configuracion"
+      method: PATCH
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-23T15:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "biblioteca.inventario es parte de la topologia de la biblioteca: su cleanup.policy define lo que guarda y no se cambia por REST",
+            "detalles": {}
+          }

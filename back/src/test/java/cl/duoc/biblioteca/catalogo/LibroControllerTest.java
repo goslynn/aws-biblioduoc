@@ -118,4 +118,31 @@ class LibroControllerTest {
     void healthPublico() throws Exception {
         mvc.perform(get("/health")).andExpect(status().isOk());
     }
+
+    @Test
+    @DisplayName("% y _ se buscan literalmente, no como comodines de LIKE")
+    void comodinesLiterales() throws Exception {
+        mvc.perform(get("/api/libros").param("q", "_").with(conScope()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+        mvc.perform(get("/api/libros").param("q", "%").with(conScope()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    @DisplayName("el id del libro no distingue mayusculas")
+    void idSinMayusculas() throws Exception {
+        mvc.perform(get("/api/libros/l-001").with(conScope()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value("L-001"));
+    }
+
+    @Test
+    @DisplayName("una busqueda de mas de 100 caracteres responde 400")
+    void busquedaLarga() throws Exception {
+        mvc.perform(get("/api/libros").param("q", "x".repeat(101)).with(conScope()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.detalles.q").exists());
+    }
 }

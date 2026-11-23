@@ -1,12 +1,10 @@
 package cl.duoc.biblioteca.eventos;
 
-import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
 import java.util.UUID;
 
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,11 +33,11 @@ import tools.jackson.databind.json.JsonMapper;
 @Component
 public class BandejaDeSalida {
 
-    private final JdbcClient jdbc;
+    private final RepositorioEventos eventos;
     private final JsonMapper json;
 
-    public BandejaDeSalida(JdbcClient jdbc, JsonMapper json) {
-        this.jdbc = jdbc;
+    public BandejaDeSalida(RepositorioEventos eventos, JsonMapper json) {
+        this.eventos = eventos;
         this.json = json;
     }
 
@@ -48,15 +46,8 @@ public class BandejaDeSalida {
         Evento evento = new Evento(UUID.randomUUID(), tipo,
                 Instant.now().truncatedTo(ChronoUnit.MICROS), actor, referencia, datos);
 
-        jdbc.sql("""
-                INSERT INTO evento_pendiente (id, tipo, cuerpo, creado_en)
-                VALUES (:id, :tipo, :cuerpo, :creadoEn)
-                """)
-                .param("id", evento.id())
-                .param("tipo", evento.tipo())
-                .param("cuerpo", json.writeValueAsString(evento))
-                .param("creadoEn", Timestamp.from(evento.ocurridoEn()))
-                .update();
+        eventos.save(new EventoPendiente(evento.id(), evento.tipo(), json.writeValueAsString(evento),
+                evento.ocurridoEn()));
         return evento;
     }
 }

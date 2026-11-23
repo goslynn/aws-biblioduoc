@@ -116,6 +116,15 @@ class AvisosIntegracionTest {
     }
 
     @Test
+    @DisplayName("H0: activar los avisos dos veces manda UNA sola bienvenida")
+    void activarDosVeces() throws Exception {
+        String sub = alumnoConAvisos();
+        mvc.perform(put("/api/avisos/correo").with(tokens.alumno(sub))).andExpect(status().isOk());
+        Thread.sleep(2_000);
+        assertThat(asuntos(sub)).filteredOn("Avisos de la Biblioteca Duoc activados"::equals).hasSize(1);
+    }
+
+    @Test
     @DisplayName("H0: un cliente M2M no tiene email en Cognito: 409")
     void m2mSinCorreo() throws Exception {
         mvc.perform(put("/api/avisos/correo").with(tokens.alumno("m2m-cliente")))

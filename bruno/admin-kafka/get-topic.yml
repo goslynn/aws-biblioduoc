@@ -1,0 +1,90 @@
+info:
+  name: get-topic
+  type: http
+  seq: 4
+
+http:
+  method: GET
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/:nombre"
+  params:
+    - name: nombre
+      value: "demo.kafka"
+      type: path
+      description: >-
+        El topico. Con biblioteca.inventario se ve uno de la pauta: 3
+        particiones, cada una con su lider, sus 3 replicas y su ISR, y la
+        configuracion propia (cleanup.policy=compact, min.insync.replicas=2...).
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("describe el topico pedido, con lider en cada particion", function () {
+            const cuerpo = res.getBody();
+            expect(req.getUrl()).to.contain("/topicos/" + cuerpo.nombre);
+            cuerpo.particiones.forEach((p) => expect(p.lider).to.be.a("number"));
+          });
+        }
+
+docs: |
+  # Describir un topico
+
+  `GET /api/admin/topicos/{nombre}`. Lo que hay que saber para explicar la
+  disponibilidad:
+
+  * cada **particion** con su **lider** (atiende lecturas y escrituras), sus
+    **replicas** y las **sincronizadas** (ISR). Con `min.insync.replicas=2`,
+    si el ISR baja de 2 la particion deja de aceptar escrituras `acks=all`;
+  * `offsetInicio` / `offsetFin` de cada particion y `mensajes` retenidos;
+  * la `configuracion` que el topico fija por su cuenta (lo demas es el
+    valor por defecto del broker).
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | existe | entorno `aws-admin-kafka-vpn` |
+  | 400 | nombre invalido | `nombre = Mayusculas` |
+  | 404 | no existe | `nombre = no.existe` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 200 biblioteca.inventario
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/biblioteca.inventario"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          {
+            "nombre": "biblioteca.inventario", "interno": false, "protegido": true,
+            "particiones": [
+              { "numero": 0, "lider": 1, "replicas": [1, 2, 3], "sincronizadas": [1, 2, 3], "offsetInicio": 0, "offsetFin": 14 },
+              { "numero": 1, "lider": 2, "replicas": [1, 2, 3], "sincronizadas": [1, 2, 3], "offsetInicio": 0, "offsetFin": 9 },
+              { "numero": 2, "lider": 3, "replicas": [1, 2, 3], "sincronizadas": [1, 3], "offsetInicio": 0, "offsetFin": 11 }
+            ],
+            "configuracion": {
+              "cleanup.policy": "compact", "delete.retention.ms": "86400000",
+              "min.compaction.lag.ms": "60000", "min.insync.replicas": "2", "segment.ms": "3600000"
+            },
+            "mensajes": 34
+          }
+  - name: 404 no existe
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/no.existe"
+      method: GET
+    response:
+      status: 404
+      statusText: Not Found

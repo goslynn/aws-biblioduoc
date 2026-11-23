@@ -120,6 +120,8 @@ Los entornos de Bruno se generan siempre en local y sus tokens duran 60 minutos.
 | `cd bruno && bru run --env aws-token-invalido` | 401 |
 | `cd bruno && bru run admin --env aws-admin-vpn` | Por la VPN: 201 / 200 / 204 |
 | `cd bruno && bru run admin --env aws-admin-vpn-estudiante` | Por la VPN: 403 |
+| `cd bruno && bru run admin-kafka --env aws-admin-kafka-vpn` | Por la VPN: administrador de Kafka, ciclo completo |
+| `cd bruno && bru run admin-kafka --env aws-admin-kafka-vpn-estudiante` | Por la VPN: 403 |
 
 El frontend se comprueba en el navegador, con el recorrido de `front/README.md` §4.
 
@@ -127,7 +129,7 @@ El frontend se comprueba en el navegador, con el recorrido de `front/README.md` 
 
 | Comando | Que hace |
 |---|---|
-| `./aws/scripts/vpn-up.sh` | Levanta la VPN hasta la base y el panel de RabbitMQ (pide sudo) |
+| `./aws/scripts/vpn-up.sh` | Levanta la VPN hasta la base, los paneles de RabbitMQ, Kafka UI (`:8090`) y los administradores (pide sudo) |
 | `./aws/scripts/vpn-down.sh` | La baja y borra su stack |
 
 ## Consultar y diagnosticar
@@ -146,7 +148,7 @@ aws elbv2 describe-target-health --target-group-arn "$(aws cloudformation descri
   --stack-name biblioteca-backend --query "Stacks[0].Outputs[?OutputKey=='TargetGroupArn'].OutputValue" --output text)"
 ```
 
-**Logs del backend** (streams `app`, `admin-rabbit`, `rabbitmq-1` y `rabbitmq-2`)
+**Logs del backend** (streams `app`, `admin-rabbit`, `admin-kafka`, `rabbitmq-1`, `rabbitmq-2`, `zookeeper-1..3`, `kafka-1..3` y `kafka-ui`)
 
 ```sh
 aws logs tail /biblioteca/backend --follow --region us-east-1

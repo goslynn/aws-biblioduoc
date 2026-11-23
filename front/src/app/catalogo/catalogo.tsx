@@ -10,6 +10,7 @@ import { librosService } from './libros.service';
 import { Quitar } from './quitar';
 import { agregarASeleccion, useSeleccion } from './seleccion';
 import { Tapa } from './tapa';
+import { useSondeo } from '../vivo';
 
 type Disponibilidad = 'todos' | 'disponibles' | 'agotados';
 type Orden = 'relevancia' | 'titulo' | 'recientes' | 'antiguos';
@@ -64,11 +65,23 @@ export function Catalogo() {
 
   const [panelAbierto, setPanelAbierto] = useState(panelInicial);
 
-  const [resultados, setResultados] = useState<Libro[]>([]);
+  const [respuesta, setRespuesta] = useState<Libro[]>([]);
   const [generos, setGeneros] = useState<string[]>([]);
   // Empieza en true: si no, el primer pintado dice "Ningun libro coincide".
   const [cargando, setCargando] = useState(true);
   const [error, setError] = useState('');
+
+  // STOCK EN VIVO (H8). Cada 3 s se pide el stock que mantiene Kafka y se
+  // corrige el de cada tarjeta: si otro estudiante se lleva el ultimo
+  // ejemplar (un empleado aprueba su solicitud), el libro pasa a "Agotado"
+  // sin recargar. Los libros que no estan en el mapa no cambiaron.
+  const vivo = useSondeo(librosService.stockVivo, 3000);
+  const resultados = useMemo(() => respuesta.map((libro) => {
+    const ejemplares = vivo?.disponibles[libro.id];
+    return ejemplares === undefined || ejemplares === libro.ejemplares
+      ? libro
+      : { ...libro, ejemplares, disponible: ejemplares > 0 };
+  }), [respuesta, vivo]);
 
   /** Ids de los libros agotados que este usuario espera ("avisame"). */
   const [esperando, setEsperando] = useState<Set<string>>(new Set());
@@ -80,7 +93,7 @@ export function Catalogo() {
     setError('');
     librosService.buscar(q, '', disp === 'disponibles').then(
       (libros) => {
-        setResultados(libros);
+        setRespuesta(libros);
         setCargando(false);
       },
       (fallo) => {
@@ -89,7 +102,7 @@ export function Catalogo() {
         // y 500 se diagnostican distinto, y esconderlos detras de "algo salio
         // mal" no ayuda a nadie.
         setError(describir(statusDe(fallo)));
-        setResultados([]);
+        setRespuesta([]);
         setCargando(false);
       },
     );
@@ -294,6 +307,13 @@ export function Catalogo() {
               {cargando ? 'Cargando el catalogo…' : visibles.length === resultados.length
                 ? <><strong>{resultados.length}</strong> titulo(s)</>
                 : <><strong>{visibles.length}</strong> de {resultados.length} titulo(s)</>}
+              {vivo && (
+                <span className="en-vivo" title={vivo.actualizadoEn
+                  ? `Ultimo cambio de stock: ${new Date(vivo.actualizadoEn).toLocaleTimeString('es-CL')}`
+                  : 'Aun no hay cambios de stock'}>
+                  stock en vivo
+                </span>
+              )}
             </p>
             <div className="ordenar">
               <label htmlFor="orden">Ordenar</label>

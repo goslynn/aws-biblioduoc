@@ -92,6 +92,11 @@ public class ValidacionJwt {
      *         unico que lo distingue.
      *
      * Es un bean aparte para que los tests lo usen tal cual con jwt().
+     *
+     * Clase anonima y NO lambda, a proposito: Spring Kafka registra todo bean
+     * Converter del contexto en su servicio de conversion, y de una lambda no
+     * puede leer los tipos genericos (Jwt -> Collection): la API no arrancaba
+     * ("Unable to determine source type"). La clase anonima los conserva.
      */
     @Bean
     public Converter<Jwt, Collection<GrantedAuthority>> autoridades() {
@@ -99,17 +104,20 @@ public class ValidacionJwt {
         String acceso = autoridadAcceso();
         String gestion = "SCOPE_" + scopeGestion;
 
-        return jwt -> {
-            Collection<GrantedAuthority> autoridades = new ArrayList<>(scopes.convert(jwt));
-            boolean conAcceso = autoridades.stream().anyMatch(a -> acceso.equals(a.getAuthority()));
-            boolean conGestion = autoridades.stream().anyMatch(a -> gestion.equals(a.getAuthority()));
-            List<String> grupos = jwt.getClaimAsStringList("cognito:groups");
-            boolean delGrupo = grupos != null && grupos.contains(grupoEmpleados);
+        return new Converter<Jwt, Collection<GrantedAuthority>>() {
+            @Override
+            public Collection<GrantedAuthority> convert(Jwt jwt) {
+                Collection<GrantedAuthority> autoridades = new ArrayList<>(scopes.convert(jwt));
+                boolean conAcceso = autoridades.stream().anyMatch(a -> acceso.equals(a.getAuthority()));
+                boolean conGestion = autoridades.stream().anyMatch(a -> gestion.equals(a.getAuthority()));
+                List<String> grupos = jwt.getClaimAsStringList("cognito:groups");
+                boolean delGrupo = grupos != null && grupos.contains(grupoEmpleados);
 
-            if ((conAcceso && delGrupo) || conGestion) {
-                autoridades.add(new SimpleGrantedAuthority(Roles.AUTORIDAD_EMPLEADO));
+                if ((conAcceso && delGrupo) || conGestion) {
+                    autoridades.add(new SimpleGrantedAuthority(Roles.AUTORIDAD_EMPLEADO));
+                }
+                return autoridades;
             }
-            return autoridades;
         };
     }
 

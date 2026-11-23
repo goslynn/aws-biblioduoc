@@ -1,0 +1,91 @@
+info:
+  name: reset-offsets
+  type: http
+  seq: 9
+
+http:
+  method: POST
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos/:id/offsets"
+  params:
+    - name: id
+      value: "auditoria-kafka"
+      type: path
+      description: >-
+        El grupo. Tiene que estar SIN consumidores: con la API arriba,
+        auditoria-kafka responde 409.
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      { "posicion": "INICIO" }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const exito = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito";
+
+        test("responde lo que corresponde a esta credencial", function () {
+          if (exito) {
+            // 409 con la API arriba (el grupo tiene consumidores); 200 si esta detenida.
+            expect([200, 409]).to.include(res.getStatus());
+          } else {
+            expect(res.getStatus()).to.equal(403);
+          }
+        });
+
+        if (exito && res.getStatus() === 200) {
+          test("con INICIO, cada particion queda en su primer offset", function () {
+            res.getBody().offsets.forEach((o) => expect(o.lag).to.equal(o.fin - o.confirmado));
+          });
+        }
+
+docs: |
+  # Mover los offsets de un grupo (reprocesar o saltar)
+
+  `POST /api/admin/grupos/{id}/offsets`.
+
+  | Campo | Obligatorio | Que hace |
+  |---|---|---|
+  | `posicion` | si | `INICIO`: volver a procesar todo lo retenido. `FIN`: saltarse lo pendiente. `FECHA`: desde el primer registro de ese instante |
+  | `fecha` | con `FECHA` | ISO-8601, `"2026-11-23T12:00:00Z"` |
+  | `topico` | no | solo ese topico; si falta, todos los que el grupo tiene confirmados |
+
+  Kafka solo mueve los offsets de un grupo **sin consumidores**: un
+  consumidor activo confirmaria encima. Para la demo: detener la API (o su
+  contenedor, `docker stop biblioteca-app-1`), mover `auditoria-kafka` a
+  `INICIO`, ver en `get-group` el lag igual a todo el topico, arrancar la API
+  y ver como el lag baja a 0 mientras el log vuelve a imprimir cada registro.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | movidos; devuelve el grupo con sus offsets nuevos | con la API detenida |
+  | 400 | sin `posicion`, o `FECHA` sin `fecha` | `{"posicion": "FECHA"}` |
+  | 404 | el grupo o el topico no existe | `id = no-existe` |
+  | 409 | el grupo tiene consumidores activos | con la API arriba (lo normal) |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 409 grupo con consumidores
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos/auditoria-kafka/offsets"
+      method: POST
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-23T15:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "el grupo auditoria-kafka esta STABLE con 1 consumidor(es): Kafka solo mueve los offsets de un grupo sin consumidores activos. Deten la aplicacion que lo consume y vuelve a intentarlo",
+            "detalles": {}
+          }

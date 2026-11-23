@@ -57,7 +57,7 @@ export function FormularioSolicitud() {
       },
       (fallo) => {
         const cuerpo = cuerpoDe<ErrorApi>(fallo);
-        setError(describir(statusDe(fallo), cuerpo?.mensaje));
+        setError(describir(statusDe(fallo), cuerpo?.mensaje ?? cuerpo?.message));
         setDetalles(cuerpo?.detalles ?? {});
         setEnviando(false);
       },

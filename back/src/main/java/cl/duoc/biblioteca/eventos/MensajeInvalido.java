@@ -1,4 +1,4 @@
-package cl.duoc.biblioteca.avisos;
+package cl.duoc.biblioteca.eventos;
 
 /**
  * Un mensaje que NUNCA se va a poder procesar: JSON roto, campos que faltan,

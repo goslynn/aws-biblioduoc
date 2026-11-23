@@ -7,6 +7,17 @@
 #    rabbitmq-2    nodo 2 del cluster RabbitMQ + panel  (VPN: <ip>:15673)
 #    app           la API Spring Boot (back/)           (NLB: <ip>:8080)
 #    admin-rabbit  el administrador de RabbitMQ         (VPN: <ip>:8081)
+#    admin-kafka   el administrador de Kafka            (VPN: <ip>:8082)
+#    y, por include:
+#      kafka-ui.compose.yaml  Kafka UI                  (VPN: <ip>:8090)
+#      kafka.compose.yaml     zookeeper-1..3 y kafka-1..3 (sin puertos publicados)
+#
+#  KAFKA NO ES REQUISITO DE LA API
+#    La app no espera a los brokers (no hay depends_on hacia Kafka), a
+#    proposito: la pauta pide que Kafka complemente sin afectar a RabbitMQ.
+#    Si Kafka no arranca, la API y los correos funcionan; los registros de
+#    streaming esperan en la tabla evento_kafka y AseguradorTopicos crea los
+#    topicos cuando los brokers respondan.
 #
 #  QUIEN LO EJECUTA, Y CON QUE
 #    No se lanza a mano. Viaja dentro del paquete que sube
@@ -33,13 +44,38 @@
 #    VPC: el security group de la EC2 abre el puerto de la app al NLB, y los
 #    paneles y el admin solo a la VPN (aws/vpn.yaml).
 #
-#  MEMORIA (t3.medium, 4 GiB)
-#    2 x RabbitMQ 768 MiB + app 1 GiB + admin 512 MiB = ~3 GiB. Los -Xmx son
-#    fijos: con MaxRAMPercentage, cada JVM calcularia sobre la memoria de la
-#    maquina y no sobre su limite.
+#  ENDURECIMIENTO DE LOS CONTENEDORES JAVA (x-java, abajo)
+#    La app y el admin no necesitan nada de root: leen dos jars y una CA y
+#    abren un puerto alto. Asi que corren como "nobody", con el sistema de
+#    archivos de la imagen en solo lectura (escriben solo en /tmp, en memoria),
+#    sin capabilities de Linux y sin poder ganar privilegios (setuid). Si
+#    alguien ejecutara codigo dentro, no podria instalar nada ni tocar la
+#    imagen. /opt/biblioteca queda legible para todos: arrancar.sh hace
+#    chmod a+rX al paquete y 644 a la CA de RDS.
+#
+#  HEALTHCHECK Y APAGADO
+#    Los dos servicios Java se dan por sanos cuando /health responde (curl
+#    viene en la imagen de Corretto). "up --wait" de arrancar.sh espera a eso,
+#    no solo a que el proceso exista. Al parar, Docker da 30 s
+#    (stop_grace_period) para que Spring termine las peticiones en curso
+#    (server.shutdown=graceful); antes los mataba a los 10 s.
+#    -XX:+ExitOnOutOfMemoryError: sin memoria, la JVM termina en vez de seguir
+#    medio rota, y restart: unless-stopped la levanta limpia.
+#
+#  MEMORIA (t3.large, 8 GiB)
+#    2 x RabbitMQ 768 MiB + app 1 GiB + admin-rabbit 512 MiB + admin-kafka
+#    384 MiB + 3 x Zookeeper 256 MiB + 3 x broker 640 MiB + Kafka UI 448 MiB
+#    = ~6,4 GiB. Los -Xmx son fijos: con MaxRAMPercentage, cada JVM
+#    calcularia sobre la memoria de la maquina y no sobre su limite.
 # ==============================================================================
 
 name: biblioteca
+
+# El cluster Kafka y su panel, en archivos propios (la pauta pide un compose
+# para Kafka y otro para Kafka UI). kafka-ui.compose.yaml incluye a su vez
+# kafka.compose.yaml. Todo queda en el mismo proyecto y la misma red.
+include:
+  - kafka-ui.compose.yaml
 
 # Destino comun de los logs; cada servicio anade su propio stream.
 x-logs: &logs
@@ -60,6 +96,17 @@ x-rabbitmq: &rabbitmq
     timeout: 10s
     start_period: 30s
     retries: 30
+
+# Lo que comparten la app y el admin: misma imagen y mismo endurecimiento.
+x-java: &java
+  image: public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless
+  restart: unless-stopped
+  user: "65534:65534"
+  read_only: true
+  tmpfs: ["/tmp:size=64m"]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  stop_grace_period: 30s
 
 services:
 
@@ -95,15 +142,23 @@ services:
         awslogs-stream: rabbitmq-2
 
   app:
-    image: public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless
+    <<: *java
     # El jar y la CA de RDS (sslmode=verify-full) estan en /opt/biblioteca.
-    command: ["java", "-Xmx768m", "-jar", "/opt/biblioteca/paquete/biblioteca-backend.jar"]
+    command: ["java", "-Xmx768m", "-XX:+ExitOnOutOfMemoryError",
+              "-jar", "/opt/biblioteca/paquete/biblioteca-backend.jar"]
     env_file: /run/biblioteca/app.env
     volumes:
       - /opt/biblioteca:/opt/biblioteca:ro
     ports: ["${APP_PUERTO}:8080"]
-    restart: unless-stopped
     mem_limit: 1g
+    # Flyway y la topologia de RabbitMQ van antes de abrir el puerto: con la
+    # base recien arrancada (lab reabierto) puede tardar mas de un minuto.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 6
     # La API declara la topologia al conectarse: que esten los DOS nodos,
     # para que las colas quorum nazcan con replica en ambos.
     depends_on:
@@ -118,16 +173,22 @@ services:
         awslogs-stream: app
 
   admin-rabbit:
-    image: public.ecr.aws/amazoncorretto/amazoncorretto:21-al2023-headless
-    command: ["java", "-Xmx256m", "-jar", "/opt/biblioteca/paquete/biblioteca-admin-rabbit.jar"]
+    <<: *java
+    command: ["java", "-Xmx256m", "-XX:+ExitOnOutOfMemoryError",
+              "-jar", "/opt/biblioteca/paquete/biblioteca-admin-rabbit.jar"]
     # Su propio archivo de entorno: solo Cognito y RabbitMQ. No ve las
     # credenciales de la base ni del SMTP.
     env_file: /run/biblioteca/admin-rabbit.env
     volumes:
       - /opt/biblioteca/paquete:/opt/biblioteca/paquete:ro
     ports: ["8081:8081"]
-    restart: unless-stopped
     mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
     depends_on:
       rabbitmq-1:
         condition: service_healthy
@@ -138,6 +199,30 @@ services:
       options:
         <<: *logs
         awslogs-stream: admin-rabbit
+
+  admin-kafka:
+    <<: *java
+    command: ["java", "-Xmx192m", "-XX:+ExitOnOutOfMemoryError",
+              "-jar", "/opt/biblioteca/paquete/biblioteca-admin-kafka.jar"]
+    # Su propio archivo de entorno: solo Cognito y los brokers.
+    env_file: /run/biblioteca/admin-kafka.env
+    volumes:
+      - /opt/biblioteca/paquete:/opt/biblioteca/paquete:ro
+    ports: ["8082:8082"]
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8082/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    # Sin depends_on hacia Kafka: arranca igual y responde 503 mientras los
+    # brokers no esten (el Admin de Kafka reconecta solo).
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: admin-kafka
 
 # Un volumen por nodo: cada uno guarda su parte del cluster (y su identidad).
 # Nombre fijo para que no dependa del nombre del proyecto de compose.

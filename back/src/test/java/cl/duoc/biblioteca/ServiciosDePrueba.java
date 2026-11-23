@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.context.DynamicPropertyRegistrar;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.rabbitmq.RabbitMQContainer;
 
 import com.icegreen.greenmail.util.GreenMail;
@@ -27,6 +28,9 @@ import cl.duoc.biblioteca.avisos.DirectorioUsuarios;
  *     test falla aqui y no en el despliegue.
  *   * RabbitMQ en Docker, la misma version mayor que en la EC2. La topologia
  *     (exchanges, colas, DLX, TTL) la declara la propia aplicacion al arrancar.
+ *   * Kafka en Docker: UN broker (KRaft, imagen nativa que arranca en ~1 s).
+ *     Los topicos los crea la aplicacion, con 1 replica (application.properties
+ *     de test); en AWS son 3 brokers y 3 replicas.
  *   * GreenMail: un servidor SMTP en memoria que guarda lo que recibe.
  *   * Un directorio de usuarios falso en lugar de Cognito.
  *
@@ -48,6 +52,12 @@ public class ServiciosDePrueba {
         return new RabbitMQContainer("rabbitmq:4.1-management-alpine");
     }
 
+    /** Un broker Kafka; la version de Kafka de la linea de cp-kafka 7.9 (aws/backend/kafka.compose.yaml). */
+    @Bean
+    KafkaContainer kafka() {
+        return new KafkaContainer("apache/kafka-native:3.9.1");
+    }
+
     /**
      * Puerto FIJO (elegido libre al arrancar), no dinamico: los tests de
      * fallos paran y vuelven a arrancar el servidor, y tiene que volver en el
@@ -63,7 +73,8 @@ public class ServiciosDePrueba {
     }
 
     @Bean
-    DynamicPropertyRegistrar conexiones(PostgreSQLContainer postgres, RabbitMQContainer rabbit, GreenMail smtp) {
+    DynamicPropertyRegistrar conexiones(PostgreSQLContainer postgres, RabbitMQContainer rabbit, KafkaContainer kafka,
+            GreenMail smtp) {
         return registro -> {
             registro.add("spring.datasource.url", postgres::getJdbcUrl);
             registro.add("spring.datasource.username", () -> "biblioteca_app");
@@ -76,6 +87,8 @@ public class ServiciosDePrueba {
             registro.add("spring.rabbitmq.port", rabbit::getAmqpPort);
             registro.add("spring.rabbitmq.username", rabbit::getAdminUsername);
             registro.add("spring.rabbitmq.password", rabbit::getAdminPassword);
+
+            registro.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
 
             registro.add("spring.mail.port", () -> smtp.getSmtp().getPort());
             // GreenMail no habla TLS en este puerto ni pide usuario.

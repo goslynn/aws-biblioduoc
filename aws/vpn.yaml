@@ -19,9 +19,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      tu IP publica (la detecta vpn-up.sh). Ni SSH ni ningun otro puerto.
 #    * DatabaseFromVpnIngress -> una regla mas en el security group de RDS: el
 #      5432 tambien desde el servidor VPN. Desaparece al borrar este stack.
-#    * AppFromVpnIngress, AppPanel2FromVpnIngress, AdminRabbitFromVpnIngress
+#    * AppFromVpnIngress, AppPanel2FromVpnIngress, AdminRabbitFromVpnIngress,
+#      AdminKafkaFromVpnIngress, KafkaUiFromVpnIngress
 #      -> lo mismo en la EC2 de la aplicacion, para los paneles de los dos
-#      nodos de RabbitMQ (15672, 15673) y el administrador de RabbitMQ (8081):
+#      nodos de RabbitMQ (15672, 15673), el administrador de RabbitMQ (8081),
+#      el administrador de Kafka (8082) y Kafka UI (8090):
 #      http://<IP privada de la EC2>:<puerto> desde tu equipo.
 #    * VpnInstance -> Ubuntu en t3.micro, sin par de llaves SSH y sin perfil
 #      IAM: no hay forma de "entrar" en la maquina; solo atravesarla.
@@ -75,8 +77,8 @@ AWSTemplateFormatVersion: "2010-09-09"
 
 Description: >-
   biblioteca - Servidor WireGuard temporal en la subred publica del proyecto,
-  para llegar desde un equipo autorizado a la RDS privada y al panel de
-  RabbitMQ. Solo UDP desde una IP.
+  para llegar desde un equipo autorizado a la RDS privada, a los paneles de
+  RabbitMQ y Kafka y a los administradores. Solo UDP desde una IP.
 
 Parameters:
 
@@ -123,6 +125,18 @@ Parameters:
     Description: >-
       Puerto del microservicio administrador de RabbitMQ en la EC2. No esta
       detras de API Gateway: la VPN es su unico camino desde fuera de la VPC.
+
+  AdminKafkaPort:
+    Type: Number
+    Default: 8082
+    Description: >-
+      Puerto del microservicio administrador de Kafka en la EC2. Como el de
+      RabbitMQ, la VPN es su unico camino desde fuera de la VPC.
+
+  KafkaUiPort:
+    Type: Number
+    Default: 8090
+    Description: Puerto de Kafka UI en la EC2 (aws/backend/kafka-ui.compose.yaml).
 
   DatabaseSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
@@ -227,6 +241,16 @@ Resources:
           FromPort: !Ref AdminRabbitPort
           ToPort: !Ref AdminRabbitPort
           DestinationSecurityGroupId: !Ref AppSecurityGroupId
+        - Description: Administrador de Kafka en la EC2 de la aplicacion
+          IpProtocol: tcp
+          FromPort: !Ref AdminKafkaPort
+          ToPort: !Ref AdminKafkaPort
+          DestinationSecurityGroupId: !Ref AppSecurityGroupId
+        - Description: Kafka UI en la EC2 de la aplicacion
+          IpProtocol: tcp
+          FromPort: !Ref KafkaUiPort
+          ToPort: !Ref KafkaUiPort
+          DestinationSecurityGroupId: !Ref AppSecurityGroupId
       Tags:
         - Key: Name
           Value: !Sub "${ProjectName}-vpn"
@@ -278,6 +302,29 @@ Resources:
       IpProtocol: tcp
       FromPort: !Ref AdminRabbitPort
       ToPort: !Ref AdminRabbitPort
+      SourceSecurityGroupId: !Ref VpnSecurityGroup
+
+  # El administrador de Kafka (admin-kafka): JWT de empleado, como admin-rabbit.
+  AdminKafkaFromVpnIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      Description: Administrador de Kafka desde el servidor VPN (temporal)
+      IpProtocol: tcp
+      FromPort: !Ref AdminKafkaPort
+      ToPort: !Ref AdminKafkaPort
+      SourceSecurityGroupId: !Ref VpnSecurityGroup
+
+  # Kafka UI: brokers, topicos, mensajes, consumer groups y su lag. Pide su
+  # propio usuario (KafkaUiSecret de backend.yaml).
+  KafkaUiFromVpnIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      Description: Kafka UI desde el servidor VPN (temporal)
+      IpProtocol: tcp
+      FromPort: !Ref KafkaUiPort
+      ToPort: !Ref KafkaUiPort
       SourceSecurityGroupId: !Ref VpnSecurityGroup
 
   # ---------------------------------------------------------------------------

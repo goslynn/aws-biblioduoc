@@ -41,10 +41,10 @@ public class GestionSolicitudController {
             String motivo) {
     }
 
-    private final RepositorioSolicitudes solicitudes;
+    private final ListadoSolicitudes solicitudes;
     private final ServicioPrestamos prestamos;
 
-    public GestionSolicitudController(RepositorioSolicitudes solicitudes, ServicioPrestamos prestamos) {
+    public GestionSolicitudController(ListadoSolicitudes solicitudes, ServicioPrestamos prestamos) {
         this.solicitudes = solicitudes;
         this.prestamos = prestamos;
     }

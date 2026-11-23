@@ -38,12 +38,15 @@ public class ProgramadorRecordatorios {
     private static final Logger log = LoggerFactory.getLogger(ProgramadorRecordatorios.class);
 
     private final RepositorioSolicitudes solicitudes;
+    private final ListadoSolicitudes listado;
     private final BandejaDeSalida bandeja;
     private final Duration antelacion;
 
-    public ProgramadorRecordatorios(RepositorioSolicitudes solicitudes, BandejaDeSalida bandeja,
+    public ProgramadorRecordatorios(RepositorioSolicitudes solicitudes, ListadoSolicitudes listado,
+            BandejaDeSalida bandeja,
             @Value("${biblioteca.recordatorio.antelacion:PT24H}") Duration antelacion) {
         this.solicitudes = solicitudes;
+        this.listado = listado;
         this.bandeja = bandeja;
         this.antelacion = antelacion;
     }
@@ -52,14 +55,15 @@ public class ProgramadorRecordatorios {
     @Scheduled(fixedDelayString = "${biblioteca.recordatorio.revision:PT1M}")
     @Transactional
     public int revisar() {
-        List<String> ids = solicitudes.marcarParaRecordar(antelacion, Instant.now());
-        for (String id : ids) {
-            solicitudes.buscar(id).ifPresent(s -> bandeja.registrar(
-                    TiposEvento.RECORDATORIO_VENCE, Evento.SISTEMA, s.id(), Map.of("solicitud", s)));
+        List<String> ids = solicitudes.marcarParaRecordar(antelacion.toSeconds(), Instant.now());
+        if (ids.isEmpty()) {
+            return 0;
         }
-        if (!ids.isEmpty()) {
-            log.info("{} recordatorios de vencimiento programados", ids.size());
+        // Una sola lectura para todo el lote, no una por recordatorio.
+        for (Solicitud s : listado.porIds(ids)) {
+            bandeja.registrar(TiposEvento.RECORDATORIO_VENCE, Evento.SISTEMA, s.id(), Map.of("solicitud", s));
         }
+        log.info("{} recordatorios de vencimiento programados", ids.size());
         return ids.size();
     }
 }

@@ -1,0 +1,77 @@
+info:
+  name: list-topics
+  type: http
+  seq: 2
+
+http:
+  method: GET
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos"
+  params:
+    - name: internos
+      value: "true"
+      type: query
+      disabled: true
+      description: Incluir los topicos internos de Kafka (__consumer_offsets).
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("los topicos de la biblioteca estan, protegidos y con 3 particiones x 3 replicas", function () {
+            const inventario = res.getBody().find((t) => t.nombre === "biblioteca.inventario");
+            expect(inventario).to.be.an("object");
+            expect(inventario.protegido).to.equal(true);
+            expect(inventario.particiones).to.equal(3);
+            expect(inventario.replicas).to.equal(3);
+          });
+        }
+
+docs: |
+  # Listar topicos
+
+  `GET /api/admin/topicos`. Cada topico con su numero de particiones y de
+  replicas, y si esta **protegido** (es de la biblioteca o interno).
+
+  Los dos topicos de la pauta son `biblioteca.inventario` (stock, compactado)
+  y `biblioteca.solicitudes` (hechos de las solicitudes, 30 dias), los dos con
+  **3 particiones y 3 replicas**; cada uno tiene su `.dlt`.
+
+  ## Parametros
+
+  | Nombre | Tipo | Obligatorio | Descripcion |
+  |---|---|---|---|
+  | `internos` | query | no | `true` incluye `__consumer_offsets` |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | empleado | entorno `aws-admin-kafka-vpn` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 200 topicos
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          [
+            { "nombre": "biblioteca.inventario", "particiones": 3, "replicas": 3, "interno": false, "protegido": true },
+            { "nombre": "biblioteca.inventario.dlt", "particiones": 3, "replicas": 3, "interno": false, "protegido": true },
+            { "nombre": "biblioteca.solicitudes", "particiones": 3, "replicas": 3, "interno": false, "protegido": true },
+            { "nombre": "biblioteca.solicitudes.dlt", "particiones": 3, "replicas": 3, "interno": false, "protegido": true }
+          ]

@@ -1,0 +1,72 @@
+info:
+  name: stock-vivo
+  type: http
+  seq: 6
+
+http:
+  method: GET
+  url: "{{BASE_URL}}/api/libros/stock-vivo"
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = Number(bru.getEnvVar("ESPERADO_LECTURA"));
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("es un mapa libro -> ejemplares, sin negativos", function () {
+            const cuerpo = res.getBody();
+            expect(cuerpo.disponibles).to.be.an("object");
+            Object.values(cuerpo.disponibles).forEach((n) => expect(n).to.be.at.least(0));
+          });
+        }
+
+docs: |
+  # Stock en vivo (H8, Kafka)
+
+  `GET /api/libros/stock-vivo`. El ultimo stock de cada libro que **cambio**
+  (carga, aprobacion o devolucion), tal como lo conoce el consumer group
+  `catalogo-vivo` leyendo el topico `biblioteca.inventario`. **No consulta la
+  base**: responde desde una proyeccion en memoria.
+
+  El catalogo del navegador lo llama cada pocos segundos y corrige las
+  tarjetas sin recargar. Solo trae los libros que cambiaron desde que el
+  topico existe; para los demas vale lo que dijo `GET /api/libros`.
+
+  Como verlo cambiar: con el entorno `aws-backoffice`, aprueba una solicitud
+  (`gestion/approve`) o carga stock (`gestion/stock`) y vuelve a ejecutar
+  esta peticion: el libro aparece (o cambia) en 1-2 segundos, lo que tarda
+  el relay de la bandeja de salida de Kafka.
+
+  En API Gateway entra por el recurso `/api/libros/{id}` (como `generos`):
+  Spring prefiere la ruta literal a la variable.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | cualquier token de la API | entornos `aws` o `aws-backoffice` |
+  | 401 | token invalido, id token o sin scope | entornos de 401 |
+
+  `actualizadoEn` es `null` mientras no haya llegado ningun cambio.
+
+examples:
+  - name: 200 stock en vivo
+    request:
+      url: "{{BASE_URL}}/api/libros/stock-vivo"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          {
+            "disponibles": { "L-001": 3, "L-006": 7 },
+            "actualizadoEn": "2026-11-23T15:20:04.512Z"
+          }

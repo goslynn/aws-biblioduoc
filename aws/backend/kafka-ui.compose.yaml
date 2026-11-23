@@ -1,0 +1,64 @@
+# ==============================================================================
+#  biblioteca / aws/backend/kafka-ui.compose.yaml   --   Kafka UI (panel web del cluster)
+# ==============================================================================
+#
+#  QUE LEVANTA
+#    kafka-ui   Kafka UI (kafbat, la continuacion mantenida de provectus):
+#               brokers, topicos con sus particiones/replicas/ISR, mensajes,
+#               consumer groups con sus offsets y su LAG, y la configuracion
+#               de cada topico. Permite crear, editar y borrar topicos.
+#
+#  COMO SE LLEGA
+#    Puerto 8090 de la EC2, que el security group SOLO abre a la VPN
+#    (aws/vpn.yaml): http://<IP privada de la EC2>:8090 con el tunel arriba.
+#    Pide usuario y contrasena (formulario): salen del secreto KafkaUiSecret
+#    de aws/backend.yaml y los imprime aws/scripts/vpn-up.sh.
+#
+#  QUIEN LO USA
+#    compose.yaml lo incluye (include:), y este a su vez incluye el cluster
+#    (kafka.compose.yaml): misma red que los brokers, a los que habla por
+#    nombre de servicio. Arranca cuando los tres brokers responden. Por eso
+#    tambien funciona solo: "docker compose -f kafka-ui.compose.yaml up -d"
+#    levanta Zookeeper, brokers y el panel.
+#
+#  MEMORIA: 448 MiB (heap 256).
+# ==============================================================================
+
+x-logs-ui: &logs
+  awslogs-region: ${AWS_REGION}
+  awslogs-group: ${GRUPO_LOGS}
+
+include:
+  - kafka.compose.yaml
+
+services:
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0
+    restart: unless-stopped
+    mem_limit: 448m
+    # Usuario y contrasena del formulario (SPRING_SECURITY_USER_NAME/PASSWORD),
+    # escritos por arrancar.sh desde Secrets Manager.
+    env_file: /run/biblioteca/kafka-ui.env
+    environment:
+      KAFKA_CLUSTERS_0_NAME: biblioteca
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      # Escritura permitida: la presentacion administra topicos desde aqui.
+      KAFKA_CLUSTERS_0_READONLY: "false"
+      AUTH_TYPE: LOGIN_FORM
+      # La configuracion vive en este archivo, no se edita desde el panel.
+      DYNAMIC_CONFIG_ENABLED: "false"
+      JAVA_OPTS: "-Xmx256m -XX:+ExitOnOutOfMemoryError"
+    ports: ["8090:8080"]
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    logging:
+      driver: awslogs
+      options:
+        <<: *logs
+        awslogs-stream: kafka-ui

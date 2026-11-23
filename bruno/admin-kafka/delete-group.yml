@@ -1,0 +1,56 @@
+info:
+  name: delete-group
+  type: http
+  seq: 10
+
+http:
+  method: DELETE
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos/:id"
+  params:
+    - name: id
+      value: "demo-grupo"
+      type: path
+      description: >-
+        El grupo a borrar (con sus offsets confirmados). demo-grupo no existe:
+        responde 404. Con catalogo-vivo y la API arriba, 409.
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const exito = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito";
+
+        test("responde lo que corresponde a esta credencial", function () {
+          if (exito) {
+            expect([204, 404]).to.include(res.getStatus());
+          } else {
+            expect(res.getStatus()).to.equal(403);
+          }
+        });
+
+docs: |
+  # Borrar un consumer group
+
+  `DELETE /api/admin/grupos/{id}`. Borra el grupo y sus offsets confirmados:
+  la proxima vez que alguien consuma con ese id, empezara segun
+  `auto.offset.reset`. Kafka no borra un grupo con consumidores.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 204 | borrado | un grupo `EMPTY`, por ejemplo uno de prueba |
+  | 404 | no existe | tal cual (`demo-grupo`) |
+  | 409 | tiene consumidores activos | `id = catalogo-vivo` con la API arriba |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 404 no existe
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos/demo-grupo"
+      method: DELETE
+    response:
+      status: 404
+      statusText: Not Found

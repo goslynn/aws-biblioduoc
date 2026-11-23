@@ -1,0 +1,79 @@
+info:
+  name: add-partitions
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/:nombre/particiones"
+  params:
+    - name: nombre
+      value: "demo.kafka"
+      type: path
+      description: El topico. Con biblioteca.solicitudes se ve el 409 de un topico protegido.
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      { "total": 6 }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("el topico queda con las particiones pedidas", function () {
+            expect(res.getBody().particiones.length).to.equal(req.getBody().total);
+          });
+        }
+
+docs: |
+  # Aumentar particiones
+
+  `POST /api/admin/topicos/{nombre}/particiones` con `{"total": n}`. Kafka
+  solo **aumenta** particiones. Mas particiones = mas consumidores de un
+  mismo grupo trabajando en paralelo.
+
+  Por que no se permite en los topicos de la biblioteca: la particion de un
+  registro es `hash(clave) % particiones`. Cambiar el numero manda los
+  registros nuevos de `L-005` a otra particion, y un consumidor podria
+  leerlos antes que los viejos: el stock "retrocederia".
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | aumentado | entorno `aws-admin-kafka-vpn` |
+  | 400 | `total` fuera de 2..12 | `{"total": 50}` |
+  | 404 | el topico no existe | `nombre = no.existe` |
+  | 409 | no aumenta, o el topico esta protegido | ejecutala dos veces, o `nombre = biblioteca.solicitudes` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 409 solo aumenta
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos/demo.kafka/particiones"
+      method: POST
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-23T15:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "demo.kafka ya tiene 6 particiones; Kafka solo permite aumentarlas",
+            "detalles": {}
+          }

@@ -4,7 +4,8 @@ Aplicacion full stack cloud native en AWS para la asignatura **DSY1107**
 (evaluacion EA1). Permite a la comunidad Duoc **crear una cuenta**, **buscar en
 el catalogo**, **solicitar uno o varios libros** en prestamo y **recibir avisos
 por correo** de cada paso. El personal de biblioteca (**empleados**) aprueba o
-rechaza las solicitudes, registra devoluciones y carga stock.
+rechaza las solicitudes, registra devoluciones y carga stock. El catalogo y la
+bandeja de los empleados se actualizan **en vivo** gracias a **Kafka**.
 
 ```
 Navegador ─HTTPS─▶ Caddy (EC2, <ip>.sslip.io, Let's Encrypt)
@@ -17,6 +18,8 @@ Navegador ─HTTPS─▶ Caddy (EC2, <ip>.sslip.io, Let's Encrypt)
       │                                                  │  RabbitMQ 4.1: cluster de 2 nodos    │
       │                                                  │      ▲          ── SMTP 587 ──▶ correo│
       │                                                  │  admin-rabbit :8081 (solo por la VPN)│
+      │                                                  │  Kafka 3.9: 3 Zookeeper + 3 brokers  │
+      │                                                  │  admin-kafka :8082, Kafka UI :8090   │
       │                                                  └──────┼───────────────────────────────┘
       │                                                         │ TLS verify-full, 5432
       │                                                  RDS PostgreSQL 16 (subred privada, sin IP publica)
@@ -32,15 +35,16 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 
 | Directorio | Que contiene |
 |---|---|
-| `pom.xml`, `mvnw` | Build Maven **multi-modulo** de los microservicios (`./mvnw package` en la raiz compila y prueba los tres modulos) |
-| `back/` | Microservicio 1, la API (Spring Boot 4.1, Java 21): REST, RBAC, productores y consumidores de RabbitMQ, envio de correo. Tiene su propio [README](back/README.md) |
+| `pom.xml`, `mvnw` | Build Maven **multi-modulo** de los microservicios (`./mvnw package` en la raiz compila y prueba los cuatro modulos) |
+| `back/` | Microservicio 1, la API (Spring Boot 4.1, Java 21): REST, RBAC, productores y consumidores de RabbitMQ y de Kafka, envio de correo. Tiene su propio [README](back/README.md) |
 | `admin-rabbit/` | Microservicio 2, el **administrador de RabbitMQ**: crea y elimina colas, exchanges y bindings por REST (`RabbitAdminService`, DTO validados). Solo interno, por la VPN. Tiene su propio [README](admin-rabbit/README.md) |
-| `comun/` | Libreria compartida por los dos: validacion del JWT de Cognito, rol EMPLEADO y formato de errores |
+| `admin-kafka/` | Microservicio 3, el **administrador de Kafka**: topicos (crear, describir, reconfigurar, aumentar particiones, borrar) y consumer groups (lag, mover offsets) por REST (`KafkaAdminService`). Solo interno, por la VPN. Tiene su propio [README](admin-kafka/README.md) |
+| `comun/` | Libreria compartida por los tres: validacion del JWT de Cognito, rol EMPLEADO y formato de errores |
 | `front/` | Frontend React 19 (Vite) con AWS Amplify, servido por Caddy en una EC2 con HTTPS (`front/Caddyfile`). Tiene su propio [README](front/README.md) |
-| `aws/` | Las siete plantillas de CloudFormation, el `docker-compose` de la EC2 de la app (`aws/backend/`), los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
-| `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa y la carpeta del administrador. Tiene su propio [README](bruno/README.md) |
+| `aws/` | Las siete plantillas de CloudFormation, los `docker-compose` de la EC2 de la app (`aws/backend/`: RabbitMQ y la API, el cluster Kafka y Kafka UI), los scripts de bootstrap/teardown y los pipelines. Tiene su propio [README](aws/README.md) |
+| `bruno/` | Coleccion de pruebas HTTP versionada, con la matriz de seguridad completa y las carpetas de los dos administradores. Tiene su propio [README](bruno/README.md) |
 | `.github/workflows/` | CI (compila y prueba en cada push y PR) y despliegue manual desde GitHub Actions, que llama a los mismos scripts de `aws/` |
-| `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3 y EP4): que esta hecho y que falta |
+| `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3 a EP6): que esta hecho y que falta |
 
 ---
 
@@ -58,6 +62,9 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 | H5 | estudiante | **"avisame cuando vuelva"** en un libro agotado | no revisar el catalogo todos los dias |
 | H6 | empleado | **cargar stock** | reponer ejemplares; quienes esperaban reciben un correo |
 | H7 | empleado | una **bitacora** de quien hizo que | auditar aprobaciones, rechazos y cargas |
+| H8 | estudiante | ver el **stock del catalogo cambiar sin recargar** | no pedir un libro que se acaba de agotar (Kafka) |
+| H9 | empleado | que las **solicitudes nuevas aparezcan solas** en la bandeja, con el contador por sede | atenderlas apenas llegan (Kafka) |
+| H10 | administrador | crear, reconfigurar y borrar topicos y ver el **lag** de cada consumer group | operar Kafka sin entrar a la maquina (`admin-kafka`, Kafka UI) |
 
 Los caminos tristes de cada una (SMTP caido, stock que se agota entre pedir y
 aprobar, doble aprobacion, devolucion antes del recordatorio...) estan en
@@ -81,6 +88,7 @@ El plazo de devolucion cuenta desde la aprobacion.
 |---|---|---|---|
 | GET | `/api/libros?q=&genero=&soloDisponibles=` | todos | 200 |
 | GET | `/api/libros/generos` | todos | 200 |
+| GET | `/api/libros/stock-vivo` | todos | 200 (stock que mantiene Kafka, H8) |
 | GET | `/api/libros/{id}` | todos | 200 · 404 |
 | GET | `/api/libros/avisame` | todos | 200 (libros que espero) |
 | POST · DELETE | `/api/libros/{id}/avisame` | todos | 201 / 204 · 404 · 409 (tiene stock) |
@@ -94,6 +102,7 @@ El plazo de devolucion cuenta desde la aprobacion.
 | POST | `/api/gestion/solicitudes/{id}/devolucion` | **empleado** | 200 · 403 · 404 · 409 |
 | POST | `/api/gestion/libros/{id}/stock` | **empleado** | 200 · 400 · 403 · 404 |
 | GET | `/api/gestion/bitacora?limite=` | **empleado** | 200 · 403 |
+| GET | `/api/gestion/bandeja-vivo` | **empleado** | 200 · 403 (pendientes que mantiene Kafka, H9) |
 | GET | `/health` | nadie (NLB) | 200, sin autenticacion y sin publicar en API Gateway |
 
 Las mismas rutas existen bajo `/v1/api/...` (ver §6).
@@ -134,12 +143,48 @@ direct correo ── transaccional ──▶ correo.transaccional ─┐
 Detalles, decisiones (por que el recordatorio es un `@Scheduled` y no un TTL
 por mensaje) y casos de fallo: [`back/README.md`](back/README.md).
 
+### El streaming va por Kafka (y no reemplaza a RabbitMQ)
+
+RabbitMQ reparte **tareas**: un correo que alguien tiene que mandar una vez, y
+que desaparece de la cola al confirmarse. Kafka guarda **hechos**: el stock de
+un libro acaba de cambiar, llego una solicitud. Varios lectores los leen cada
+uno a su ritmo, con sus propios offsets, y se pueden **releer** desde el
+principio. Son dos problemas distintos, y cada broker resuelve el suyo.
+
+```
+cambio de negocio + registro   (MISMA transaccion, bandeja PROPIA: evento_kafka)
+          │  RelayKafka, cada segundo, acks=all + idempotencia
+          ▼
+biblioteca.inventario  (clave = id del libro, compact)      ──▶ catalogo-vivo    (3 hilos) ──▶ GET /api/libros/stock-vivo  ──▶ catalogo (H8)
+                                                             ──▶ auditoria-kafka            ──▶ log
+biblioteca.solicitudes (clave = id de la solicitud, 30 dias) ──▶ bandeja-gestion  (3 hilos) ──▶ GET /api/gestion/bandeja-vivo ──▶ bandeja (H9)
+                                                             ──▶ auditoria-kafka            ──▶ log
+   registro ilegible o invalido, o 3 fallos ──▶ <topico>.dlt (log.error con particion y offset)
+```
+
+| Pieza de Kafka | Donde | Para que |
+|---|---|---|
+| **3 Zookeeper + 3 brokers** | `aws/backend/kafka.compose.yaml` | quorum de Zookeeper (tolera 1 caido) y cada particion con 3 replicas, una por broker |
+| **2 topicos, 3 particiones x 3 replicas** | `biblioteca.inventario`, `biblioteca.solicitudes` (`TopologiaKafka`) | 3 consumidores en paralelo por grupo; se puede perder un broker sin perder datos |
+| **`min.insync.replicas=2` + `acks=all`** | topicos y productor | una escritura confirmada esta en al menos 2 brokers |
+| **clave por entidad** | id del libro / de la solicitud | el orden de los cambios de una misma entidad se conserva |
+| **`cleanup.policy` por flujo** | `compact` en inventario, `delete` 30 dias en solicitudes, 14 dias en las DLT | el inventario es ESTADO (vale el ultimo); las solicitudes, HISTORIA |
+| **3 consumer groups** | `catalogo-vivo`, `bandeja-gestion`, `auditoria-kafka` | cada grupo una responsabilidad; dentro del grupo, una particion por hilo |
+| **DTO tipados** | `CambioStock`, `HechoSolicitud` (JSON, `@Valid`) | contrato explicito; lo que no lo cumple va a la DLT |
+| **DLT + reintentos** | `DefaultErrorHandler` de `ConfigKafka` | 3 reintentos con espera creciente; ilegible o invalido, directo a `<topico>.dlt` |
+| **bandeja de salida propia** | tabla `evento_kafka` (V4) + `RelayKafka` | si Kafka cae, los correos (RabbitMQ) siguen; los registros esperan en la tabla |
+| **administracion** | `admin-kafka` (REST) y **Kafka UI** (panel), por la VPN | topicos, configuracion, particiones, grupos, offsets y **lag** |
+
+Detalle en [`back/README.md`](back/README.md) §4 y
+[`admin-kafka/README.md`](admin-kafka/README.md).
+
 ### El broker: cluster de dos nodos, administrado por su propio microservicio
 
 En la EC2 de la aplicacion, un **docker compose** (`aws/backend/compose.yaml`)
-levanta cuatro contenedores: los dos nodos de RabbitMQ (`rabbitmq-1`,
-`rabbitmq-2`, unidos en cluster por `classic_config` y una Erlang cookie
-generada en Secrets Manager), la API y el **administrador de RabbitMQ**.
+levanta los dos nodos de RabbitMQ (`rabbitmq-1`, `rabbitmq-2`, unidos en
+cluster por `classic_config` y una Erlang cookie generada en Secrets Manager),
+la API y los **administradores de RabbitMQ y de Kafka**; y por `include:`, el
+cluster Kafka (`kafka.compose.yaml`) y Kafka UI (`kafka-ui.compose.yaml`).
 
 El administrador (`admin-rabbit/`) es el segundo microservicio: una API REST
 para crear y eliminar colas, exchanges y bindings (`POST /api/admin/colas`,
@@ -232,9 +277,9 @@ Las `SMTP_*` (el proveedor de correo; el lab bloquea SES) solo hacen falta la
 primera vez, y pueden ir en `aws/.env` en vez de la terminal
 (`cp aws/.env.example aws/.env`; esta en `.gitignore`). Al terminar imprime la URL del sitio, la de la API, las cuentas de
 demostracion y los comandos para probar. La primera vez tarda unos 20 minutos
-(RDS, la EC2 instalando Docker y formando el cluster, y el VPC Link). Requisitos locales: `aws`, `jq`,
+(RDS, la EC2 instalando Docker y formando los clusters, y el VPC Link). Requisitos locales: `aws`, `jq`,
 `curl`, `python3`, `npm` y **Docker** (los tests del backend levantan
-PostgreSQL y RabbitMQ con Testcontainers; `SKIP_TESTS=true` los salta). Para
+PostgreSQL, RabbitMQ y Kafka con Testcontainers; `SKIP_TESTS=true` los salta). Para
 desmontarlo:
 
 ```sh
@@ -248,9 +293,11 @@ El detalle de cada stack, cada script y cada parametro esta en
 
 * **La API**, con Bruno: `cd bruno && bru run --env aws` (y `--env aws-backoffice` para la gestion)
 * **El administrador de RabbitMQ**, con Bruno por la VPN: `bru run admin --env aws-admin-vpn`
+* **El administrador de Kafka**, igual: `bru run admin-kafka --env aws-admin-kafka-vpn`
 * **La aplicacion**, en el navegador, abriendo la URL del sitio con DevTools en
   la pestana Network. El recorrido completo esta en `front/README.md` §4.
 * **El cluster y las colas**, en el panel de RabbitMQ por la VPN (`vpn-up.sh` imprime las URL de los dos nodos y las credenciales).
+* **Los brokers, topicos, consumer groups y su lag**, en Kafka UI por la VPN (`http://<ip>:8090`; `vpn-up.sh` imprime sus credenciales).
 
 Ningun script prueba la API por su cuenta: los scripts construyen, y la
 verificacion se hace con Bruno y con el navegador.
@@ -462,6 +509,10 @@ Se declaran aqui en lugar de esconderlas.
 | Base sin ninguna via desde fuera | **VPN WireGuard opcional** (`aws/vpn.yaml`), fuera del bootstrap | Para consultar la base con DataGrip o psql y ver el panel de RabbitMQ. Usa la subred publica del proyecto; las subredes de RDS siguen sin ruta a Internet. El servidor solo acepta UDP desde la IP del equipo y solo paquetes firmados con su llave; no tiene SSH ni rol IAM. Se borra con `vpn-down.sh` |
 | RabbitMQ en un cluster de nodos en **maquinas distintas** | **Dos nodos en la MISMA EC2**, como contenedores del mismo `docker compose` | Cumple "dos nodos en cluster" y replica las colas quorum en ambos, sin otra EC2 que se cobra por hora. No da tolerancia a fallos real: si cae la maquina caen los dos, y con 2 nodos una quorum necesita a ambos para tener mayoria (eso empieza en 3) |
 | Administrador de RabbitMQ publicado como el resto de la API | **`admin-rabbit` solo interno**, por la VPN (puerto 8081), sin pasar por API Gateway | Administrar el broker no debe existir en Internet. Igual exige un JWT de empleado (la misma validacion que la API, modulo `comun`) |
+| Kafka en **Amazon MSK** o en maquinas separadas | **3 Zookeeper + 3 brokers en la MISMA EC2**, como contenedores (`kafka.compose.yaml`); la EC2 pasa a **t3.large** | MSK esta denegado en el lab (`kafka:*` con *explicitDeny*, medido junto a `mq:*`). Misma decision que el cluster RabbitMQ: replica y elige lideres de verdad (se ve parando un broker), sin mas EC2 que se cobren por hora; si cae la maquina, cae todo. 8 GiB porque los brokers no caben en 4 |
+| Kafka con **KRaft** (lo actual) | **Zookeeper**, imagen `cp-kafka` 7.9 (Kafka 3.9) | Lo pide la pauta. Kafka 4 ya no soporta Zookeeper; el cliente de la API (kafka-clients 4.2) habla sin problema con brokers 3.9 |
+| Brokers con autenticacion (SASL) | **Kafka sin usuario**, `PLAINTEXT` | Los brokers no publican ningun puerto: solo los alcanzan los contenedores de la red de compose. Kafka UI (8090) y `admin-kafka` (8082) solo por la VPN, y los dos piden credencial (formulario y JWT de empleado) |
+| Vista "en tiempo real" con WebSocket o SSE | **Sondeo cada 3 s** desde el navegador a una proyeccion en memoria que mantienen los consumidores de Kafka | API Gateway REST bufferea la respuesta y corta a los 29 s: un flujo abierto no llega al navegador. La reaccion al evento es inmediata en el backend; la lectura no toca la base |
 | La Erlang cookie como archivo `.erlang.cookie` | **`-setcookie` por variable de entorno** de cada nodo (`RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS`, `RABBITMQ_CTL_ERL_ARGS`) | Evita depender del uid del usuario `rabbitmq` de la imagen para los permisos del archivo. La cookie sale de Secrets Manager (`ErlangCookieSecret`) en cada arranque; como las contrasenas, la ve quien tenga root o `docker inspect` |
 | Frontend en **Angular** | **React 19 + Vite** | Decision del usuario. Mismas vistas, misma integracion con Cognito (Amplify, code + PKCE) y mismo contrato con la API; el interceptor de `HttpClient` pasa a ser un cliente HTTP propio (`auth/http.ts`) y los Guards, `loader` de React Router |
 | **Hosted UI** clasica de Cognito | **Managed Login** con marca propia y en castellano | La clasica solo existe en ingles y su logo no se puede poner desde CloudFormation. Exige el plan **Essentials** del User Pool, que ya era el de por defecto (medido) |
@@ -478,7 +529,7 @@ Se declaran aqui en lugar de esconderlas.
 | AWS CLI v2 | toda la infraestructura | `aws --version` |
 | Java 21 | compilar el backend | `java -version` |
 | Maven Wrapper | build reproducible, sin instalar Maven | `cd back && ./mvnw -v` |
-| Docker | los tests del backend (PostgreSQL y RabbitMQ con Testcontainers) | `docker info` |
+| Docker | los tests del backend (PostgreSQL, RabbitMQ y Kafka con Testcontainers) | `docker info` |
 | Node.js + npm | compilar el frontend | `node -v` |
 | `python3`, `jq` | leer JSON en los scripts | `python3 --version` |
 | Bruno (`bru`) | pruebas HTTP versionadas | `bru --version` |

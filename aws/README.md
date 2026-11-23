@@ -62,6 +62,10 @@ Run Command.)
           │                │   [rabbitmq-1] [rabbitmq-2]  │         SSM, Cognito, imagenes
           │                │     cluster 4.1 + paneles    │                   │
           │                │   [admin-rabbit] :8081       │                   │
+          │                │   [zookeeper-1..3]           │                   │
+          │                │   [kafka-1..3] 3 brokers     │                   │
+          │                │   [admin-kafka] :8082        │                   │
+          │                │   [kafka-ui] :8090           │                   │
           │                │   SG: entra solo la VPC      │                   │
           │                └──────────────┬───────────────┘                   │
           │  subredes PRIVADAS            │ ⑥ TLS verify-full, 5432           │
@@ -96,6 +100,8 @@ Run Command.)
 | EC2 | Secrets Manager | lee las contrasenas (BD, RabbitMQ, SMTP) en cada arranque | perfil de instancia |
 | Spring Boot | Cognito | `ListUsers` por `sub`, al activar avisos | perfil de instancia (SDK) |
 | Spring Boot | RabbitMQ | AMQP por la red de Docker (no sale de la maquina) | secreto `RabbitSecret` |
+| Spring Boot, `admin-kafka`, Kafka UI | brokers Kafka | protocolo Kafka por la red de Docker (los brokers no publican puertos) | ninguna: la red de compose (README raiz §7) |
+| Navegador por la VPN | Kafka UI (`:8090`) | formulario de login | secreto `KafkaUiSecret` |
 | Spring Boot | proveedor SMTP | 587 + STARTTLS | secreto `SmtpSecret` |
 | `build-backend.sh` | Cognito | descarga el JWKS al desplegar | ninguna (endpoint publico) |
 | `build-backend.sh` | EC2 | SSM Run Command: anota la version y reinicia | credenciales del lab |
@@ -119,19 +125,21 @@ En ningun punto del sistema hay una Access Key estatica.
 | `cognito.yaml` | `biblioteca-cognito` | User Pool (plan Essentials), grupo `empleados`, Resource Server + 2 scopes, App Clients SPA, M2M y backoffice, dominio con Managed Login y su marca (`aws/marca/*.svg`) | `web` (la URL del sitio) |
 | `network.yaml` | `biblioteca-network` | VPC; dos subredes privadas sin ruta (RDS, NLB); una subred publica con IGW (EC2 de la app, servidor web, VPN); security groups App ↔ RDS | — |
 | `database.yaml` | `biblioteca-database` | RDS PostgreSQL 16 privado y cifrado, parameter group con TLS obligatorio, dos secretos | `network` |
-| `backend.yaml` | `biblioteca-backend` | EC2 con Docker y docker compose (cluster RabbitMQ de 2 nodos, API, administrador de RabbitMQ), NLB interno, secretos de RabbitMQ, Erlang cookie y SMTP, parametro SSM de configuracion, LogGroup | `artifacts`, `cognito`, `web`, `network`, `database`, y el paquete ya subido |
+| `backend.yaml` | `biblioteca-backend` | EC2 **t3.large** con Docker y docker compose (cluster RabbitMQ de 2 nodos, cluster Kafka de 3 Zookeeper y 3 brokers, Kafka UI, API, administradores de RabbitMQ y de Kafka), NLB interno, secretos de RabbitMQ, Erlang cookie, Kafka UI y SMTP, parametro SSM de configuracion, LogGroup | `artifacts`, `cognito`, `web`, `network`, `database`, y el paquete ya subido |
 | `api.yaml` | `biblioteca-api` | REST API: recursos, metodos, authorizer, scopes, CORS, VPC Link, stage | `cognito`, `backend`, `web` |
-| `vpn.yaml` (opcional) | `biblioteca-vpn` | Servidor WireGuard en la subred publica, y las reglas que abren al tunel la base, los paneles de los dos nodos de RabbitMQ y el administrador de RabbitMQ. **No lo crea el bootstrap** | `network`, `database` |
+| `vpn.yaml` (opcional) | `biblioteca-vpn` | Servidor WireGuard en la subred publica, y las reglas que abren al tunel la base, los paneles de los dos nodos de RabbitMQ, Kafka UI y los dos administradores. **No lo crea el bootstrap** | `network`, `database` |
 
 ### Lo que corre dentro de la EC2 de la app
 
 No son plantillas: viajan en el paquete que arma `build-backend.sh`
-(`backend/biblioteca-backend.tar.gz`, junto a los dos jars) y los usa
+(`backend/biblioteca-backend.tar.gz`, junto a los tres jars) y los usa
 `/opt/biblioteca/arrancar.sh` en cada arranque.
 
 | Archivo | Que es |
 |---|---|
-| `backend/compose.yaml` | Los cuatro contenedores: `rabbitmq-1`, `rabbitmq-2`, `app`, `admin-rabbit`. Puertos, limites de memoria, healthchecks, logs a CloudWatch |
+| `backend/compose.yaml` | `rabbitmq-1`, `rabbitmq-2`, `app`, `admin-rabbit`, `admin-kafka`, e incluye los dos de abajo. Puertos, limites de memoria, healthchecks (los Java, por `/health`), logs a CloudWatch. Los tres Java corren como `nobody`, con la imagen en solo lectura, sin capabilities y con `no-new-privileges`. La app **no** espera a Kafka: si no arranca, la API y los correos siguen |
+| `backend/kafka.compose.yaml` | El cluster Kafka: `zookeeper-1..3` (quorum; sanos cuando votaron lider) y `kafka-1..3` (`cp-kafka` 7.9, replicacion 3, `min.insync.replicas=2`, sin creacion automatica de topicos). Ningun puerto publicado. Funciona solo: `docker compose -f kafka.compose.yaml up -d` |
+| `backend/kafka-ui.compose.yaml` | Kafka UI (kafbat) en el 8090, con formulario de login; incluye `kafka.compose.yaml`, asi que `-f kafka-ui.compose.yaml up -d` levanta el cluster y el panel |
 | `backend/rabbitmq.conf` | El cluster: `classic_config` con los dos nodos, y la reconciliacion que deja cada quorum con replica en ambos |
 | `backend/enabled_plugins` | Panel de administracion y shovel (*Move messages* desde una DLQ) |
 
@@ -144,10 +152,10 @@ No son plantillas: viajan en el paquete que arma `build-backend.sh`
 | `scripts/vpn-up.sh` | Opcional. Llaves del equipo → stack `vpn` → interfaz WireGuard local (sudo) → datos de conexion para DataGrip/psql y el panel de RabbitMQ. Idempotente |
 | `scripts/vpn-down.sh` | Baja la interfaz local, borra el stack `vpn` y los archivos locales con secretos |
 | `scripts/_comun.sh` | No se ejecuta solo: funciones compartidas (mensajes, requisitos, lectura de Outputs) |
-| `pipeline/build-backend.sh` | `./mvnw package` (raiz: `comun`, `back`, `admin-rabbit`) → JWKS de Cognito → `.tar.gz` con los dos jars y `backend/*` a S3 → stack del backend → (si ya existia) `systemctl restart biblioteca` por SSM → espera al health check del NLB |
+| `pipeline/build-backend.sh` | `./mvnw package` (raiz: `comun`, `back`, `admin-rabbit`, `admin-kafka`) → JWKS de Cognito → `.tar.gz` con los tres jars y `backend/*` a S3 → stack del backend → (si ya existia) `systemctl restart biblioteca` por SSM → espera al health check del NLB |
 | `pipeline/api-deploy.sh` | Stack de la API → `create-deployment` al stage. **Imprescindible tras cada cambio de la API** |
 | `pipeline/publish-web.sh` | Genera la config del frontend (y la ruta de diagnostico, segun `DEBUG`) → `tsc` + `vite build` → `.tar.gz` con `dist/`, `front/Caddyfile` y la API/Cognito → bucket de artefactos → reinicio de Caddy por SSM |
-| `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno (los cinco de la API y los dos del administrador, con la IP privada de la EC2) |
+| `pipeline/bruno-env.sh` | Obtiene los tokens de cada caso y escribe los entornos de Bruno (los cinco de la API y los dos de cada administrador, con la IP privada de la EC2) |
 | `pipeline/rota-credenciales-lab.sh` | Sube las credenciales del lab de este equipo como secretos de GitHub Actions. Solo eso |
 | `pipeline/rota-claves-demo.sh` | Cambia las contrasenas de los usuarios de demo en Cognito, en `aws/.local/usuario-demo.env` y en los secretos de GitHub. Solo eso |
 | `../.github/workflows/ci.yml` | Compila y prueba en cada push a `main` y en cada PR. Sin secretos ni AWS |
@@ -219,8 +227,11 @@ backend.yaml
   sale  : NlbArn, NlbDnsName ────────────────▶ api.yaml (VPC Link, integraciones)
           InstanceId, TargetGroupArn ────────▶ build-backend.sh (reinicio y espera)
           AppPrivateIp ──────────────────────▶ vpn-up.sh (paneles :15672/:15673,
-                                               admin :8081), bruno-env.sh (ADMIN_URL)
+                                               admin-rabbit :8081, admin-kafka :8082,
+                                               Kafka UI :8090), bruno-env.sh
+                                               (ADMIN_URL, ADMIN_KAFKA_URL)
           RabbitSecretArn ───────────────────▶ vpn-up.sh (credenciales del panel)
+          KafkaUiSecretArn ──────────────────▶ vpn-up.sh (credenciales de Kafka UI)
           LogGroupName ──────────────────────▶ aws logs tail
 
 api.yaml
@@ -329,7 +340,7 @@ RabbitMQ. Se ve en `aws logs tail /biblioteca/backend`.
 | `STAGE_NAME` | `test` | Stage de API Gateway |
 | `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | — (obligatorias la 1.ª vez) | Proveedor de correo |
 | `REMINDER_LEAD` | `PT24H` | Antelacion del recordatorio. Para una demo, `PT23H58M`: un prestamo de 1 dia avisa a los 2 min |
-| `INSTANCE_TYPE` | `t3.medium` | Tamano de la EC2 de la app |
+| `INSTANCE_TYPE` | `t3.large` | Tamano de la EC2 de la app. Es el unico valor que admite la plantilla: con Kafka, 4 GiB no alcanzan |
 | `SITE_DOMAIN` | vacio (`<ip>.sslip.io`) | Dominio propio del sitio; ver *Dominio propio* |
 | `DEMO_USER` | `alumno@duoc.cl` | Estudiante de demostracion |
 | `DEMO_EMPLOYEE` | `empleado@duoc.cl` | Empleado de demostracion (grupo `empleados`) |
@@ -399,11 +410,11 @@ instancia. Para pasar a un dominio propio:
 Dejalo en `aws/.env` y no solo en la terminal: cada bootstrap despliega
 `web.yaml` con ese valor, y sin el el sitio volveria a sslip.io.
 
-### Consultar la base y el panel de RabbitMQ (VPN opcional)
+### Consultar la base y los paneles de RabbitMQ y Kafka (VPN opcional)
 
 La base no tiene ninguna via desde fuera, y los paneles de RabbitMQ (15672 y
-15673, uno por nodo) y el administrador de RabbitMQ (8081) solo se abren al
-tunel. Para mirarlos:
+15673, uno por nodo), Kafka UI (8090) y los administradores de RabbitMQ (8081)
+y de Kafka (8082) solo se abren al tunel. Para mirarlos:
 
 ```sh
 ./aws/scripts/vpn-up.sh      # ~3 min la primera vez; pide sudo para la interfaz
@@ -420,8 +431,8 @@ Que hace `vpn-up.sh`, sin pasos manuales:
 2. Detecta tu IP publica: el security group del servidor solo acepta UDP desde
    ella (`VPN_ORIGEN` para otro rango).
 3. Despliega `vpn.yaml` en la subred publica del proyecto: Ubuntu sin SSH ni
-   rol IAM, una regla mas en el SG de RDS (5432) y tres en el de la EC2
-   (15672, 15673 y 8081).
+   rol IAM, una regla mas en el SG de RDS (5432) y cinco en el de la EC2
+   (15672, 15673, 8081, 8082 y 8090).
 4. Lee en vivo la IP publica del servidor y su llave publica, que este anuncia
    en su consola serie. Su llave privada no sale de la instancia.
 5. Levanta la interfaz `wgbiblioteca` con `wg-quick`. Solo enruta el rango de
@@ -431,7 +442,9 @@ Que hace `vpn-up.sh`, sin pasos manuales:
    JDBC y el comando `psql`, ambos con `sslmode=verify-full`. Si el backend esta
    desplegado, imprime ademas las URL de los paneles de RabbitMQ
    (`http://<IP privada de la EC2>:15672` y `:15673`), sus credenciales
-   (`RabbitSecret`) y la del administrador de RabbitMQ (`:8081`).
+   (`RabbitSecret`), la del administrador de RabbitMQ (`:8081`), la de Kafka UI
+   (`:8090`) con sus credenciales (`KafkaUiSecret`) y la del administrador de
+   Kafka (`:8082`).
 
 Por defecto conecta a la base como `biblioteca_app`.
 `VPN_USUARIO_BD=maestro` usa el usuario de Flyway: con el se puede romper el
@@ -446,6 +459,14 @@ arregla la causa.
 
 El administrador de RabbitMQ se usa con Bruno (`bru run admin --env
 aws-admin-vpn`, ver `bruno/README.md`) y exige un JWT de empleado.
+
+En Kafka UI estan los tres brokers (*Brokers*: controlador, particiones de
+cada uno), los topicos con sus particiones, lider, replicas e ISR
+(*Topics* → un topico → *Overview*), su configuracion (*Settings*), los
+mensajes con sus cabeceras (*Messages*: ahi se ve por que algo llego a una
+`.dlt`), y los consumer groups con su **lag** por particion (*Consumers*). El
+administrador de Kafka hace lo mismo por REST: `bru run admin-kafka --env
+aws-admin-kafka-vpn`.
 
 Vuelve a correr `vpn-up.sh` al reabrir el lab o al cambiar de red: la IP del
 servidor y la tuya cambian, y el script lo reajusta.
@@ -486,6 +507,17 @@ Actualizar encima de lo desplegado choca: el grupo viejo sigue en uso y una VPC
 no admite dos IGW. Lo limpio es `./aws/scripts/teardown.sh` y despues
 `bootstrap.sh`.
 
+### Si venias de la version sin Kafka
+
+Basta con `./aws/pipeline/build-backend.sh`. El UserData cambio (escribe los
+archivos de entorno de `admin-kafka` y de Kafka UI), asi que la instancia
+cambio de id logico (`AppServer` → `BackendServer`): CloudFormation crea una
+**t3.large** nueva, mueve el target group del NLB a ella y borra la vieja. El
+NLB y el VPC Link no se tocan. Los volumenes de RabbitMQ eran de la instancia
+vieja: el cluster nace vacio y la API vuelve a declarar su topologia. Si la VPN
+estaba arriba, vuelve a correr `vpn-up.sh` (abre 8082 y 8090, e imprime la IP
+nueva).
+
 ---
 
 ## 5. La demo de Defense in Depth
@@ -521,7 +553,8 @@ manual, no una prueba automatizada (esas viven en Bruno).
 ## 6. Como ver que pasa
 
 ```sh
-# Logs de los cuatro contenedores (streams app, admin-rabbit, rabbitmq-1, rabbitmq-2)
+# Logs de los contenedores (streams app, admin-rabbit, admin-kafka, rabbitmq-1, rabbitmq-2,
+# zookeeper-1..3, kafka-1..3, kafka-ui)
 aws logs tail /biblioteca/backend --follow --region us-east-1
 
 # El cluster y los contenedores, por SSM (sin SSH)
@@ -529,6 +562,10 @@ aws ssm start-session --target <InstanceId>
 #   sudo docker compose -p biblioteca -f /opt/biblioteca/paquete/compose.yaml ps
 #   sudo docker exec biblioteca-rabbitmq-1-1 rabbitmqctl cluster_status
 #   sudo docker exec biblioteca-rabbitmq-1-1 rabbitmq-queues quorum_status notif.prestamos
+#   sudo docker exec biblioteca-kafka-1-1 kafka-topics --bootstrap-server kafka-1:9092 --describe
+#   sudo docker exec biblioteca-kafka-1-1 kafka-consumer-groups --bootstrap-server kafka-1:9092 \
+#        --describe --group catalogo-vivo          # offsets, fin y LAG por particion
+#   sudo docker stop biblioteca-kafka-3-1          # tolerancia a fallos: el ISR baja a 2 y se sigue escribiendo
 
 # ¿El NLB ve sana la instancia?
 aws elbv2 describe-target-health --target-group-arn "$(aws cloudformation describe-stacks \
@@ -568,9 +605,9 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 1. **No se pueden crear roles ni politicas IAM.** Ninguna plantilla declara
    `AWS::IAM::*`: la EC2 usa el perfil preexistente `LabInstanceProfile`
    (parametro `InstanceProfileName`).
-2. **Amazon MQ y MSK: `explicitDeny`.** Por eso RabbitMQ es autogestionado, en
-   la EC2. Y por eso el backend no puede ser Lambda: Lambda solo consume colas
-   de Amazon MQ.
+2. **Amazon MQ y MSK: `explicitDeny`.** Por eso RabbitMQ y Kafka son
+   autogestionados, en contenedores de la EC2. Y por eso el backend no puede
+   ser Lambda: Lambda solo consume colas de Amazon MQ.
 3. **SES: `explicitDeny`.** El correo sale por un proveedor SMTP externo, y la
    EC2 necesita salida a Internet (subred publica; ver README raiz §7).
 4. **Region `us-east-1`**, casi todo lo demas esta bloqueado.
@@ -638,4 +675,8 @@ Medidas en la cuenta con `aws iam simulate-principal-policy` (rol `voclabs` y
 | `cluster_status` muestra un solo nodo | Los nodos no se ven: cookie distinta, o un volumen viejo de un nodo que ya pertenecia a otro cluster | Logs del stream `rabbitmq-2`; si es de volumenes, `docker compose down`, borrar los dos volumenes y `systemctl restart biblioteca` |
 | Una cola quorum tiene un solo miembro | Se declaro antes de que el segundo nodo se uniera | Se corrige sola: la reconciliacion de `rabbitmq.conf` anade la replica en unos minutos (`rabbitmq-queues quorum_status <cola>`) |
 | Una quorum deja de aceptar mensajes | Cayo un nodo: con 2 miembros, la mayoria exige los dos | `docker compose ps`; al volver el nodo, la cola sigue sola. Es la limitacion declarada de un cluster de dos nodos |
+| Los brokers Kafka no arrancan: `InconsistentClusterIdException` | Se borraron los volumenes de Zookeeper y no los de Kafka (o al reves) | Borrar los nueve volumenes `zookeeper-*`/`kafka-*` juntos; la API vuelve a crear los topicos |
+| `evento_kafka` crece; el log dice "Kafka no confirmo N registros" | Brokers caidos, o menos de 2 replicas en el ISR (`NotEnoughReplicas`) | `docker compose -p biblioteca ps`; al volver los brokers el relay vacia la tabla. RabbitMQ y los correos no se ven afectados |
+| El stack falla al actualizar con `InstanceType` | Un `INSTANCE_TYPE=t3.medium` en `aws/.env` o en la terminal | Quitalo: la plantilla solo admite `t3.large` |
+| Kafka UI no pide login o rechaza la contrasena | `kafka-ui.env` no se genero (instancia de antes de `BackendServer`) o se roto `KafkaUiSecret` | `systemctl restart biblioteca` relee el secreto; si la instancia es vieja, `build-backend.sh` la reemplaza |
 | El servicio `biblioteca` falla al arrancar con `docker: 'compose' is not a docker command` | El plugin no se descargo en el primer arranque (sin salida a GitHub) | `aws ec2 get-console-output`; el UserData lo instala en `/usr/local/lib/docker/cli-plugins` |

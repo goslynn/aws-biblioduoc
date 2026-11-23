@@ -31,7 +31,7 @@ SMTP_HOST=... SMTP_USER=... SMTP_PASSWORD=... SMTP_FROM=... \
 ./aws/scripts/bootstrap.sh         # la terminal gana sobre aws/.env
 ./aws/scripts/teardown.sh          # borra todo (pide escribir BORRAR; --yes lo salta)
 
-./aws/scripts/vpn-up.sh            # opcional: VPN WireGuard hasta la base y el panel de RabbitMQ (sudo)
+./aws/scripts/vpn-up.sh            # opcional: VPN WireGuard hasta la base, los paneles de RabbitMQ y Kafka UI (sudo)
 ./aws/scripts/vpn-down.sh          # la baja y borra el stack (cuesta por hora)
 ```
 
@@ -76,17 +76,19 @@ es inmutable, asi que siempre hay que correr `api-deploy.sh` despues.
 
 ### Backend (Maven multi-modulo, desde la RAIZ)
 
-Dos microservicios Spring Boot y una libreria: `comun/` (ValidacionJwt, Roles,
-ManejadorDeErrores), `back/` (la API) y `admin-rabbit/` (el administrador de
-RabbitMQ). El wrapper y el pom padre estan en la raiz.
+Tres microservicios Spring Boot y una libreria: `comun/` (ValidacionJwt, Roles,
+ManejadorDeErrores), `back/` (la API), `admin-rabbit/` (el administrador de
+RabbitMQ) y `admin-kafka/` (el administrador de Kafka). El wrapper y el pom
+padre estan en la raiz.
 
 ```sh
-./mvnw package                                          # los tres modulos, 49 tests (36 back + 13 admin;
-                                                        #  necesita Docker: PostgreSQL y RabbitMQ con
-                                                        #  Testcontainers, GreenMail)
+./mvnw package                                          # los cuatro modulos (necesita Docker: PostgreSQL, RabbitMQ y
+                                                        #  Kafka con Testcontainers, GreenMail)
 ./mvnw -pl back -am package                             # solo la API (y comun)
 ./mvnw -pl back -am test -Dtest=AvisosIntegracionTest -Dsurefire.failIfNoSpecifiedTests=false
 ./mvnw -pl admin-rabbit -am test -Dtest=AdminRabbitTest#seguridad -Dsurefire.failIfNoSpecifiedTests=false
+./mvnw -pl back -am test -Dtest=StreamingIntegracionTest -Dsurefire.failIfNoSpecifiedTests=false
+./mvnw -pl admin-kafka -am test -Dtest=AdminKafkaTest -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
 ### Frontend
@@ -100,28 +102,15 @@ cp src/app/aws-config.example.ts        src/app/aws-config.ts
 cp src/app/diagnostico/rutas.example.ts src/app/diagnostico/rutas.ts
 ```
 
-React 19 + React Router 8 + Vite. No hay script de test ni de servidor de
+No hay script de test ni de servidor de
 desarrollo (`npm run dev` no existe a proposito). La verificacion del frontend
 es el recorrido en navegador del `front/README.md` §4.
 
 ### Pruebas de la API
 
 ```sh
-cd bruno && bru run --env aws                   # estudiante: 200/201, y 403 en /gestion (RBAC)
-bru run --env aws-backoffice                    # empleado (M2M scope gestion): 200 en /gestion
-bru run --env aws-usuario-sin-scope             # 401
-bru run --env aws-id-token                      # 401
-bru run --env aws-token-invalido                # 401
-SSL_CERT_DIR=/etc/ssl/certs bru run --env aws   # NixOS, si OpenSSL se queja
-
-# administrador de RabbitMQ: otro servicio, solo por la VPN (vpn-up.sh)
-bru run admin --env aws-admin-vpn               # 201 / 200 / 204 (empleado)
-bru run admin --env aws-admin-vpn-estudiante    # 403
+cd bruno && bru run --env aws                   # la matriz completa de entornos esta en bruno/CLAUDE.md
 ```
-
-La carpeta `admin/` se salta sola en los entornos de la API (no tienen
-`ADMIN_URL`). El runner `bru` 4.2.1 **solo envia los query params que estan
-tambien en la `url`** (medido): si agregas uno activo, ponlo en los dos sitios.
 
 Los entornos **se generan** con `bruno-env.sh` y llevan tokens reales: estan en
 `.gitignore`. **Ningun script prueba la API**: los scripts construyen; la
@@ -130,7 +119,8 @@ verificacion es Bruno y el navegador.
 ### Diagnostico
 
 ```sh
-aws logs tail /biblioteca/backend --follow --region us-east-1   # streams app, admin-rabbit, rabbitmq-1, rabbitmq-2
+aws logs tail /biblioteca/backend --follow --region us-east-1   # streams app, admin-rabbit, admin-kafka, rabbitmq-1/2,
+                                                                #  zookeeper-1..3, kafka-1..3, kafka-ui
 aws ec2 get-console-output --instance-id <id> --latest --output text   # primer arranque de la EC2
 aws cloudformation describe-stacks --stack-name biblioteca-api --query 'Stacks[0].Outputs' --output table
 aws cloudformation validate-template --template-body file://aws/api.yaml
@@ -153,13 +143,18 @@ Navegador ─HTTPS─▶ Caddy (EC2, IP elastica, <ip>.sslip.io, Let's Encrypt)
                                           │ :8080, health check /health
                                           ▼
                               EC2 (subred PUBLICA, SG: entra solo la VPC)   ── SMTP 587 ──▶ correo
-                               docker compose (aws/backend/compose.yaml):
+                               docker compose (aws/backend/compose.yaml, t3.large):
                                [app]          Spring Boot: revalida el token, RBAC,
-                                              consumidores @RabbitListener, @Scheduled
+                                              @RabbitListener, @KafkaListener, @Scheduled
                                [rabbitmq-1]   cluster RabbitMQ 4.1 de DOS nodos
                                [rabbitmq-2]   + paneles :15672/:15673 (solo por la VPN)
                                [admin-rabbit] :8081, administra colas/exchanges/bindings
                                               (solo por la VPN, JWT de empleado)
+                               [admin-kafka]  :8082, topicos, configuracion, grupos y offsets
+                                              (solo por la VPN, JWT de empleado)
+                               include kafka-ui.compose.yaml -> kafka.compose.yaml:
+                               [zookeeper-1..3] [kafka-1..3]  cp-kafka 7.9 (Zookeeper), sin puertos
+                               [kafka-ui]     :8090 (solo por la VPN, login con KafkaUiSecret)
                                           │ TLS verify-full
                                           ▼
                               RDS PostgreSQL 16 (subredes privadas, sin IP publica)
@@ -172,7 +167,9 @@ va en la misma EC2; el backend no se parte entre Lambda y EC2 (decision del
 usuario). El cluster son dos contenedores del mismo compose (decision del
 usuario): replica las quorum, pero no tolera la caida de un nodo (con 2, la
 mayoria exige los dos). El compose y la configuracion del cluster viajan en el
-paquete de `build-backend.sh` (`.tar.gz` con los dos jars), no en el UserData.
+paquete de `build-backend.sh` (`.tar.gz` con los tres jars), no en el UserData.
+Kafka sigue la misma decision: 3 Zookeeper + 3 brokers en la misma EC2 (MSK
+denegado), por eso la EC2 es t3.large.
 
 Los avisos por correo viajan asi: cambio de negocio + evento en la MISMA
 transaccion (`evento_pendiente`, outbox) → `RelayEventos` lo publica con
@@ -182,6 +179,22 @@ manual → exchange direct `correo` (carriles `transaccional`/`masivo`) →
 por cola de eventos (`notif.prestamos.dlq`, `notif.disponibilidad.dlq`,
 `bitacora.dlq`, por el direct `eventos.dlx` con el nombre de la cola como
 routing key) y `correo.fallidos`. Detalle en `back/README.md` §4.
+
+El streaming va por **Kafka**, al lado de RabbitMQ y sin depender de el:
+cambio de negocio + DTO tipado en la MISMA transaccion pero en **otra
+bandeja** (`evento_kafka`, V4, `BandejaKafka`) → `RelayKafka` (acks=all, clave
+= id de la entidad) → `biblioteca.inventario` (compact) y
+`biblioteca.solicitudes` (delete, 30 dias), 3 particiones x 3 replicas,
+`min.insync.replicas=2` → grupos `catalogo-vivo` (H8, `ProyeccionStock`),
+`bandeja-gestion` (H9, `ProyeccionBandeja`) y `auditoria-kafka` (log). Errores
+en `ConfigKafka`: `@Valid`, 3 reintentos, `<topico>.dlt`. El frontend sondea
+`/api/libros/stock-vivo` y `/api/gestion/bandeja-vivo` cada 3 s (`vivo.ts`).
+Detalle en `back/README.md` §4.
+
+El administrador de Kafka (`admin-kafka/`) es el tercer microservicio: toda la
+logica en `KafkaAdminService` (unico que toca el `Admin` de Kafka); los
+topicos de la API estan protegidos en `admin.kafka.protegidos`. **Si agregas
+un topico en `TopologiaKafka`, agregalo tambien ahi.**
 
 El administrador de RabbitMQ (`admin-rabbit/`) es el segundo microservicio:
 toda la logica en `RabbitAdminService` (unico que toca `RabbitAdmin`); la
@@ -201,7 +214,7 @@ con **parametros explicitos que pasa `bootstrap.sh`** leyendo Outputs.
 | `aws/database.yaml` | `biblioteca-database` | network |
 | `aws/backend.yaml` | `biblioteca-backend` | artifacts, cognito, web, network, database + jar subido |
 | `aws/api.yaml` | `biblioteca-api` | cognito, backend, web |
-| `aws/vpn.yaml` (opcional) | `biblioteca-vpn` | network, database (+ backend para el panel); lo crea `vpn-up.sh`, no el bootstrap |
+| `aws/vpn.yaml` (opcional) | `biblioteca-vpn` | network, database (+ backend para los paneles y administradores); lo crea `vpn-up.sh`, no el bootstrap |
 
 El ciclo aparente (Cognito necesita la URL del frontend; el frontend necesita
 Cognito) no existe: `web.yaml` solo crea la maquina y su nombre, y los valores
@@ -292,8 +305,10 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 * **Cero recursos `AWS::IAM::*`**: el Learner Lab no permite crear roles.
   La EC2 usa el perfil `LabInstanceProfile` (parametro `InstanceProfileName`).
   Tampoco hay ninguna Access Key estatica en el sistema.
-* **Ninguna peticion manda correos ni publica en RabbitMQ directamente**: deja
-  el evento en `BandejaDeSalida` dentro de su transaccion (`Propagation.MANDATORY`).
+* **Ninguna peticion manda correos ni publica en RabbitMQ o Kafka directamente**:
+  deja el evento en `BandejaDeSalida` (RabbitMQ) o el DTO en `BandejaKafka`
+  dentro de su transaccion (`Propagation.MANDATORY`). Las dos bandejas, sus
+  relays y sus hilos van **separados**: un Kafka caido no frena los correos.
   Los consumidores son idempotentes (entrega "al menos una vez"). El email del
   destinatario sale de Cognito por el `sub`, nunca del cuerpo.
 * **El `solicitante` nunca viaja en el cuerpo**: sale de `Principal.getName()`
@@ -307,7 +322,8 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
   React, Managed Login, frontend en Caddy sobre EC2, cluster RabbitMQ de dos
   nodos en la misma EC2, administrador de RabbitMQ solo por la VPN, Erlang
   cookie por variable de entorno, credenciales del lab como secretos de GitHub
-  en vez de OIDC).
+  en vez de OIDC, Kafka en la misma EC2 con Zookeeper y sin SASL, sondeo en
+  vez de SSE).
 * **La base no se expone.** Nada de `PubliclyAccessible: true`, NAT ni
   bastion. RDS vive en las subredes PRIVADAS, que no tienen ruta a Internet: la
   unica via permanente es el SG de la EC2 de la app. La subred PUBLICA de
@@ -374,14 +390,21 @@ Si falta la tercera, un 401 se ve en el navegador como *blocked by CORS*.
 * **El recordatorio NO es un mensaje con TTL**: RabbitMQ solo expira en la
   cabeza de la cola (uno de 30 dias bloquearia al de 1) y un mensaje publicado
   no se anula al devolver el libro. Es un `@Scheduled` con `UPDATE ... RETURNING`.
-* **El host del SMTP de los tests va en `application.properties` de test**, no
-  en el `DynamicPropertyRegistrar`: la autoconfiguracion del `JavaMailSender`
-  mira esa propiedad antes de que los contenedores registren las suyas.
-* **`src/test/resources/application.properties` reemplaza al principal**, no
-  se suma: cualquier propiedad sin valor por defecto (p. ej. el placeholder
-  `appPassword` de Flyway) hay que repetirla ahi.
-* **Flyway sustituye placeholders tambien en los comentarios SQL**: no
-  escribas `${...}` en un comentario de una migracion.
+* **Spring Kafka registra todo bean `Converter` del contexto**: uno declarado
+  como lambda (el de autoridades de `ValidacionJwt`) rompia el arranque con
+  *Unable to determine source type*. Es una clase anonima a proposito.
+* **Kafka no tiene `depends_on` en compose a proposito**: la API arranca sin
+  brokers (los registros esperan en `evento_kafka`, `AseguradorTopicos` crea
+  los topicos despues). No lo "arregles" haciendo esperar a la app.
+* **Volumenes de Zookeeper y Kafka se borran juntos o ninguno**: si no,
+  `InconsistentClusterIdException`. El healthcheck de Zookeeper usa `srvr`
+  (en cp-zookeeper `ruok` esta fuera de la lista blanca y no hay variable que
+  lo cambie).
+* **Las particiones de los topicos de la biblioteca no se cambian**: la clave
+  por entidad es lo que mantiene el orden; `admin-kafka` lo impide (409).
+* **Cambiar el UserData exige un id logico nuevo de la instancia** (ya van
+  `AppInstance` → `AppServer` → `BackendServer`).
+* Las trampas de los tests y de Flyway estan en `back/CLAUDE.md`.
 
 La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 
@@ -395,6 +418,7 @@ La tabla completa de sintomas y causas esta en `aws/README.md` §8.
 | `aws/README.md` | Contrato de cada stack, orden de despliegue, restricciones del Learner Lab, tabla de problemas |
 | `back/README.md` | Historias de usuario, RabbitMQ (topologia, ACK/NACK, DLQ), decisiones y quien produce cada codigo |
 | `admin-rabbit/README.md` | El administrador de RabbitMQ: API, validacion, topologia protegida |
-| `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3/EP4) |
+| `admin-kafka/README.md` | El administrador de Kafka: API, validacion, topicos protegidos, offsets |
+| `TAREAS.md` | Trazabilidad contra las pautas de evaluacion (EP3 a EP6) |
 | `front/README.md` | Estructura React y recorrido de comprobacion en navegador |
 | `bruno/README.md` | Por que la matriz vive en los entornos y no en peticiones duplicadas |

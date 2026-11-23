@@ -10,7 +10,7 @@
 #      0. vpn        (opcional; vive en la red y abre la base) -> vpn-down.sh,
 #                       que ademas baja la interfaz local
 #      1. api        (depende del NLB y del pool; borra el VPC Link)
-#      2. backend    (EC2 + RabbitMQ + NLB; depende del bucket, la red y la base)
+#      2. backend    (EC2 + RabbitMQ + Kafka + NLB; depende del bucket, la red y la base)
 #      3. database   <- se borra la instancia SIN snapshot: es un laboratorio
 #      4. web        (servidor del sitio; vive en la subred publica, y libera
 #                       la IP elastica: el nombre sslip.io no se recupera)
@@ -44,7 +44,7 @@ cat <<EOF
 
       ${STACK_VPN}         (si existe) + la interfaz WireGuard de este equipo
       ${STACK_API}
-      ${STACK_BACKEND}    + la EC2, RabbitMQ y los mensajes que queden en sus colas
+      ${STACK_BACKEND}    + la EC2, RabbitMQ, Kafka y los mensajes que queden en colas y topicos
       ${STACK_DATABASE}   + la base PostgreSQL entera, sin snapshot
       ${STACK_WEB}        + el servidor del sitio y su IP elastica (el nombre sslip.io cambia)
       ${STACK_NETWORK}

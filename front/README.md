@@ -93,14 +93,15 @@ src/
     ├── iconos.tsx              iconos de trazo (decorativos, aria-hidden)
     ├── selector.tsx            EL desplegable de la aplicacion (no se usa <select> ni <datalist>)
     ├── esqueleto.tsx           lo que se ve mientras llega la primera respuesta
+    ├── vivo.ts                 useSondeo: consulta cada 3 s las vistas que mantiene Kafka (pausa con la pestana oculta)
     ├── auth/
     │   ├── sesion.ts           entrar, registrarse, salir, ¿empleado? (+ hook useSesion)
     │   ├── http.ts             UNICO cliente de la API (/api, mismo origen): anade el Bearer
     │   └── guardas.ts          requiereSesion y requiereEmpleado: bloquean la NAVEGACION
-    ├── catalogo/               buscador, panel de filtros colapsable, seleccion (un ejemplar por libro), tapas y "avisame cuando vuelva"
+    ├── catalogo/               buscador, panel de filtros colapsable, seleccion (un ejemplar por libro), tapas, "avisame cuando vuelva" y stock en vivo (H8)
     ├── solicitudes/            formulario de prestamo y "mis solicitudes" (con los avisos por correo)
     ├── avisos/                 activar / desactivar los avisos (el consentimiento)
-    ├── gestion/                SOLO EMPLEADOS: bandeja (aprobar, rechazar, devolver) y stock
+    ├── gestion/                SOLO EMPLEADOS: bandeja (aprobar, rechazar, devolver; en vivo, H9) y stock
     ├── diagnostico/            OPT-IN: token, payload y fetch manual
     │   ├── diagnostico.tsx       solo se empaqueta si la ruta existe
     │   └── rutas.ts              GENERADO segun DEBUG (vacio = no se empaqueta)
@@ -202,10 +203,20 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
    recibe "Volvio: ..." y su suscripcion se cierra.
 8. **Empleado → Bandeja → Prestadas → Registrar devolucion** → correo de
    devolucion.
-9. Con el estudiante, forzar `/gestion/solicitudes`: redirige al catalogo (la
+9. **En vivo (Kafka), con las dos ventanas abiertas a la vez:**
+   * Estudiante en el **Catalogo**, empleado en la **Bandeja**. El estudiante
+     envia una solicitud → en 1-3 s aparece en la bandeja del empleado,
+     marcada **nueva**, y el contador de su sede (franja *en vivo*) sube, sin
+     recargar. En Network del empleado: un `GET /api/gestion/bandeja-vivo`
+     cada 3 s.
+   * El empleado la **aprueba** → en el catalogo del estudiante el stock de
+     ese libro baja solo (con el ultimo ejemplar pasa a **Agotado**). En
+     Network del estudiante: `GET /api/libros/stock-vivo` cada 3 s.
+   * Con la pestana en segundo plano no sale ninguna de esas peticiones.
+10. Con el estudiante, forzar `/gestion/solicitudes`: redirige al catalogo (la
    guarda); y aunque se la saltara, Spring responderia 403.
-10. Recargar (F5) en `/mis-solicitudes`: sigue en la misma vista, sin 404.
-11. En Network: todas las llamadas van a `/api/...` **del mismo origen**, sin
+11. Recargar (F5) en `/mis-solicitudes`: sigue en la misma vista, sin 404.
+12. En Network: todas las llamadas van a `/api/...` **del mismo origen**, sin
     ningun `OPTIONS`; el `Authorization: Bearer` en cada peticion **sin que
     ningun componente lo haya puesto**. En la consola, **ni un aviso de la
     CSP ni de `HydrateFallback`**. En la respuesta de `/`, las cabeceras `Strict-Transport-Security` y

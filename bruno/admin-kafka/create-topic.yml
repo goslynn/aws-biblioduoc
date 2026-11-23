@@ -1,0 +1,131 @@
+info:
+  name: create-topic
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos"
+  headers:
+    - name: Content-Type
+      value: application/json
+  body:
+    type: json
+    data: |-
+      {
+        "nombre": "demo.kafka",
+        "particiones": 3,
+        "replicas": 3,
+        "configuracion": {
+          "cleanup.policy": "delete",
+          "retention.ms": "3600000",
+          "min.insync.replicas": "2"
+        }
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 201 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 201) {
+          test("el topico existe con lo pedido, y cada particion tiene lider e ISR completo", function () {
+            const enviado = req.getBody();
+            const cuerpo = res.getBody();
+            expect(cuerpo.nombre).to.equal(enviado.nombre);
+            expect(cuerpo.particiones.length).to.equal(enviado.particiones);
+            cuerpo.particiones.forEach((p) => {
+              expect(p.replicas.length).to.equal(enviado.replicas);
+              expect(p.sincronizadas.length).to.equal(enviado.replicas);
+            });
+            expect(cuerpo.configuracion["retention.ms"]).to.equal(enviado.configuracion["retention.ms"]);
+            expect(res.getHeader("location")).to.equal("/api/admin/topicos/" + enviado.nombre);
+          });
+        }
+
+docs: |
+  # Crear un topico
+
+  `POST /api/admin/topicos`.
+
+  | Campo | Obligatorio | Nota |
+  |---|---|---|
+  | `nombre` | si | minusculas, digitos, `.` `-` `_`; no `__*` |
+  | `particiones` | no (3) | 1 a 12 |
+  | `replicas` | no (3) | 1 a 3 (hay tres brokers) |
+  | `configuracion` | no | solo claves permitidas: `cleanup.policy`, `retention.ms`, `retention.bytes`, `segment.ms`, `segment.bytes`, `delete.retention.ms`, `min.compaction.lag.ms`, `min.insync.replicas`, `max.message.bytes`, `compression.type` |
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 201 | creado; `Location` apunta a el | entorno `aws-admin-kafka-vpn` |
+  | 400 | nombre invalido, tamanos fuera de rango, clave no permitida o valor que Kafka rechaza | `"retention.ms": "mucho"`, o `"replicas": 4` |
+  | 409 | ya existe | ejecutala dos veces |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 201 creado
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos"
+      method: POST
+    response:
+      status: 201
+      statusText: Created
+      headers:
+        - name: Location
+          value: /api/admin/topicos/demo.kafka
+      body:
+        type: json
+        data: |-
+          {
+            "nombre": "demo.kafka", "interno": false, "protegido": false,
+            "particiones": [
+              { "numero": 0, "lider": 2, "replicas": [1, 2, 3], "sincronizadas": [1, 2, 3], "offsetInicio": 0, "offsetFin": 0 },
+              { "numero": 1, "lider": 3, "replicas": [1, 2, 3], "sincronizadas": [1, 2, 3], "offsetInicio": 0, "offsetFin": 0 },
+              { "numero": 2, "lider": 1, "replicas": [1, 2, 3], "sincronizadas": [1, 2, 3], "offsetInicio": 0, "offsetFin": 0 }
+            ],
+            "configuracion": { "cleanup.policy": "delete", "min.insync.replicas": "2", "retention.ms": "3600000" },
+            "mensajes": 0
+          }
+  - name: 400 clave no permitida
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos"
+      method: POST
+    response:
+      status: 400
+      statusText: Bad Request
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-23T15:00:00Z",
+            "status": 400,
+            "error": "Bad Request",
+            "mensaje": "configuracion no permitida: [message.timestamp.type]. Permitidas: [cleanup.policy, ...]",
+            "detalles": {}
+          }
+  - name: 409 ya existe
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/topicos"
+      method: POST
+    response:
+      status: 409
+      statusText: Conflict
+      body:
+        type: json
+        data: |-
+          {
+            "instante": "2026-11-23T15:00:00Z",
+            "status": 409,
+            "error": "Conflict",
+            "mensaje": "Topic 'demo.kafka' already exists.",
+            "detalles": {}
+          }

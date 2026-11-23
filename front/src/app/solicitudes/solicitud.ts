@@ -75,10 +75,15 @@ export interface Solicitud {
   devueltaEn: string | null;
 }
 
-/** Cuerpo de error que devuelve ManejadorDeErrores del backend. */
+/**
+ * Cuerpo de error del backend. Los 400 de validacion vienen de
+ * ManejadorDeErrores (mensaje, detalles); los 404 y 409, del cuerpo por
+ * defecto de Spring (message). Hay que mirar los dos.
+ */
 export interface ErrorApi {
   status: number;
   error: string;
-  mensaje: string;
-  detalles: Record<string, string>;
+  mensaje?: string;
+  message?: string;
+  detalles?: Record<string, string>;
 }

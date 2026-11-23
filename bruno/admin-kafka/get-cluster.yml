@@ -1,0 +1,66 @@
+info:
+  name: get-cluster
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/cluster"
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("hay un controlador y es uno de los brokers vivos", function () {
+            const cuerpo = res.getBody();
+            expect(cuerpo.brokers.length).to.be.at.least(1);
+            expect(cuerpo.brokers.map((b) => b.id)).to.include(cuerpo.controlador);
+          });
+        }
+
+docs: |
+  # Ver el cluster
+
+  `GET /api/admin/cluster`. El id del cluster, el broker **controlador** (el
+  que Zookeeper eligio para coordinar lideres de particion) y los brokers
+  **vivos**. Con los tres arriba salen `1`, `2` y `3`; si se detiene uno
+  (`docker stop biblioteca-kafka-3-1`), deja de aparecer y el controlador
+  puede cambiar.
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | empleado | entorno `aws-admin-kafka-vpn` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+  | 503 | ningun broker responde | con el cluster detenido |
+
+examples:
+  - name: 200 tres brokers
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/cluster"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          {
+            "id": "pV3bA1d2TjKx9QeW4mZr0w",
+            "controlador": 2,
+            "brokers": [
+              { "id": 1, "host": "kafka-1", "puerto": 9092, "rack": null },
+              { "id": 2, "host": "kafka-2", "puerto": 9092, "rack": null },
+              { "id": 3, "host": "kafka-3", "puerto": 9092, "rack": null }
+            ]
+          }

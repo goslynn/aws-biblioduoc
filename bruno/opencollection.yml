@@ -5,8 +5,8 @@ info:
   summary: >-
     API interna de la Biblioteca Duoc: catalogo de libros, solicitudes de
     prestamo, gestion por empleados y avisos por correo, detras de API Gateway
-    con authorizer de Cognito. Incluye el administrador de RabbitMQ (otro
-    microservicio, solo por la VPN).
+    con authorizer de Cognito. Incluye los administradores de RabbitMQ y de
+    Kafka (otros dos microservicios, solo por la VPN).
   version: 1.0.0
 
 # Autenticacion declarada UNA sola vez. Todas las peticiones heredan
@@ -38,6 +38,11 @@ docs: |
   | `avisos` | todos: activar o desactivar los correos |
   | `gestion` | solo empleados (403 para el resto) |
   | `admin` | **otro microservicio**: el administrador de RabbitMQ (colas, exchanges, bindings). Solo empleados y solo por la VPN |
+  | `admin-kafka` | **otro microservicio**: el administrador de Kafka (topicos, configuracion, consumer groups y lag). Solo empleados y solo por la VPN |
+
+  Dos peticiones leen lo que mantiene **Kafka** (streaming), no la base:
+  `libros/stock-vivo` (H8, stock en vivo) y `gestion/bandeja-vivo` (H9,
+  solicitudes pendientes en vivo).
 
   ## La matriz de seguridad vive en los ENTORNOS
 
@@ -104,6 +109,14 @@ docs: |
   ```sh
   bru run admin --env aws-admin-vpn             # 201 / 200 / 204 (empleado)
   bru run admin --env aws-admin-vpn-estudiante  # 403
+  ```
+
+  La carpeta `admin-kafka` es lo mismo para el administrador de Kafka
+  (`admin-kafka`, puerto 8082), con `ADMIN_KAFKA_URL`:
+
+  ```sh
+  bru run admin-kafka --env aws-admin-kafka-vpn             # ciclo completo (empleado)
+  bru run admin-kafka --env aws-admin-kafka-vpn-estudiante  # 403
   ```
 
   En NixOS, si OpenSSL se queja del directorio de certificados:

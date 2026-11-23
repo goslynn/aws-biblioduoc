@@ -1,0 +1,66 @@
+info:
+  name: list-groups
+  type: http
+  seq: 7
+
+http:
+  method: GET
+  url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos"
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        const esperado = bru.getEnvVar("ESPERADO_ADMIN_KAFKA") === "exito" ? 200 : 403;
+
+        test("responde lo que corresponde a esta credencial", function () {
+          expect(res.getStatus()).to.equal(esperado);
+        });
+
+        if (esperado === 200) {
+          test("estan los tres grupos de la API", function () {
+            const ids = res.getBody().map((g) => g.id);
+            ["catalogo-vivo", "bandeja-gestion", "auditoria-kafka"].forEach((g) => expect(ids).to.include(g));
+          });
+        }
+
+docs: |
+  # Listar consumer groups
+
+  `GET /api/admin/grupos`. Cada grupo con su estado:
+
+  | Estado | Significa |
+  |---|---|
+  | `STABLE` | tiene consumidores y cada particion tiene dueno |
+  | `PREPARING_REBALANCE` / `COMPLETING_REBALANCE` | entra o sale un consumidor: se reparten las particiones |
+  | `EMPTY` | sin consumidores, con offsets guardados (la API detenida, por ejemplo) |
+
+  Los tres de la API: `catalogo-vivo` (stock en vivo, H8), `bandeja-gestion`
+  (bandeja en vivo, H9) y `auditoria-kafka` (lee los dos topicos y los deja
+  en el log).
+
+  ## Respuestas
+
+  | Codigo | Cuando | Como reproducirlo aqui |
+  |---|---|---|
+  | 200 | empleado | entorno `aws-admin-kafka-vpn` |
+  | 403 | el token no es de empleado | entorno `aws-admin-kafka-vpn-estudiante` |
+  | 401 | sin token o invalido | pestana Auth en *No Auth* |
+
+examples:
+  - name: 200 grupos
+    request:
+      url: "{{ADMIN_KAFKA_URL}}/api/admin/grupos"
+      method: GET
+    response:
+      status: 200
+      statusText: OK
+      body:
+        type: json
+        data: |-
+          [
+            { "id": "auditoria-kafka", "estado": "STABLE", "tipo": "CLASSIC" },
+            { "id": "bandeja-gestion", "estado": "STABLE", "tipo": "CLASSIC" },
+            { "id": "catalogo-vivo", "estado": "STABLE", "tipo": "CLASSIC" }
+          ]

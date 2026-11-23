@@ -70,7 +70,7 @@ public class SecurityConfig {
                         //  EL DESPACHO DE ERROR, que cuesta una tarde entera.
                         //
                         //  Cuando un controlador lanza una excepcion —por
-                        //  ejemplo el ResponseStatusException(404) de un id que
+                        //  ejemplo el RecursoNoEncontrado (404) de un id que
                         //  no existe— el contenedor reenvia internamente a
                         //  /error para construir la respuesta. Ese reenvio pasa
                         //  OTRA VEZ por estas reglas, con dispatcher type ERROR.

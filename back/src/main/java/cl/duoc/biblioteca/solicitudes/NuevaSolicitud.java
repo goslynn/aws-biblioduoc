@@ -1,8 +1,12 @@
 package cl.duoc.biblioteca.solicitudes;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotEmpty;
@@ -44,5 +48,22 @@ public record NuevaSolicitud(
     /** Sin motivo se guarda "" (la columna es NOT NULL), y nunca con espacios sobrantes. */
     public NuevaSolicitud {
         motivo = motivo == null ? "" : motivo.strip();
+    }
+
+    /**
+     * Cada libro va UNA vez. Sin esta regla, el tope de 3 copias por titulo
+     * (@Max de ItemSolicitado) se esquivaba repitiendo el libro en dos lineas:
+     * [{L-001, 3}, {L-001, 3}] pedia 6. Mismo id sin distinguir mayusculas,
+     * igual que el catalogo.
+     */
+    @AssertTrue(message = "cada libro va una sola vez en la solicitud; para mas copias, sube su cantidad")
+    public boolean isSinLibrosRepetidos() {
+        if (items == null) {
+            return true;
+        }
+        Set<String> vistos = new HashSet<>();
+        return items.stream()
+                .filter(i -> i != null && i.libroId() != null)
+                .allMatch(i -> vistos.add(i.libroId().strip().toUpperCase(Locale.ROOT)));
     }
 }

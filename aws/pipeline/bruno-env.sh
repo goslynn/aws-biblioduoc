@@ -50,6 +50,12 @@
 #      aws-admin-vpn             backoffice (empleado)  -> 201 / 200 / 204
 #      aws-admin-vpn-estudiante  M2M de acceso          -> 403
 #
+#  EL ADMINISTRADOR DE KAFKA, IGUAL
+#    admin-kafka, en el puerto 8082 de la misma IP, con ADMIN_KAFKA_URL y su
+#    propia carpeta (admin-kafka/):
+#      aws-admin-kafka-vpn             backoffice (empleado)  -> ciclo completo
+#      aws-admin-kafka-vpn-estudiante  M2M de acceso          -> 403
+#
 #  USO
 #    ./aws/pipeline/bruno-env.sh
 #
@@ -242,6 +248,41 @@ else
   warn "el stack ${STACK_BACKEND} no expone AppPrivateIp: no se generan los entornos del administrador"
 fi
 
+# --- El administrador de Kafka (solo por la VPN) ------------------------------
+# $1 archivo  $2 nombre  $3 descripcion  $4 url  $5 token  $6 exito|403
+escribe_entorno_admin_kafka() {
+  local archivo="$1" nombre="$2" descripcion="$3" url="$4" token="$5" esperado="$6"
+  cat > "${DESTINO}/${archivo}" <<EOF
+# ARCHIVO GENERADO por aws/pipeline/bruno-env.sh -- NO LO EDITES A MANO.
+# Contiene un token real y esta en .gitignore. Caduca en 60 minutos.
+# Solo para la carpeta admin-kafka/ y con la VPN levantada (./aws/scripts/vpn-up.sh):
+#   bru run admin-kafka --env ${nombre}
+name: ${nombre}
+description: >-
+  ${descripcion}
+variables:
+  - name: ADMIN_KAFKA_URL
+    value: "${url}"
+    description: Raiz del administrador de Kafka, en la IP PRIVADA de la EC2 (solo por la VPN).
+  - name: ACCESS_TOKEN
+    value: "${token}"
+    description: Credencial de este caso.
+  - name: ESPERADO_ADMIN_KAFKA
+    value: "${esperado}"
+    description: "exito: cada peticion da su 2xx (o el 409/404 de negocio que documenta). 403: el token es valido pero no es de empleado."
+EOF
+  info "escrito environments/${archivo}"
+}
+
+if [ -n "$APP_IP" ]; then
+  escribe_entorno_admin_kafka aws-admin-kafka-vpn.yml aws-admin-kafka-vpn \
+    "Administrador de Kafka con el cliente M2M backoffice (EMPLEADO): ve el cluster, crea, describe, reconfigura y borra un topico de 3 particiones x 3 replicas, y revisa los consumer groups y su lag. No pasa por API Gateway: necesita la VPN." \
+    "http://${APP_IP}:8082" "$TOKEN_BACKOFFICE" exito
+  escribe_entorno_admin_kafka aws-admin-kafka-vpn-estudiante.yml aws-admin-kafka-vpn-estudiante \
+    "Administrador de Kafka con el cliente M2M de acceso (ESTUDIANTE): el token es valido, pero administrar Kafka es de empleados. 403 en todo, emitido por Spring en el propio servicio." \
+    "http://${APP_IP}:8082" "$TOKEN_M2M" 403
+fi
+
 # Restos de cuando el backend era una Lambda con Function URL de demostracion.
 rm -f "${DESTINO}/aws-directo.yml" "${DESTINO}/aws-directo-sin-token.yml"
 
@@ -257,12 +298,17 @@ cat <<EOF
         bru run --env aws-token-invalido      # 401        firma invalida
 
     Los cinco deben pasar en VERDE: cada entorno declara el codigo que espera.
-    (La carpeta admin/ se salta en ellos: es otro servicio.)
+    (Las carpetas admin/ y admin-kafka/ se saltan en ellos: son otros servicios.)
 
     El administrador de RabbitMQ, con la VPN levantada (./aws/scripts/vpn-up.sh):
 
         bru run admin --env aws-admin-vpn             # 201 / 200 / 204 (empleado)
         bru run admin --env aws-admin-vpn-estudiante  # 403
+
+    El administrador de Kafka, igual:
+
+        bru run admin-kafka --env aws-admin-kafka-vpn             # ciclo completo (empleado)
+        bru run admin-kafka --env aws-admin-kafka-vpn-estudiante  # 403
 
     La segunda capa sin el gateway delante (Spring rechazando una peticion que
     llega directo a la EC2) se prueba a mano por la VPN; ver aws/README.md §5.

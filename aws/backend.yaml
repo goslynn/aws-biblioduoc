@@ -1,25 +1,36 @@
 AWSTemplateFormatVersion: "2010-09-09"
 
 # ==============================================================================
-#  biblioteca / backend.yaml   --   API, administrador y cluster RabbitMQ en una EC2, tras un NLB
+#  biblioteca / backend.yaml   --   API, administradores, RabbitMQ y Kafka en una EC2, tras un NLB
 # ==============================================================================
 #
 #  QUE HACE
 #    * RabbitSecret     -> usuario y contrasena del broker, generados.
 #    * ErlangCookieSecret -> el secreto con que los dos nodos forman el cluster.
+#    * KafkaUiSecret    -> usuario y contrasena del formulario de Kafka UI, generados.
 #    * SmtpSecret       -> la contrasena del proveedor SMTP (parametro NoEcho).
 #    * AppConfig        -> parametro de SSM con la configuracion NO secreta de
 #                          la aplicacion, en formato "VARIABLE=valor".
-#    * AppLogGroup      -> los logs de los cuatro contenedores, con caducidad.
-#    * AppServer        -> Amazon Linux 2023 con Docker y docker compose, que
-#                          levanta CUATRO contenedores (aws/backend/compose.yaml):
+#    * AppLogGroup      -> los logs de todos los contenedores, con caducidad.
+#    * BackendServer    -> Amazon Linux 2023 con Docker y docker compose, que
+#                          levanta (aws/backend/compose.yaml y sus include):
 #                            rabbitmq-1, rabbitmq-2  cluster RabbitMQ 4.1 de dos nodos
 #                            app           la API (back/), en Corretto 21
 #                            admin-rabbit  el administrador de RabbitMQ (admin-rabbit/)
+#                            admin-kafka   el administrador de Kafka (admin-kafka/)
+#                            zookeeper-1..3, kafka-1..3  cluster Kafka (kafka.compose.yaml)
+#                            kafka-ui      panel de Kafka (kafka-ui.compose.yaml)
 #    * Nlb + TargetGroup + Listener -> un Network Load Balancer INTERNO en las
 #                          subredes privadas: es el destino del VPC Link de
 #                          api.yaml. API Gateway no puede hablar con una IP de
 #                          EC2; necesita un NLB delante.
+#
+#  >>> POR QUE KAFKA TAMBIEN VA AQUI, Y NO EN AMAZON MSK <<<
+#    MSK esta denegado en el Learner Lab (kafka:* con explicitDeny, medido
+#    junto a mq:*). Igual que RabbitMQ, el cluster es autogestionado y va en
+#    contenedores de esta misma EC2 (decision del usuario para RabbitMQ que se
+#    mantiene para Kafka). Por eso InstanceType es t3.large: ~6,4 GiB con los
+#    limites de compose.
 #
 #  >>> POR QUE EC2 Y NO LAMBDA <<<
 #    RabbitMQ necesita consumidores que vivan SIEMPRE con una conexion
@@ -72,7 +83,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #      hay lo que no cambia; la configuracion vive en AppConfig y lo que
 #      corre, en el paquete. Cuando el UserData SI tiene que cambiar (paso de
 #      "docker run" a compose), se cambia el id logico de la instancia
-#      (AppInstance -> AppServer): CloudFormation crea otra y borra la vieja.
+#      (AppInstance -> AppServer al pasar a compose; AppServer -> BackendServer
+#      al agregar el entorno de admin-kafka y Kafka UI): CloudFormation crea
+#      otra y borra la vieja.
 #    * La IP publica cambia cada vez que el lab detiene la instancia. No
 #      importa: nada entra por ella, y el NLB apunta al id de la instancia.
 #    * Los volumenes rabbitmq-1-datos y rabbitmq-2-datos guardan el estado de
@@ -96,8 +109,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 #    NlbArn, NlbDnsName  -> api.yaml (VPC Link e integraciones)
 #    InstanceId          -> build-backend.sh (reinicio por SSM tras desplegar)
 #    TargetGroupArn      -> build-backend.sh (espera a que el NLB lo de por sano)
-#    AppPrivateIp        -> vpn-up.sh y bruno-env.sh (paneles y administrador por el tunel)
+#    AppPrivateIp        -> vpn-up.sh y bruno-env.sh (paneles y administradores por el tunel)
 #    RabbitSecretArn     -> vpn-up.sh (credenciales del panel)
+#    KafkaUiSecretArn    -> vpn-up.sh (credenciales de Kafka UI)
 #    LogGroupName        -> aws logs tail
 #
 #  DESPLIEGUE
@@ -105,8 +119,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 # ==============================================================================
 
 Description: >-
-  biblioteca - EC2 con docker compose (cluster RabbitMQ de dos nodos, API y
-  administrador de RabbitMQ), detras de un NLB interno para el VPC Link de
+  biblioteca - EC2 con docker compose (cluster RabbitMQ de dos nodos, cluster
+  Kafka de tres brokers y tres Zookeeper, Kafka UI, API y administradores de
+  RabbitMQ y Kafka), detras de un NLB interno para el VPC Link de
   API Gateway. Depende de artifacts, cognito, web,
   network y database.
 
@@ -129,12 +144,13 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: t3.medium
-    AllowedValues: [t3.medium, t3.large]
+    Default: t3.large
+    AllowedValues: [t3.large]
     Description: >-
-      Cuatro contenedores en una maquina: dos nodos RabbitMQ (Erlang) y dos
-      JVM (API y administrador), ~3 GiB con los limites de compose.yaml.
-      t3.medium (4 GiB) es el minimo; t3.small ya no alcanza.
+      Doce contenedores en una maquina: dos nodos RabbitMQ, tres Zookeeper,
+      tres brokers Kafka, Kafka UI y tres JVM (API y dos administradores),
+      ~6,4 GiB con los limites de compose.yaml. t3.large (8 GiB) es el minimo;
+      con t3.medium (4 GiB) los brokers no caben.
 
   ImageId:
     # Se resuelve al desplegar desde el parametro publico que mantiene AWS:
@@ -311,6 +327,21 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
+  # El usuario del formulario de Kafka UI. El panel solo se alcanza por la VPN,
+  # pero puede borrar topicos: tambien pide contrasena, igual que el de RabbitMQ.
+  KafkaUiSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: Usuario de Kafka UI (panel del cluster Kafka de la EC2 de la aplicacion).
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "biblioteca"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludePunctuation: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
   # La contrasena SMTP, tal cual (texto plano, no JSON: puede traer comillas).
   SmtpSecret:
     Type: AWS::SecretsManager::Secret
@@ -347,6 +378,7 @@ Resources:
         BIBLIOTECA_RECORDATORIO_ANTELACION=${ReminderLead}
         SPRING_DATASOURCE_URL=jdbc:postgresql://${DbEndpoint}:${DbPort}/${DbName}?sslmode=verify-full&sslrootcert=/opt/biblioteca/rds-ca.pem
         RABBITMQ_ADDRESSES=rabbitmq-1:5672,rabbitmq-2:5672
+        KAFKA_BROKERS=kafka-1:9092,kafka-2:9092,kafka-3:9092
         SMTP_HOST=${SmtpHost}
         SMTP_PORT=587
         SMTP_USER=${SmtpUser}
@@ -356,12 +388,13 @@ Resources:
         SECRETO_RABBIT=${RabbitSecret}
         SECRETO_SMTP=${SmtpSecret}
         SECRETO_COOKIE=${ErlangCookieSecret}
+        SECRETO_KAFKA_UI=${KafkaUiSecret}
         ARTEFACTO_BUCKET=${ArtifactsBucketName}
         ARTEFACTO_KEY=${ArtifactsObjectKey}
       Tags:
         Project: !Ref ProjectName
 
-  # Los logs de los cuatro contenedores (driver awslogs de Docker), con caducidad.
+  # Los logs de todos los contenedores (driver awslogs de Docker), con caducidad.
   AppLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -372,20 +405,23 @@ Resources:
   #  LA INSTANCIA
   # ===========================================================================
 
-  # Antes se llamaba AppInstance (dos "docker run" con systemd). El id logico
-  # se cambio A PROPOSITO al pasar a docker compose: el UserData nuevo solo
-  # corre en una instancia NUEVA, y un id nuevo es lo que hace que
-  # CloudFormation la cree, mueva el target group a ella y borre la vieja, sin
-  # tocar el NLB ni el VPC Link de api.yaml. Ver TRAMPAS en la cabecera.
-  AppServer:
+  # Antes se llamaba AppInstance (dos "docker run" con systemd) y despues
+  # AppServer (compose con RabbitMQ). El id logico se cambia A PROPOSITO cada
+  # vez que cambia el UserData: el nuevo solo corre en una instancia NUEVA, y
+  # un id nuevo es lo que hace que CloudFormation la cree, mueva el target
+  # group a ella y borre la vieja, sin tocar el NLB ni el VPC Link de
+  # api.yaml. Esta vez: los archivos de entorno de admin-kafka y Kafka UI.
+  # Ver TRAMPAS en la cabecera.
+  BackendServer:
     Type: AWS::EC2::Instance
     # Sin DependsOn: el UserData referencia AppConfig y AppLogGroup, y eso ya
     # obliga a crearlos antes del primer arranque.
     CreationPolicy:
       ResourceSignal:
         Count: 1
-        # Instalar Docker y compose, bajar dos imagenes y formar el cluster.
-        Timeout: PT20M
+        # Instalar Docker y compose, bajar las imagenes (RabbitMQ, Corretto,
+        # cp-zookeeper, cp-kafka, Kafka UI) y formar los dos clusters.
+        Timeout: PT30M
     Properties:
       ImageId: !Ref ImageId
       InstanceType: !Ref InstanceType
@@ -453,10 +489,11 @@ Resources:
 
           # --- El arranque: paquete + entorno + docker compose ------------------
           #  Baja el paquete del pipeline (la version que dejo build-backend.sh
-          #  en /etc/biblioteca/version, o la vigente): los dos jars,
-          #  compose.yaml, rabbitmq.conf y enabled_plugins. Baja la CA de RDS,
-          #  arma los archivos de entorno con la configuracion y los secretos,
-          #  y levanta los cuatro contenedores (ver aws/backend/compose.yaml).
+          #  en /etc/biblioteca/version, o la vigente): los tres jars, los
+          #  compose (compose.yaml, kafka.compose.yaml, kafka-ui.compose.yaml),
+          #  rabbitmq.conf y enabled_plugins. Baja la CA de RDS, arma los
+          #  archivos de entorno con la configuracion y los secretos, y levanta
+          #  los contenedores (ver aws/backend/compose.yaml).
           cat > /opt/biblioteca/arrancar.sh <<'EOF'
           #!/bin/bash
           set -euo pipefail
@@ -480,6 +517,7 @@ Resources:
           RABBIT="$(secreto "$(valor SECRETO_RABBIT)")"
           SMTP="$(secreto "$(valor SECRETO_SMTP)")"
           COOKIE="$(secreto "$(valor SECRETO_COOKIE)")"
+          KAFKA_UI="$(secreto "$(valor SECRETO_KAFKA_UI)")"
           RABBIT_USER="$(jq -r .username <<<"$RABBIT")"
           RABBIT_PASS="$(jq -r .password <<<"$RABBIT")"
 
@@ -513,6 +551,18 @@ Resources:
             echo "RABBITMQ_PASSWORD=$RABBIT_PASS"
           } > /run/biblioteca/admin-rabbit.env
 
+          # El administrador de Kafka: solo Cognito y los brokers (Kafka sin
+          # usuario: los brokers solo se alcanzan desde la red de compose).
+          grep -e '^AWS_REGION=' -e '^BIBLIOTECA_ISSUER=' -e '^BIBLIOTECA_JWKS=' \
+               -e '^BIBLIOTECA_SCOPE=' -e '^BIBLIOTECA_SCOPE_GESTION=' -e '^KAFKA_BROKERS=' \
+               <<<"$CONFIG" > /run/biblioteca/admin-kafka.env
+
+          # Kafka UI: el usuario de su formulario.
+          {
+            echo "SPRING_SECURITY_USER_NAME=$(jq -r .username <<<"$KAFKA_UI")"
+            echo "SPRING_SECURITY_USER_PASSWORD=$(jq -r .password <<<"$KAFKA_UI")"
+          } > /run/biblioteca/kafka-ui.env
+
           export AWS_REGION="$REGION" GRUPO_LOGS APP_PUERTO=${AppPort}
           exec docker compose -p biblioteca -f /opt/biblioteca/paquete/compose.yaml \
             up -d --remove-orphans --wait --wait-timeout 600
@@ -527,7 +577,7 @@ Resources:
           #  que manda build-backend.sh por SSM.
           cat > /etc/systemd/system/biblioteca.service <<'EOF'
           [Unit]
-          Description=Biblioteca: cluster RabbitMQ, API y administrador (docker compose)
+          Description=Biblioteca: RabbitMQ, Kafka, API y administradores (docker compose)
           After=docker.service network-online.target
           Wants=network-online.target
           Requires=docker.service
@@ -552,7 +602,7 @@ Resources:
             if curl -fs http://127.0.0.1:${AppPort}/health >/dev/null; then OK=0; break; fi
             sleep 10
           done
-          /opt/aws/bin/cfn-signal -e $OK --stack ${AWS::StackName} --resource AppServer --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $OK --stack ${AWS::StackName} --resource BackendServer --region ${AWS::Region}
 
   # ===========================================================================
   #  EL BALANCEADOR: lo que permite a API Gateway llegar a la EC2
@@ -580,12 +630,12 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub "${ProjectName}-app"
-      VpcId: !GetAtt AppServer.VpcId
+      VpcId: !GetAtt BackendServer.VpcId
       Protocol: TCP
       Port: !Ref AppPort
       TargetType: instance
       Targets:
-        - Id: !Ref AppServer
+        - Id: !Ref BackendServer
           Port: !Ref AppPort
       HealthCheckProtocol: HTTP
       HealthCheckPath: /health
@@ -623,7 +673,7 @@ Outputs:
 
   InstanceId:
     Description: La EC2. build-backend.sh reinicia su servicio por SSM tras subir un paquete nuevo.
-    Value: !Ref AppServer
+    Value: !Ref BackendServer
 
   TargetGroupArn:
     Description: Target group del NLB. build-backend.sh espera a que la instancia este sana.
@@ -632,12 +682,17 @@ Outputs:
   AppPrivateIp:
     Description: >-
       IP privada de la EC2. Por la VPN: paneles de RabbitMQ en :15672 y :15673,
-      administrador de RabbitMQ en :8081. La usan vpn-up.sh y bruno-env.sh.
-    Value: !GetAtt AppServer.PrivateIp
+      administrador de RabbitMQ en :8081, administrador de Kafka en :8082 y
+      Kafka UI en :8090. La usan vpn-up.sh y bruno-env.sh.
+    Value: !GetAtt BackendServer.PrivateIp
 
   RabbitSecretArn:
     Description: Credenciales del broker (y del panel). Las lee vpn-up.sh.
     Value: !Ref RabbitSecret
+
+  KafkaUiSecretArn:
+    Description: Credenciales del formulario de Kafka UI. Las lee vpn-up.sh.
+    Value: !Ref KafkaUiSecret
 
   LogGroupName:
     Description: "Seguir los logs: aws logs tail <este valor> --follow"

@@ -1,5 +1,5 @@
 import { http } from '../auth/http';
-import type { Libro } from './libro';
+import type { Libro, StockVivo } from './libro';
 
 /**
  * Acceso al catalogo. Encapsula la URL de la API y la forma de las peticiones.
@@ -42,6 +42,14 @@ export const librosService = {
   /** DELETE /api/libros/{id}/avisame -> 204. */
   dejarDeEsperar(id: string): Promise<void> {
     return http.delete<void>(`${base}/${id}/avisame`);
+  },
+
+  /**
+   * GET /api/libros/stock-vivo: el stock que mantiene Kafka (H8). Lo consulta
+   * el catalogo cada pocos segundos; no toca la base de datos.
+   */
+  stockVivo(): Promise<StockVivo> {
+    return http.get<StockVivo>(`${base}/stock-vivo`);
   },
 
   /** GET /api/libros/{id}. Un id inexistente devuelve 404, generado por Spring. */

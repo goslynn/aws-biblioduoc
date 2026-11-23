@@ -1,11 +1,12 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import { cuerpoDe, statusDe } from '../auth/http';
 import { librosService } from '../catalogo/libros.service';
 import { Esqueleto } from '../esqueleto';
 import { diasHasta, fechaHora } from '../formato';
 import { IconoAlerta, IconoCheck } from '../iconos';
-import { NOMBRE_SEDE, claseEstado, type EstadoSolicitud, type Solicitud } from '../solicitudes/solicitud';
+import { NOMBRE_SEDE, SEDES, claseEstado, type EstadoSolicitud, type Solicitud } from '../solicitudes/solicitud';
+import { useSondeo } from '../vivo';
 import { gestionService } from './gestion.service';
 
 /** El cuerpo de error de Spring: el nuestro (mensaje, detalles) o el suyo por defecto (message). */
@@ -42,6 +43,11 @@ const MOTIVOS_RAPIDOS = [
  * Junto a cada libro se ve el stock actual, para no aprobar a ciegas. Es una
  * AYUDA: la comprobacion que manda es la del backend, que responde 409 si al
  * aprobar ya no alcanza.
+ *
+ * EN VIVO (H9): cada 3 s se consulta /api/gestion/bandeja-vivo, que mantiene
+ * un consumidor de Kafka. Si cambian las pendientes (llega una solicitud, u
+ * otro empleado resuelve una), la lista se recarga sola y lo recien llegado
+ * se marca como "nueva".
  */
 export function Bandeja() {
   const [filtro, setFiltro] = useState<EstadoSolicitud | ''>('RECIBIDA');
@@ -55,6 +61,11 @@ export function Bandeja() {
   const [stock, setStock] = useState<Record<string, number>>({});
 
   const [rechazando, setRechazando] = useState('');
+
+  const vivo = useSondeo(gestionService.bandejaVivo, 3000);
+  /** Ids pendientes que ya se vieron: lo que no este aqui, llego despues. */
+  const vistas = useRef<Set<string> | null>(null);
+  const [nuevas, setNuevas] = useState<Set<string>>(new Set());
   const [motivo, setMotivo] = useState('');
 
   const cargar = (estado = filtro) => {
@@ -73,6 +84,28 @@ export function Bandeja() {
   };
 
   useEffect(() => cargar(), []);
+
+  // Firma de lo pendiente: si cambia, algo llego o se resolvio en otro lado.
+  const firmaVivo = vivo ? `${vivo.pendientes}|${vivo.ultimas.map((p) => p.id).join(',')}` : '';
+  useEffect(() => {
+    if (!vivo) {
+      return;
+    }
+    const ids = new Set(vivo.ultimas.map((p) => p.id));
+    if (vistas.current === null) {
+      vistas.current = ids;
+      return;
+    }
+    const llegadas = [...ids].filter((id) => !vistas.current!.has(id));
+    vistas.current = ids;
+    if (llegadas.length > 0) {
+      setNuevas((actuales) => new Set([...actuales, ...llegadas]));
+    }
+    // Sin recargar a media escritura de un motivo de rechazo.
+    if ((filtro === 'RECIBIDA' || filtro === '') && !rechazando) {
+      cargar();
+    }
+  }, [firmaVivo]);
 
   const elegir = (estado: EstadoSolicitud | '') => {
     setFiltro(estado);
@@ -140,6 +173,17 @@ export function Bandeja() {
       </section>
 
       <div className="contenedor cuerpo" role="tabpanel">
+        {vivo && (
+          <div className="resumen-vivo" aria-live="polite">
+            <span className="en-vivo">en vivo</span>
+            <span><strong>{vivo.pendientes}</strong> por revisar</span>
+            {SEDES.map((sede) => (
+              <span key={sede} className={vivo.porSede[sede] ? 'sede con-pendientes' : 'sede'}>
+                {NOMBRE_SEDE[sede]} <strong>{vivo.porSede[sede] ?? 0}</strong>
+              </span>
+            ))}
+          </div>
+        )}
         {exito && <p className="exito" role="status"><IconoCheck /> {exito}</p>}
         {error && <p className="fallo" role="alert">{error}</p>}
         {lista === null && <Esqueleto />}
@@ -154,7 +198,7 @@ export function Bandeja() {
         {recibidas.map((s) => {
           const faltaStock = s.lineas.some((l) => (stock[l.libroId] ?? Infinity) < l.cantidad);
           return (
-            <article key={s.id} className="panel solicitud">
+            <article key={s.id} className={nuevas.has(s.id) ? 'panel solicitud nueva' : 'panel solicitud'}>
               <div className="fila-bandeja">
                 <div className="id">
                   <h2>{s.id}</h2>

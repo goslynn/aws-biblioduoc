@@ -1,13 +1,17 @@
 package cl.duoc.biblioteca.catalogo;
 
+import org.springframework.data.annotation.Id;
+import org.springframework.data.relational.core.mapping.Table;
+
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
- * Un libro del catalogo.
+ * Un libro del catalogo: una fila de la tabla {@code libro} tal cual.
  *
- * Es un {@code record} inmutable: es una fila de la tabla {@code libro} tal
- * cual. JdbcClient lo construye por nombre de columna, asi que no hace falta
- * ni JPA ni setters.
+ * Es un {@code record} inmutable y a la vez la entidad de Spring Data JDBC:
+ * las columnas salen de los componentes (titulo -> titulo, en snake_case si
+ * hiciera falta) y {@link RepositorioLibros} lo lee y escribe sin setters ni
+ * mapeos a mano.
  *
  * @param id         identificador estable, formato "L-001"
  * @param titulo     titulo del libro
@@ -19,8 +23,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param ubicacion  estante donde encontrarlo
  * @param sinopsis   resumen de una linea
  */
+@Table("libro")
 public record Libro(
-        String id,
+        @Id String id,
         String titulo,
         String autor,
         String genero,
@@ -35,7 +40,8 @@ public record Libro(
      * frontend no tenga que repetir la regla "ejemplares > 0".
      *
      * La anotacion es OBLIGATORIA: de un record, Jackson serializa solo sus
-     * componentes; cualquier metodo extra se ignora salvo que se marque.
+     * componentes; cualquier metodo extra se ignora salvo que se marque. A
+     * Spring Data no le afecta: mapea componentes, no metodos.
      */
     @JsonProperty("disponible")
     public boolean disponible() {

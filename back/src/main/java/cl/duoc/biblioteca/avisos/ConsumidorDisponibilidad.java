@@ -11,9 +11,10 @@ import org.springframework.stereotype.Component;
 
 import com.rabbitmq.client.Channel;
 
-import cl.duoc.biblioteca.catalogo.SuscripcionesLibro;
+import cl.duoc.biblioteca.catalogo.ServicioAvisame;
 import cl.duoc.biblioteca.eventos.Evento;
-import cl.duoc.biblioteca.eventos.Entregas;
+import cl.duoc.biblioteca.eventos.LectorEventos;
+import cl.duoc.biblioteca.eventos.ProcesadorDeEventos;
 import cl.duoc.biblioteca.eventos.TopologiaRabbit;
 
 /**
@@ -23,7 +24,7 @@ import cl.duoc.biblioteca.eventos.TopologiaRabbit;
  * ORDEN DE LOS PASOS, Y POR QUE
  *   1. encolar los correos (con confirmacion del broker),
  *   2. borrar las suscripciones de quienes ya fueron avisados,
- *   3. ACK.
+ *   3. ACK (lo hace ProcesadorDeEventos al volver sin error).
  *   Si la aplicacion muere entre 1 y 3, el mensaje se reentrega y los correos
  *   se encolan otra vez; EnviadorSmtp los reconoce por su mensajeId (tabla
  *   correo_enviado) y no los repite. Al reves —borrar primero— un fallo dejaria
@@ -34,17 +35,20 @@ public class ConsumidorDisponibilidad {
 
     private static final Logger log = LoggerFactory.getLogger(ConsumidorDisponibilidad.class);
 
+    private final ProcesadorDeEventos procesador;
     private final LectorEventos lector;
-    private final ContactosAviso contactos;
-    private final SuscripcionesLibro suscripciones;
+    private final RepositorioContactos contactos;
+    private final ServicioAvisame avisame;
     private final RedactorCorreos redactor;
     private final PublicadorCorreo publicador;
 
-    public ConsumidorDisponibilidad(LectorEventos lector, ContactosAviso contactos, SuscripcionesLibro suscripciones,
-            RedactorCorreos redactor, PublicadorCorreo publicador) {
+    public ConsumidorDisponibilidad(ProcesadorDeEventos procesador, LectorEventos lector,
+            RepositorioContactos contactos, ServicioAvisame avisame, RedactorCorreos redactor,
+            PublicadorCorreo publicador) {
+        this.procesador = procesador;
         this.lector = lector;
         this.contactos = contactos;
-        this.suscripciones = suscripciones;
+        this.avisame = avisame;
         this.redactor = redactor;
         this.publicador = publicador;
     }
@@ -52,37 +56,20 @@ public class ConsumidorDisponibilidad {
     @RabbitListener(queues = TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD,
             containerFactory = TopologiaRabbit.FABRICA_MANUAL)
     public void recibir(Message mensaje, Channel canal) throws IOException {
-        long tag = mensaje.getMessageProperties().getDeliveryTag();
-        try {
-            Evento evento = lector.evento(mensaje);
-            String libroId = lector.texto(evento, "libroId");
-            String titulo = lector.texto(evento, "titulo");
-            String disponibles = lector.texto(evento, "disponibles");
+        procesador.procesar(mensaje, canal, TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, (evento, m) -> avisar(evento));
+    }
 
-            List<ContactosAviso.Interesado> interesados = contactos.interesadosEn(libroId);
-            publicador.encolar(interesados.stream()
-                    .map(i -> redactor.deDisponibilidad(evento, i.solicitante(), i.email(), titulo, disponibles))
-                    .toList(), TopologiaRabbit.RK_MASIVO);
-            interesados.forEach(i -> suscripciones.cancelar(libroId, i.solicitante()));
+    private void avisar(Evento evento) {
+        String libroId = lector.texto(evento, "libroId");
+        String titulo = lector.texto(evento, "titulo");
+        String disponibles = lector.texto(evento, "disponibles");
 
-            log.info("{} repuesto: {} avisos encolados", libroId, interesados.size());
-            canal.basicAck(tag, false);
-        } catch (MensajeInvalido e) {
-            log.warn("mensaje invalido en {}, va a {}: {}",
-                    TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD_DLQ, e.getMessage());
-            canal.basicNack(tag, false, false);
-        } catch (RuntimeException e) {
-            if (Entregas.esUltima(mensaje)) {
-                // El requeue ya no reintenta: el broker lo aparta en la DLQ
-                // por x-delivery-limit. Se registra aqui, que es el ultimo
-                // momento en que la aplicacion lo ve.
-                log.error("fallo en {} tras {} reintentos, el broker lo aparta en {}: {}",
-                        TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, Entregas.previas(mensaje),
-                        TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD_DLQ, e.toString());
-            } else {
-                log.warn("fallo transitorio en {}, se reintenta: {}", TopologiaRabbit.COLA_NOTIF_DISPONIBILIDAD, e.toString());
-            }
-            canal.basicNack(tag, false, true);
-        }
+        List<Interesado> interesados = contactos.interesadosEn(libroId);
+        publicador.encolar(interesados.stream()
+                .map(i -> redactor.deDisponibilidad(evento, i.solicitante(), i.email(), titulo, disponibles))
+                .toList(), TopologiaRabbit.RK_MASIVO);
+        interesados.forEach(i -> avisame.cancelarSinValidar(libroId, i.solicitante()));
+
+        log.info("{} repuesto: {} avisos encolados", libroId, interesados.size());
     }
 }
