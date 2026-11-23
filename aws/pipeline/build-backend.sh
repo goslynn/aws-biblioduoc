@@ -195,10 +195,15 @@ PARAMETROS=(
   "MasterSecretArn=${MASTER_SECRET_ARN}"
   "AppSecretArn=${APP_SECRET_ARN}"
 )
+# El tamano va SIEMPRE explicito: si no se pasa, "cloudformation deploy"
+# conserva el valor anterior del stack, y un t3.medium de antes de Kafka ya no
+# esta en AllowedValues (el despliegue fallaba con ValidationError, medido).
+PARAMETROS+=("InstanceType=${INSTANCE_TYPE:-t3.large}")
+
 # Opcionales: si no se pasan, el stack conserva el valor anterior (o el
 # Default de la plantilla, la primera vez).
 for par in SmtpHost:SMTP_HOST SmtpUser:SMTP_USER SmtpPassword:SMTP_PASSWORD SmtpFrom:SMTP_FROM \
-           ReminderLead:REMINDER_LEAD InstanceType:INSTANCE_TYPE; do
+           ReminderLead:REMINDER_LEAD; do
   variable="${par#*:}"
   [ -z "${!variable:-}" ] || PARAMETROS+=("${par%%:*}=${!variable}")
 done
