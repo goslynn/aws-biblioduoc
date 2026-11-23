@@ -131,8 +131,11 @@ espera "$PID_NETWORK"   network   "$STACK_NETWORK"
 log "Servidor del sitio (Caddy) y base de datos PostgreSQL (privada)"
 info "si es la primera vez, RDS tarda ~10 minutos en crear la instancia"
 
+AMI_WEB="$(ami_de_stack "$STACK_WEB")"
+info "AMI del sitio ${AMI_WEB}"
 despliega_stack web.yaml "$STACK_WEB" \
   "ProjectName=${PROJECT_NAME}" \
+  "ImageId=${AMI_WEB}" \
   "SiteDomain=${SITE_DOMAIN}" \
   "VpcId=$(output_obligatorio "$STACK_NETWORK" VpcId)" \
   "PublicSubnetId=$(output_obligatorio "$STACK_NETWORK" PublicSubnetId)" \

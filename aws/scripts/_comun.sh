@@ -151,6 +151,33 @@ output_obligatorio() {
   printf '%s' "$valor"
 }
 
+# El AMI con que desplegar la EC2 de un stack, FIJO mientras la instancia exista.
+#
+# Si el stack ya tiene instancia (Output InstanceId), se devuelve SU AMI: asi
+# un AMI nuevo de Amazon Linux no hace que CloudFormation reemplace la EC2 en
+# el siguiente despliegue (perdiendo volumenes, o fallando en web.yaml, cuya
+# interfaz de red fija no puede tomar una instancia nueva mientras la vieja
+# siga viva: "Interface ... in use", medido). Si no hay instancia, la ultima
+# Amazon Linux 2023 del parametro publico de AWS.
+# ACTUALIZAR_AMI=true fuerza la ultima (reemplaza la instancia del backend; la
+# del sitio, con su interfaz fija, no se puede reemplazar asi).
+AMI_AL2023_PARAMETRO=/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+ami_de_stack() {
+  local instancia ami=""
+  if [ "${ACTUALIZAR_AMI:-false}" != "true" ]; then
+    instancia="$(output_de "$1" InstanceId)"
+    if [ -n "$instancia" ]; then
+      ami="$(aws ec2 describe-instances --instance-ids "$instancia" --region "$AWS_REGION" \
+        --query 'Reservations[0].Instances[0].ImageId' --output text 2>/dev/null | sed 's/^None$//')"
+    fi
+  fi
+  if [ -z "$ami" ]; then
+    ami="$(aws ssm get-parameter --name "$AMI_AL2023_PARAMETRO" --region "$AWS_REGION" \
+      --query Parameter.Value --output text)" || die "no pude leer el AMI de Amazon Linux 2023 (${AMI_AL2023_PARAMETRO})"
+  fi
+  printf '%s' "$ami"
+}
+
 existe_stack() {
   aws cloudformation describe-stacks --stack-name "$1" --region "$AWS_REGION" >/dev/null 2>&1
 }

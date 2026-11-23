@@ -136,9 +136,14 @@ Parameters:
     Description: Caddy sirviendo archivos estaticos cabe de sobra en 1 GiB.
 
   ImageId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: AMI de la instancia (Amazon Linux 2023, con AWS CLI y agente de SSM).
+    # Un AMI CONCRETO, no el parametro publico "ultima Amazon Linux": con el
+    # parametro, cada AMI nuevo que publica AWS hacia que el siguiente
+    # despliegue reemplazara la instancia, y aqui eso FALLA (la interfaz fija
+    # SiteNic sigue en uso por la vieja: "Interface ... in use", medido). Lo
+    # elige bootstrap.sh (ami_de_stack en _comun.sh): el de la instancia que ya
+    # corre, o la ultima AL2023 si es la primera vez.
+    Type: AWS::EC2::Image::Id
+    Description: AMI de la instancia (Amazon Linux 2023, con AWS CLI y agente de SSM). Lo pasa bootstrap.sh.
 
   VpcId:
     Type: AWS::EC2::VPC::Id

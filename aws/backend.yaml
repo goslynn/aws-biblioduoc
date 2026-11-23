@@ -153,11 +153,14 @@ Parameters:
       con t3.medium (4 GiB) los brokers no caben.
 
   ImageId:
-    # Se resuelve al desplegar desde el parametro publico que mantiene AWS:
-    # siempre la ultima Amazon Linux 2023, sin escribir ningun AMI a mano.
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
-    Description: AMI de la instancia (Amazon Linux 2023, que trae AWS CLI y el agente de SSM).
+    # Un AMI CONCRETO, no el parametro publico "ultima Amazon Linux": con el
+    # parametro, cada AMI nuevo de AWS reemplazaba la instancia en el
+    # siguiente despliegue y se perdian los volumenes de RabbitMQ y Kafka. Lo
+    # elige build-backend.sh (ami_de_stack en _comun.sh): el de la instancia
+    # que ya corre, o la ultima AL2023 si es la primera vez. Ningun AMI
+    # escrito a mano.
+    Type: AWS::EC2::Image::Id
+    Description: AMI de la instancia (Amazon Linux 2023, que trae AWS CLI y el agente de SSM). Lo pasa build-backend.sh.
 
   AppPort:
     Type: Number

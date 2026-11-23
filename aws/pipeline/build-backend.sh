@@ -170,8 +170,14 @@ info "VersionId ${VERSION_ID}"
 log "Desplegando el stack '${STACK_BACKEND}'"
 [ "$EXISTIA" = "true" ] || info "primera vez: la instancia instala Docker y compose y forma los clusters (~10 min)"
 
+# El AMI de la instancia que ya corre (o la ultima AL2023 si no hay): un AMI
+# nuevo de Amazon Linux no debe reemplazar la EC2 ni borrar sus volumenes.
+AMI_BACKEND="$(ami_de_stack "$STACK_BACKEND")"
+info "AMI ${AMI_BACKEND}"
+
 PARAMETROS=(
   "ProjectName=${PROJECT_NAME}"
+  "ImageId=${AMI_BACKEND}"
   "ArtifactsBucketName=${ARTIFACTS_BUCKET}"
   "ArtifactsObjectKey=${OBJECT_KEY}"
   "IssuerUrl=${ISSUER_URL}"
