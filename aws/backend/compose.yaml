@@ -216,8 +216,18 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 6
-    # Sin depends_on hacia Kafka: arranca igual y responde 503 mientras los
-    # brokers no esten (el Admin de Kafka reconecta solo).
+    # Espera a que EXISTAN los contenedores de los brokers (service_started, no
+    # healthy): el cliente de Kafka aborta al crearse si ningun nombre de
+    # bootstrap.servers resuelve, y en la red de compose kafka-N no resuelve
+    # hasta que su contenedor existe (medido en AWS: el primer arranque caia
+    # y lo levantaba el restart). Despues, si los brokers caen, responde 503.
+    depends_on:
+      kafka-1:
+        condition: service_started
+      kafka-2:
+        condition: service_started
+      kafka-3:
+        condition: service_started
     logging:
       driver: awslogs
       options:

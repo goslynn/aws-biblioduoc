@@ -230,8 +230,17 @@ if [ "$EXISTIA" = "true" ]; then
     --region "$AWS_REGION" \
     --query Command.CommandId --output text)" \
     || die "SSM no acepto el comando. ¿Esta la instancia encendida? (el lab la detiene al cerrar la sesion)"
-  aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --region "$AWS_REGION" \
-    || die "el reinicio fallo: aws ssm get-command-invocation --command-id ${COMMAND_ID} --instance-id ${INSTANCE_ID}"
+  # Sin "aws ssm wait command-executed": se rinde a los ~100 s, y con RabbitMQ,
+  # Kafka y tres JVM el reinicio (compose up --wait) tarda mas (medido: el
+  # pipeline fallaba con el servicio arrancando bien). Se espera hasta 15 min.
+  ESTADO=InProgress
+  for _ in $(seq 1 90); do
+    ESTADO="$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
+      --region "$AWS_REGION" --query Status --output text 2>/dev/null || echo Pending)"
+    case "$ESTADO" in Pending|InProgress|Delayed) sleep 10 ;; *) break ;; esac
+  done
+  [ "$ESTADO" = "Success" ] \
+    || die "el reinicio termino en ${ESTADO}: aws ssm get-command-invocation --command-id ${COMMAND_ID} --instance-id ${INSTANCE_ID}"
   info "servicio reiniciado con la version ${VERSION_ID}"
 
   # --- 5. Esperar a que el NLB la de por sana ----------------------------------
