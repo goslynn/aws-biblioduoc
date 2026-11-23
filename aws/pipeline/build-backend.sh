@@ -220,8 +220,13 @@ LOG_GROUP="$(output_obligatorio "$STACK_BACKEND" LogGroupName)"
 # --- 4. Reiniciar con el paquete nuevo -------------------------------------------
 if [ "$EXISTIA" = "true" ]; then
   log "Reiniciando la aplicacion en ${INSTANCE_ID} (SSM Run Command)"
-  COMANDOS="$(jq -nc --arg v "$VERSION_ID" \
-    '{commands: ["echo \($v) > /etc/biblioteca/version", "systemctl restart biblioteca"]}')"
+  # Si el primer arranque falla por algo pasajero (medido: el curl de la CA de
+  # RDS con "Connection reset by peer"), systemd lo reintenta solo cada 20 s
+  # (Restart=on-failure). El comando espera esos reintentos hasta 15 min en
+  # vez de dar el despliegue por fallido al primer intento.
+  REINICIO='systemctl restart biblioteca && exit 0; for i in $(seq 1 45); do sleep 20; systemctl is-active --quiet biblioteca && exit 0; done; exit 1'
+  COMANDOS="$(jq -nc --arg v "$VERSION_ID" --arg r "$REINICIO" \
+    '{commands: ["echo \($v) > /etc/biblioteca/version", $r]}')"
   COMMAND_ID="$(aws ssm send-command \
     --instance-ids "$INSTANCE_ID" \
     --document-name AWS-RunShellScript \
@@ -232,9 +237,9 @@ if [ "$EXISTIA" = "true" ]; then
     || die "SSM no acepto el comando. ¿Esta la instancia encendida? (el lab la detiene al cerrar la sesion)"
   # Sin "aws ssm wait command-executed": se rinde a los ~100 s, y con RabbitMQ,
   # Kafka y tres JVM el reinicio (compose up --wait) tarda mas (medido: el
-  # pipeline fallaba con el servicio arrancando bien). Se espera hasta 15 min.
+  # pipeline fallaba con el servicio arrancando bien). Se espera hasta 20 min.
   ESTADO=InProgress
-  for _ in $(seq 1 90); do
+  for _ in $(seq 1 120); do
     ESTADO="$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" \
       --region "$AWS_REGION" --query Status --output text 2>/dev/null || echo Pending)"
     case "$ESTADO" in Pending|InProgress|Delayed) sleep 10 ;; *) break ;; esac
