@@ -58,7 +58,7 @@ docs: |
   | Entorno | Credencial | Lecturas | Crear | Gestion | Que demuestra |
   |---|---|---|---|---|---|
   | `aws` | cliente M2M, scope `acceso` | 200 | 201 | **403** | el camino completo, y el RBAC de Spring |
-  | `aws-backoffice` | cliente M2M, scope `gestion` | 200 | 201 | 200 | un empleado aprueba, devuelve y carga stock |
+  | `aws-backoffice` | cliente M2M, scope `gestion` | 200 | **403** | 200 | un empleado aprueba, devuelve y carga stock, pero no pide libros |
   | `aws-usuario-sin-scope` | access token de usuario (admin-initiate-auth) | 401 | 401 | 401 | un token valido al que le falta el scope |
   | `aws-id-token` | id token del mismo usuario | 401 | 401 | 401 | un id token no sirve para autorizar: no lleva claim `scope` |
   | `aws-token-invalido` | `no-es-un-jwt-de-verdad` | 401 | 401 | 401 | el authorizer valida la **firma**, no solo la presencia |
@@ -95,7 +95,7 @@ docs: |
   ```sh
   cd bruno
   bru run --env aws                     # 200 / 201, 403 en gestion
-  bru run --env aws-backoffice          # 200 / 201, 200 en gestion
+  bru run --env aws-backoffice          # 200 / 403 al crear, 200 en gestion
   bru run --env aws-usuario-sin-scope   # 401
   bru run --env aws-id-token            # 401
   bru run --env aws-token-invalido      # 401

@@ -190,8 +190,8 @@ escribe_entorno aws.yml aws \
   "$API_ENDPOINT" "$TOKEN_M2M" 200 201 403
 
 escribe_entorno aws-backoffice.yml aws-backoffice \
-  "Cliente M2M backoffice con el scope de gestion: un EMPLEADO para Spring. Aprueba, devuelve, consulta la bitacora y carga stock. En Bruno hace de empleado, porque un token de PERSONA con custom scope solo sale del navegador (desviacion declarada, README §7)." \
-  "$API_ENDPOINT" "$TOKEN_BACKOFFICE" 200 201 200
+  "Cliente M2M backoffice con el scope de gestion: un EMPLEADO para Spring. Aprueba, devuelve, consulta la bitacora y carga stock, pero NO crea solicitudes (403, RBAC de Spring). En Bruno hace de empleado, porque un token de PERSONA con custom scope solo sale del navegador (desviacion declarada, README §7)." \
+  "$API_ENDPOINT" "$TOKEN_BACKOFFICE" 200 403 200
 
 # MEDIDO, no supuesto: la guia dice "403 o rechazo de autorizacion segun
 # configuracion". El authorizer COGNITO_USER_POOLS de API Gateway responde

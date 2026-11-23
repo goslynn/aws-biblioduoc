@@ -70,7 +70,7 @@ los cinco casos**, y no hay ni una peticion duplicada.
 | Entorno | Credencial | Lecturas | Crear | Gestion | Que demuestra |
 |---|---|---|---|---|---|
 | `aws` | cliente M2M, scope `acceso` (un estudiante) | 200 | 201 | **403** | el camino completo, y el RBAC de Spring a traves del gateway |
-| `aws-backoffice` | cliente M2M, scope `gestion` (un empleado) | 200 | 201 | 200 | aprobar, devolver, bitacora y cargar stock |
+| `aws-backoffice` | cliente M2M, scope `gestion` (un empleado) | 200 | **403** | 200 | aprobar, devolver, bitacora y cargar stock; un empleado no pide libros |
 | `aws-usuario-sin-scope` | access token de usuario (`admin-initiate-auth`) | **401** | **401** | 401 | un token valido al que le falta el scope |
 | `aws-id-token` | id token del mismo usuario | 401 | 401 | 401 | un id token no autoriza: no lleva claim `scope` |
 | `aws-token-invalido` | `no-es-un-jwt-de-verdad` | 401 | 401 | 401 | el authorizer valida la **firma** |
@@ -78,7 +78,10 @@ los cinco casos**, y no hay ni una peticion duplicada.
 Algunas peticiones derivan su codigo de esos tres: activar avisos con un
 cliente M2M es **409** (no hay usuario de Cognito con email), suscribirse a un
 libro es 201, y `gestion/reject` con el backoffice es **409** porque en
-`bru run` llega despues de aprobar y devolver la misma solicitud. Cada una lo
+`bru run` llega despues de aprobar y devolver la misma solicitud. Como el
+backoffice no puede crear (403), esa solicitud la toma `gestion/list`: la
+RECIBIDA mas reciente, asi que **corre antes `bru run --env aws`**, que deja
+una pendiente. Cada una lo
 explica en su *Docs*.
 
 **Los codigos estan medidos, no supuestos** (salvo lo nuevo, ver abajo). La
@@ -88,7 +91,7 @@ real, API Gateway responde **401**, con el mismo cuerpo
 autorizacion **si existe** y lo emite Spring Security: ahora se ve a traves
 del gateway en `gestion/` con el entorno `aws`.
 
-> **Pendiente de medir.** El entorno `aws-backoffice` y la columna *Gestion*
+> **Pendiente de medir.** El entorno `aws-backoffice` (tambien su 403 al crear) y la columna *Gestion*
 > llegaron con el backend en EC2 y RabbitMQ. Son lo que deberia pasar; hay que
 > confirmarlos contra el despliegue real y borrar esta nota.
 
@@ -249,7 +252,8 @@ Detalles que conviene conocer al tocarla:
   equivocado.
 * `create.yml` deja el id creado en una variable de runtime
   (`bru.setVar("solicitudCreada", …)`) que `get.yml` y los `gestion/*` usan
-  como path param. Por eso `bru run` funciona de corrido: las `seq` ordenan
+  como path param. Con el backoffice, que no puede crear (403), deja en su
+  lugar la RECIBIDA mas reciente de la bandeja: corre antes `--env aws`. Por eso `bru run` funciona de corrido: las `seq` ordenan
   create → get → ... → approve → return → reject.
 * `gestion/stock` suma 1 ejemplar a L-013 en cada `bru run` con el backoffice.
   Es intencionado (una carga real); para ver un "avisame", carga L-005.

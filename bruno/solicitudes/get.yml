@@ -46,7 +46,9 @@ docs: |
 
   El valor por defecto es `{{solicitudCreada}}`, una variable de **runtime**
   que deja la peticion `create` al ejecutarse. Por eso `bru run` funciona de
-  corrido: `create` (seq 1) se ejecuta antes que esta (seq 3). Si lanzas esta
+  corrido: `create` (seq 1) se ejecuta antes que esta (seq 3). Con el
+  backoffice, que no puede crear, `create` deja la RECIBIDA mas reciente (un
+  empleado puede leer cualquiera). Si lanzas esta
   peticion sola y nunca has ejecutado `create` en esta sesion, la variable no
   existe y obtendras un 404.
 

@@ -241,7 +241,8 @@ y `ScopeGestion`. El grupo `empleados` en `cognito.yaml`,
 **RBAC**: el gateway acepta cualquiera de los dos scopes en todos los metodos;
 el rol lo decide Spring. `ROLE_EMPLEADO` = (grupo `empleados` en
 `cognito:groups` **y** scope de acceso) **o** scope de gestion. La regla vive en
-la ruta: `/api/gestion/**` → `hasRole("EMPLEADO")`. Los scopes se asignan por
+la ruta: `/api/gestion/**` → `hasRole("EMPLEADO")`, y `POST /api/solicitudes` →
+scope de acceso **y no** empleado (el empleado gestiona, no pide: 403). Los scopes se asignan por
 App Client, no por persona: el rol de una persona NO puede ser un scope.
 
 Codigos **medidos** contra el despliegue real (no supuestos):

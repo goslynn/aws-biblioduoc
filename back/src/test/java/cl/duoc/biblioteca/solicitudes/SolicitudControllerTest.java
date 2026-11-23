@@ -36,6 +36,22 @@ class SolicitudControllerTest {
                 .authorities(new SimpleGrantedAuthority("SCOPE_biblioteca-api/acceso"));
     }
 
+    /** Persona del grupo "empleados" con el scope de acceso: ROLE_EMPLEADO. */
+    private static JwtRequestPostProcessor comoEmpleado() {
+        return jwt()
+                .jwt(builder -> builder.claim("sub", "empleado-de-prueba"))
+                .authorities(new SimpleGrantedAuthority("SCOPE_biblioteca-api/acceso"),
+                        new SimpleGrantedAuthority("ROLE_EMPLEADO"));
+    }
+
+    /** El cliente M2M backoffice: solo el scope de gestion, y por eso empleado. */
+    private static JwtRequestPostProcessor comoBackoffice() {
+        return jwt()
+                .jwt(builder -> builder.claim("sub", "backoffice"))
+                .authorities(new SimpleGrantedAuthority("SCOPE_biblioteca-api/gestion"),
+                        new SimpleGrantedAuthority("ROLE_EMPLEADO"));
+    }
+
     private static final String VALIDA = """
             {
               "items": [ { "libroId": "L-001", "cantidad": 1 },
@@ -139,5 +155,23 @@ class SolicitudControllerTest {
         mvc.perform(post("/api/solicitudes").contentType(MediaType.APPLICATION_JSON).content(repetido).with(comoAlumno()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detalles.sinLibrosRepetidos").exists());
+    }
+
+    @Test
+    @DisplayName("un empleado no puede crear solicitudes: 403, por las dos rutas")
+    void empleadoNoCrea() throws Exception {
+        for (String ruta : new String[] { "/api/solicitudes", "/v1/api/solicitudes" }) {
+            mvc.perform(post(ruta).contentType(MediaType.APPLICATION_JSON).content(VALIDA).with(comoEmpleado()))
+                    .andExpect(status().isForbidden());
+            mvc.perform(post(ruta).contentType(MediaType.APPLICATION_JSON).content(VALIDA).with(comoBackoffice()))
+                    .andExpect(status().isForbidden());
+        }
+    }
+
+    @Test
+    @DisplayName("un empleado sigue pudiendo leer: GET /api/solicitudes responde 200")
+    void empleadoLee() throws Exception {
+        mvc.perform(get("/api/solicitudes").with(comoEmpleado()))
+                .andExpect(status().isOk());
     }
 }

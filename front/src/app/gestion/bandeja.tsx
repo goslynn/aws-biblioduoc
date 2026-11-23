@@ -6,8 +6,9 @@ import { Esqueleto } from '../esqueleto';
 import { diasHasta, fechaHora } from '../formato';
 import { IconoAlerta, IconoCheck } from '../iconos';
 import { NOMBRE_SEDE, SEDES, claseEstado, type EstadoSolicitud, type Solicitud } from '../solicitudes/solicitud';
+import { notificar } from '../notificaciones';
 import { useSondeo } from '../vivo';
-import { gestionService } from './gestion.service';
+import { gestionService, type BandejaVivo } from './gestion.service';
 
 /** El cuerpo de error de Spring: el nuestro (mensaje, detalles) o el suyo por defecto (message). */
 interface CuerpoError {
@@ -47,7 +48,8 @@ const MOTIVOS_RAPIDOS = [
  * EN VIVO (H9): cada 3 s se consulta /api/gestion/bandeja-vivo, que mantiene
  * un consumidor de Kafka. Si cambian las pendientes (llega una solicitud, u
  * otro empleado resuelve una), la lista se recarga sola y lo recien llegado
- * se marca como "nueva".
+ * se marca como "nueva" y se avisa con una notificacion (notificaciones.tsx),
+ * que se ve aunque el empleado este en otra pestana de la bandeja.
  */
 export function Bandeja() {
   const [filtro, setFiltro] = useState<EstadoSolicitud | ''>('RECIBIDA');
@@ -65,6 +67,8 @@ export function Bandeja() {
   const vivo = useSondeo(gestionService.bandejaVivo, 3000);
   /** Ids pendientes que ya se vieron: lo que no este aqui, llego despues. */
   const vistas = useRef<Set<string> | null>(null);
+  /** recibidaEn de la pendiente mas reciente ya vista: solo se avisa de lo posterior. */
+  const masReciente = useRef('');
   const [nuevas, setNuevas] = useState<Set<string>>(new Set());
   const [motivo, setMotivo] = useState('');
 
@@ -92,6 +96,9 @@ export function Bandeja() {
       return;
     }
     const ids = new Set(vivo.ultimas.map((p) => p.id));
+    const recibidas = vivo.ultimas.map((p) => p.recibidaEn).sort();
+    const antesDe = masReciente.current;
+    masReciente.current = recibidas.at(-1) ?? antesDe;
     if (vistas.current === null) {
       vistas.current = ids;
       return;
@@ -100,6 +107,9 @@ export function Bandeja() {
     vistas.current = ids;
     if (llegadas.length > 0) {
       setNuevas((actuales) => new Set([...actuales, ...llegadas]));
+      // Al resolverse una, otra mas antigua puede volver a entrar en las 10
+      // ultimas: se marca, pero no se avisa como si acabara de llegar.
+      avisarLlegadas(vivo.ultimas.filter((p) => llegadas.includes(p.id) && p.recibidaEn > antesDe));
     }
     // Sin recargar a media escritura de un motivo de rechazo.
     if ((filtro === 'RECIBIDA' || filtro === '') && !rechazando) {
@@ -314,5 +324,20 @@ function describir(fallo: unknown): string {
     case 409: return `HTTP 409: ${cuerpo?.message ?? 'la solicitud ya no esta en ese estado'}.`;
     case 400: return `HTTP 400: ${detalle || cuerpo?.mensaje || 'datos invalidos'}.`;
     default:  return `HTTP ${status}: no se pudo completar la accion.`;
+  }
+}
+
+/** Un aviso por solicitud recien llegada; si llegan muchas juntas, uno solo. */
+function avisarLlegadas(llegadas: BandejaVivo['ultimas']): void {
+  if (llegadas.length > 3) {
+    notificar({ tono: 'info', titulo: `${llegadas.length} solicitudes nuevas`, detalle: 'Estan en Por revisar.' });
+    return;
+  }
+  for (const s of llegadas) {
+    notificar({
+      tono: 'info',
+      titulo: `Nueva solicitud · ${NOMBRE_SEDE[s.sede]}`,
+      detalle: `${s.titulos.join(', ')} (${s.ejemplares} ejemplar(es))`,
+    });
   }
 }

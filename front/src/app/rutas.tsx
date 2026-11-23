@@ -1,7 +1,7 @@
 import { createBrowserRouter, redirect, type RouteObject } from 'react-router';
 
 import { App, CargaInicial } from './app';
-import { requiereEmpleado, requiereSesion } from './auth/guardas';
+import { requiereEmpleado, requiereEstudiante, requiereSesion } from './auth/guardas';
 import { rutasDiagnostico } from './diagnostico/rutas';
 import { Inicio } from './inicio';
 
@@ -16,7 +16,9 @@ export interface DatosRuta {
  * Solo /inicio es publica. Todo lo demas pasa por requiereSesion, porque todo
  * lo demas llama a la API y la API exige token: sin sesion, esas vistas solo
  * podrian mostrar errores 401. Las de /gestion pasan ademas por
- * requiereEmpleado: sin ser empleado, solo verian errores 403.
+ * requiereEmpleado: sin ser empleado, solo verian errores 403. Las de pedir
+ * libros (/solicitud, /mis-solicitudes) por requiereEstudiante: un empleado
+ * no crea solicitudes (Spring le responde 403) y lo manda a su bandeja.
  *
  * Los componentes se cargan con import() (lazy): el bundle inicial no arrastra
  * el catalogo ni el formulario, que es lo que ve alguien que todavia no ha
@@ -41,13 +43,13 @@ const hijas: RouteObject[] = [
   },
   {
     path: 'solicitud',
-    loader: requiereSesion,
+    loader: requiereEstudiante,
     handle: { titulo: 'Nueva solicitud · Biblioteca Duoc' },
     lazy: () => import('./solicitudes/formulario').then((m) => ({ Component: m.FormularioSolicitud })),
   },
   {
     path: 'mis-solicitudes',
-    loader: requiereSesion,
+    loader: requiereEstudiante,
     handle: { titulo: 'Mis solicitudes · Biblioteca Duoc' },
     lazy: () => import('./solicitudes/mis-solicitudes').then((m) => ({ Component: m.MisSolicitudes })),
   },
@@ -57,12 +59,9 @@ const hijas: RouteObject[] = [
     handle: { titulo: 'Bandeja · Biblioteca Duoc' },
     lazy: () => import('./gestion/bandeja').then((m) => ({ Component: m.Bandeja })),
   },
-  {
-    path: 'gestion/stock',
-    loader: requiereEmpleado,
-    handle: { titulo: 'Stock · Biblioteca Duoc' },
-    lazy: () => import('./gestion/stock').then((m) => ({ Component: m.Stock })),
-  },
+  // La vista de stock ya no existe: el empleado carga stock en el catalogo.
+  // Un enlace viejo a /gestion/stock lleva ahi en vez de a la portada.
+  { path: 'gestion/stock', loader: () => redirect('/catalogo') },
   ...rutasDiagnostico,
 
   { path: '*', loader: () => redirect('/inicio') },
@@ -72,7 +71,7 @@ const hijas: RouteObject[] = [
  * createBrowserRouter: rutas limpias (/catalogo, sin "#").
  *
  * Funciona porque Caddy (front/Caddyfile) devuelve index.html para cualquier
- * ruta que no sea un archivo: recargar en /gestion/stock no da 404, llega
+ * ruta que no sea un archivo: recargar en /gestion/solicitudes no da 404, llega
  * index.html y React Router pinta la vista. Cuando el sitio estaba en el
  * endpoint REST de S3 eso no era posible, y por eso las rutas llevaban "#".
  */

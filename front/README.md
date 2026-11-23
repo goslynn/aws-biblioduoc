@@ -15,7 +15,7 @@ Cada pieza de Angular tiene su equivalente:
 | `bootstrapApplication` tras `Amplify.configure` | `createRoot` tras `Amplify.configure` | `src/main.tsx` |
 | `SesionService` (signal, `providedIn: 'root'`) | almacen de modulo + hook `useSesion()` | `app/auth/sesion.ts` |
 | `authInterceptor` de `HttpClient` | cliente `http` sobre `fetch` | `app/auth/http.ts` |
-| `authGuard` / `empleadoGuard` (`canActivate`) | `requiereSesion` / `requiereEmpleado` (`loader`) | `app/auth/guardas.ts` |
+| `authGuard` / `empleadoGuard` (`canActivate`) | `requiereSesion` / `requiereEmpleado` / `requiereEstudiante` (`loader`) | `app/auth/guardas.ts` |
 | `provideRouter(..., withHashLocation())` | `createBrowserRouter` (rutas limpias: ya no hace falta el `#`) | `app/rutas.tsx` |
 | `loadComponent: () => import(...)` | `lazy: () => import(...)` | `app/rutas.tsx` |
 | `title` de la ruta | `handle.titulo`, que aplica `App` | `app/rutas.tsx`, `app/app.tsx` |
@@ -94,14 +94,15 @@ src/
     ├── selector.tsx            EL desplegable de la aplicacion (no se usa <select> ni <datalist>)
     ├── esqueleto.tsx           lo que se ve mientras llega la primera respuesta
     ├── vivo.ts                 useSondeo: consulta cada 3 s las vistas que mantiene Kafka (pausa con la pestana oculta)
+    ├── notificaciones.tsx      toasts "en vivo": avisan de lo que cambio entre dos lecturas de vivo.ts (stock, solicitudes nuevas)
     ├── auth/
     │   ├── sesion.ts           entrar, registrarse, salir, ¿empleado? (+ hook useSesion)
     │   ├── http.ts             UNICO cliente de la API (/api, mismo origen): anade el Bearer
-    │   └── guardas.ts          requiereSesion y requiereEmpleado: bloquean la NAVEGACION
-    ├── catalogo/               buscador, panel de filtros colapsable, seleccion (un ejemplar por libro), tapas, "avisame cuando vuelva" y stock en vivo (H8)
+    │   └── guardas.ts          requiereSesion, requiereEmpleado y requiereEstudiante: bloquean la NAVEGACION; inicioDe(rol)
+    ├── catalogo/               buscador, panel de filtros colapsable, seleccion (un ejemplar por libro), tapas, "avisame cuando vuelva" y stock en vivo (H8); al EMPLEADO, carga de stock en cada tarjeta (H6)
     ├── solicitudes/            formulario de prestamo y "mis solicitudes" (con los avisos por correo)
     ├── avisos/                 activar / desactivar los avisos (el consentimiento)
-    ├── gestion/                SOLO EMPLEADOS: bandeja (aprobar, rechazar, devolver; en vivo, H9) y stock
+    ├── gestion/                SOLO EMPLEADOS: bandeja (aprobar, rechazar, devolver; en vivo, H9), su vista de inicio
     ├── diagnostico/            OPT-IN: token, payload y fetch manual
     │   ├── diagnostico.tsx       solo se empaqueta si la ruta existe
     │   └── rutas.ts              GENERADO segun DEBUG (vacio = no se empaqueta)
@@ -141,9 +142,12 @@ guarda esta porque hay rutas privadas de verdad y sin ella se verian pantallas
 vacias llenas de 401.
 
 **`empleado` es solo para pintar.** Sale del claim `cognito:groups` del access
-token y decide si se ven *Bandeja* y *Stock*. Quien decide si se PUEDE es
-Spring, que lee el mismo claim del token ya validado: un estudiante que forzara
-`/gestion/solicitudes` veria la pantalla y un 403 en cada accion. Tras meter a
+token y decide que cabecera se ve: el empleado tiene *Bandeja* y *Catalogo*
+(entra a la bandeja, y en el catalogo carga stock en lugar de pedir libros); el
+estudiante, *Catalogo*, *Mi solicitud* y *Mis solicitudes*. Quien decide si se
+PUEDE es Spring, que lee el mismo claim del token ya validado: un estudiante
+que forzara `/gestion/solicitudes` veria la pantalla y un 403 en cada accion, y
+un empleado que enviara una solicitud recibiria 403. Tras meter a
 alguien en el grupo, tiene que volver a iniciar sesion: el claim va en el token.
 
 **Las pantallas de login y registro son de Cognito, en castellano.** Son
@@ -194,27 +198,37 @@ empleado puede ser `empleado@duoc.cl` (su contrasena esta en
 5. En un libro agotado (*Building Microservices*, *Terraform*): **Avisame
    cuando vuelva** → 201; el boton pasa a *Te avisaremos* (tocarlo otra vez
    → DELETE 204).
-6. **Empleado → Bandeja → Por revisar**: la solicitud esta RECIBIDA, con el
+6. **Empleado**: al iniciar sesion aterriza en la **Bandeja**, y en la
+   cabecera solo tiene *Bandeja* y *Catalogo*. **Bandeja → Por revisar**: la solicitud esta RECIBIDA, con el
    stock de cada libro al lado. **Aprobar** → 200 → el
    estudiante recibe "aprobada" con la fecha de devolucion, y en *Mis
    solicitudes* la ve *Aprobada* con los dias que faltan. (O **Rechazar** con
    motivo → correo con el motivo.)
-7. **Empleado → Stock**: cargar el libro agotado del paso 5 → el estudiante
-   recibe "Volvio: ..." y su suscripcion se cierra.
+7. **Empleado → Catalogo**: arriba, las cifras de stock; cada libro trae
+   *Cargar* en lugar de *Agregar* y no hay panel *Tu solicitud*. Cargar el
+   libro agotado del paso 5 → 200 → la tarjeta lo muestra al instante y el
+   estudiante recibe "Volvio: ...", y su suscripcion se cierra. (*Ordenar →
+   Menos ejemplares* pone primero lo agotado.)
 8. **Empleado → Bandeja → Prestadas → Registrar devolucion** → correo de
    devolucion.
 9. **En vivo (Kafka), con las dos ventanas abiertas a la vez:**
    * Estudiante en el **Catalogo**, empleado en la **Bandeja**. El estudiante
      envia una solicitud → en 1-3 s aparece en la bandeja del empleado,
      marcada **nueva**, y el contador de su sede (franja *en vivo*) sube, sin
-     recargar. En Network del empleado: un `GET /api/gestion/bandeja-vivo`
-     cada 3 s.
+     recargar, y abajo a la derecha sale un aviso *Nueva solicitud · <sede>*
+     con los titulos (se va solo a los ~7 s; con el raton encima se queda).
+     En Network del empleado: un `GET /api/gestion/bandeja-vivo` cada 3 s.
    * El empleado la **aprueba** → en el catalogo del estudiante el stock de
-     ese libro baja solo (con el ultimo ejemplar pasa a **Agotado**). En
+     ese libro baja solo (con el ultimo ejemplar pasa a **Agotado**) y sale
+     el aviso *Ahora quedan N* o *Se agoto: <titulo>*; al cargar stock en
+     *Empleado → Catalogo*, *Volvio: <titulo>*. Abrir la vista no avisa de nada:
+     la primera lectura solo fija la base. En
      Network del estudiante: `GET /api/libros/stock-vivo` cada 3 s.
    * Con la pestana en segundo plano no sale ninguna de esas peticiones.
 10. Con el estudiante, forzar `/gestion/solicitudes`: redirige al catalogo (la
-   guarda); y aunque se la saltara, Spring responderia 403.
+   guarda); y aunque se la saltara, Spring responderia 403. Con el empleado,
+   forzar `/solicitud` o `/mis-solicitudes`: redirige a la bandeja; y un
+   `POST /api/solicitudes` con su token da 403 (Spring).
 11. Recargar (F5) en `/mis-solicitudes`: sigue en la misma vista, sin 404.
 12. En Network: todas las llamadas van a `/api/...` **del mismo origen**, sin
     ningun `OPTIONS`; el `Authorization: Bearer` en cada peticion **sin que

@@ -46,7 +46,9 @@ docs: |
 
   ## Orden en `bru run`
 
-  `approve` y `return` usan `{{solicitudCreada}}`, la que acaba de crear
-  `solicitudes/create`. `reject` va al final sobre la MISMA solicitud, ya
-  devuelta: con el backoffice responde **409**. Para ver su 200, ejecuta
-  `solicitudes/create` y luego `reject` directamente.
+  `approve` y `return` usan `{{solicitudCreada}}`. Con el backoffice, que
+  como empleado **no puede crear** (403), `solicitudes/create` deja ahi la
+  RECIBIDA mas reciente de la bandeja: por eso hay que correr antes
+  `bru run --env aws`, que crea una y la deja pendiente (su `approve` es 403). `reject` va al final sobre la MISMA solicitud, ya
+  devuelta: con el backoffice responde **409**. Para ver su 200, crea una
+  solicitud con el entorno `aws` y luego ejecuta `reject` con `aws-backoffice`.

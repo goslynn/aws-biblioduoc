@@ -5,7 +5,9 @@ import { cerrarSesion, iniciarSesion, refrescar, registrarse, terminarCanje, use
 import { useSeleccion, vaciarSeleccion } from './catalogo/seleccion';
 import { rutasDiagnostico } from './diagnostico/rutas';
 import { IconoLibro } from './iconos';
+import { Notificaciones, limpiarNotificaciones } from './notificaciones';
 import type { DatosRuta } from './rutas';
+import { inicioDe } from './auth/guardas';
 
 /**
  * Enlace a la vista de diagnostico en la barra de navegacion.
@@ -35,7 +37,8 @@ export function App() {
    * login y lo canjea por los tokens.
    *
    * Si la sesion ya viene autenticada y seguimos en la portada (recien
-   * vueltos de Cognito), se salta directo al catalogo: la portada solo tiene
+   * vueltos de Cognito), se salta directo a la vista de cada rol (el catalogo
+   * para el estudiante, la bandeja para el empleado): la portada solo tiene
    * sentido para quien todavia no ha entrado. La pantalla de carga se quita
    * cuando esa navegacion TERMINA, no antes: si no, la portada asomaria un
    * instante entre la carga y el catalogo.
@@ -43,7 +46,7 @@ export function App() {
   useEffect(() => {
     void refrescar().then(async (sesion) => {
       if (sesion.autenticado && ubicacion.pathname.startsWith('/inicio')) {
-        await navegar('/catalogo', { replace: true });
+        await navegar(inicioDe(sesion), { replace: true });
       }
     }).finally(terminarCanje);
     // Solo al montar, como el ngOnInit de antes: despues, quien decide a donde
@@ -66,6 +69,7 @@ export function App() {
 
   const salir = () => {
     vaciarSeleccion();
+    limpiarNotificaciones();
     void cerrarSesion();
   };
 
@@ -73,7 +77,7 @@ export function App() {
     <>
       <header className="cabecera">
         <div className="contenedor">
-          <Link to={estado.autenticado ? '/catalogo' : '/inicio'} className="marca">
+          <Link to={estado.autenticado ? inicioDe(estado) : '/inicio'} className="marca">
             <span className="logo"><IconoLibro /></span>
             <strong>Biblioteca <span>Duoc</span></strong>
           </Link>
@@ -81,19 +85,24 @@ export function App() {
           {estado.autenticado ? (
             <>
               <nav aria-label="Principal">
-                <NavLink to="/catalogo" className={claseEnlace}>Catalogo</NavLink>
-                <NavLink to="/solicitud" className={claseEnlace}>
-                  Mi solicitud
-                  {!seleccion.vacia && (
-                    <span className="contador" aria-label={`${seleccion.total} libros`}>{seleccion.total}</span>
-                  )}
-                </NavLink>
-                <NavLink to="/mis-solicitudes" className={claseEnlace}>Mis solicitudes</NavLink>
-                {estado.empleado && (
+                {estado.empleado ? (
+                  // El empleado gestiona, no pide libros: sin "Mi solicitud" ni
+                  // "Mis solicitudes" (la API le responderia 403 al crear). El
+                  // stock se carga desde el propio catalogo.
                   <>
-                    <span className="separador" aria-hidden="true" />
                     <NavLink to="/gestion/solicitudes" className={claseEnlace}>Bandeja</NavLink>
-                    <NavLink to="/gestion/stock" className={claseEnlace}>Stock</NavLink>
+                    <NavLink to="/catalogo" className={claseEnlace}>Catalogo</NavLink>
+                  </>
+                ) : (
+                  <>
+                    <NavLink to="/catalogo" className={claseEnlace}>Catalogo</NavLink>
+                    <NavLink to="/solicitud" className={claseEnlace}>
+                      Mi solicitud
+                      {!seleccion.vacia && (
+                        <span className="contador" aria-label={`${seleccion.total} libros`}>{seleccion.total}</span>
+                      )}
+                    </NavLink>
+                    <NavLink to="/mis-solicitudes" className={claseEnlace}>Mis solicitudes</NavLink>
                   </>
                 )}
                 {hayDiagnostico && <NavLink to="/diagnostico" className={claseEnlace}>Diagnostico</NavLink>}
@@ -119,6 +128,8 @@ export function App() {
       </main>
 
       <Pie />
+
+      {estado.autenticado && <Notificaciones />}
     </>
   );
 }

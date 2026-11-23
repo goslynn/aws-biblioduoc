@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router';
 
 import { statusDe } from '../auth/http';
+import { useSesion } from '../auth/sesion';
 import { Esqueleto } from '../esqueleto';
+import { gestionService } from '../gestion/gestion.service';
 import { IconoCampana, IconoCerrar, IconoCheck, IconoFiltros, IconoLupa, IconoMas } from '../iconos';
 import { Selector, type OpcionSelector } from '../selector';
 import type { Libro } from './libro';
@@ -10,10 +12,11 @@ import { librosService } from './libros.service';
 import { Quitar } from './quitar';
 import { agregarASeleccion, useSeleccion } from './seleccion';
 import { Tapa } from './tapa';
+import { notificar } from '../notificaciones';
 import { useSondeo } from '../vivo';
 
 type Disponibilidad = 'todos' | 'disponibles' | 'agotados';
-type Orden = 'relevancia' | 'titulo' | 'recientes' | 'antiguos';
+type Orden = 'relevancia' | 'titulo' | 'recientes' | 'antiguos' | 'ejemplares';
 
 const ORDENES: OpcionSelector<Orden>[] = [
   { valor: 'relevancia', texto: 'Relevancia' },
@@ -21,6 +24,9 @@ const ORDENES: OpcionSelector<Orden>[] = [
   { valor: 'recientes', texto: 'Mas recientes' },
   { valor: 'antiguos', texto: 'Mas antiguos' },
 ];
+
+/** El empleado repone: le sirve ver primero lo agotado y lo que esta por agotarse. */
+const ORDENES_EMPLEADO: OpcionSelector<Orden>[] = [...ORDENES, { valor: 'ejemplares', texto: 'Menos ejemplares' }];
 
 /** Si el panel de filtros queda abierto entre visitas. Es comodidad: si falla, se abre segun el ancho. */
 const CLAVE_PANEL = 'catalogo.filtros-abiertos';
@@ -48,9 +54,15 @@ function panelInicial(): boolean {
  *     navegador la lista que devolvio la API. La API solo filtra por UN genero
  *     (?genero=) y aqui se pueden marcar varios.
  *     Son 20 libros: pedirlos otra vez para reordenarlos no aporta nada.
+ *
+ * DOS ROLES, UNA VISTA. El estudiante agrega libros a su solicitud o pide
+ * "avisame"; el EMPLEADO no pide libros (la API le responde 403) y en su
+ * lugar CARGA STOCK en cada tarjeta (POST /api/gestion/libros/{id}/stock).
+ * Por eso al empleado no se le muestra el panel "Tu solicitud".
  */
 export function Catalogo() {
   const seleccion = useSeleccion();
+  const { empleado } = useSesion();
 
   // Filtros que viajan a la API.
   const [texto, setTexto] = useState('');
@@ -76,12 +88,54 @@ export function Catalogo() {
   // ejemplar (un empleado aprueba su solicitud), el libro pasa a "Agotado"
   // sin recargar. Los libros que no estan en el mapa no cambiaron.
   const vivo = useSondeo(librosService.stockVivo, 3000);
+
+  /**
+   * Lo que acaba de cargar el empleado, por libro, junto con lo que decia el
+   * stock en vivo en ese momento. Hasta que Kafka lo confirme (el valor en
+   * vivo cambia), manda la respuesta del POST: si no, la tarjeta volveria al
+   * numero viejo durante unos segundos.
+   */
+  const [cargados, setCargados] = useState<Record<string, { ejemplares: number; vivoAntes: number | undefined }>>({});
   const resultados = useMemo(() => respuesta.map((libro) => {
-    const ejemplares = vivo?.disponibles[libro.id];
+    let ejemplares = vivo?.disponibles[libro.id];
+    const cargado = cargados[libro.id];
+    if (cargado && ejemplares === cargado.vivoAntes) {
+      ejemplares = cargado.ejemplares;
+    }
     return ejemplares === undefined || ejemplares === libro.ejemplares
       ? libro
       : { ...libro, ejemplares, disponible: ejemplares > 0 };
-  }), [respuesta, vivo]);
+  }), [respuesta, vivo, cargados]);
+
+  // AVISO EN VIVO. Se compara cada lectura con la anterior y se avisa (toast)
+  // de los libros de la lista cuyo stock cambio: se agoto, volvio o bajo. La
+  // primera lectura solo fija la base. Un libro que aparece por primera vez en
+  // el mapa se compara con lo que dijo GET /api/libros.
+  const stockAnterior = useRef<Record<string, number> | null>(null);
+  useEffect(() => {
+    if (!vivo) {
+      return;
+    }
+    const anterior = stockAnterior.current;
+    stockAnterior.current = vivo.disponibles;
+    if (anterior === null) {
+      return;
+    }
+    for (const libro of respuesta) {
+      const ahora = vivo.disponibles[libro.id];
+      const antes = anterior[libro.id] ?? libro.ejemplares;
+      if (ahora === undefined || ahora === antes) {
+        continue;
+      }
+      if (ahora === 0) {
+        notificar({ tono: 'alerta', titulo: `Se agoto: ${libro.titulo}`, detalle: 'Alguien se llevo el ultimo ejemplar.' });
+      } else if (antes === 0) {
+        notificar({ tono: 'exito', titulo: `Volvio: ${libro.titulo}`, detalle: `${ahora} ejemplar(es) disponibles.` });
+      } else {
+        notificar({ tono: 'info', titulo: libro.titulo, detalle: `Ahora quedan ${ahora} ejemplar(es) (antes ${antes}).` });
+      }
+    }
+  }, [vivo]);
 
   /** Ids de los libros agotados que este usuario espera ("avisame"). */
   const [esperando, setEsperando] = useState<Set<string>>(new Set());
@@ -109,10 +163,13 @@ export function Catalogo() {
   };
 
   useEffect(() => {
-    librosService.esperando().then(
-      (ids) => setEsperando(new Set(ids)),
-      () => setEsperando(new Set()),
-    );
+    // "Avisame" es de estudiantes: el empleado es quien repone.
+    if (!empleado) {
+      librosService.esperando().then(
+        (ids) => setEsperando(new Set(ids)),
+        () => setEsperando(new Set()),
+      );
+    }
     librosService.generos().then(setGeneros, () => setGeneros([]));
     buscar();
   }, []);
@@ -148,6 +205,40 @@ export function Catalogo() {
       }),
       // 409: alguien cargo stock entretanto. Se recarga para mostrarlo.
       (fallo) => (statusDe(fallo) === 409 ? buscar() : setError(describir(statusDe(fallo)))),
+    );
+  };
+
+  /** Cantidad a cargar por libro, editable en cada tarjeta (1 si no se toco). */
+  const [cantidades, setCantidades] = useState<Record<string, number>>({});
+  const [exito, setExito] = useState('');
+
+  /**
+   * SOLO EMPLEADO. Si el libro estaba agotado, quienes pulsaron "Avisame"
+   * reciben un correo (cola masiva de RabbitMQ), y el cambio llega por Kafka
+   * al catalogo de todos: tambien aqui, como notificacion en vivo.
+   */
+  const cargarStock = (evento: FormEvent, libro: Libro) => {
+    evento.preventDefault();
+    const cantidad = cantidades[libro.id] ?? 1;
+    const estabaAgotado = !libro.disponible;
+    gestionService.cargarStock(libro.id, cantidad).then(
+      (actualizado) => {
+        setError('');
+        setCargados((actuales) => ({
+          ...actuales,
+          [libro.id]: { ejemplares: actualizado.ejemplares, vivoAntes: vivo?.disponibles[libro.id] },
+        }));
+        setCantidades((actuales) => ({ ...actuales, [libro.id]: 1 }));
+        setExito(
+          `${actualizado.titulo}: ahora hay ${actualizado.ejemplares} ejemplar(es).` +
+          (estabaAgotado ? ' Quienes lo esperaban recibiran un aviso por correo.' : ''));
+      },
+      (fallo) => {
+        setExito('');
+        setError(statusDe(fallo) === 403
+          ? 'HTTP 403: tu cuenta no es de empleado.'
+          : `HTTP ${statusDe(fallo)}: no se pudo cargar el stock (la cantidad va de 1 a 100).`);
+      },
     );
   };
 
@@ -192,6 +283,7 @@ export function Catalogo() {
       titulo: (a, b) => a.titulo.localeCompare(b.titulo, 'es'),
       recientes: (a, b) => b.anio - a.anio,
       antiguos: (a, b) => a.anio - b.anio,
+      ejemplares: (a, b) => a.ejemplares - b.ejemplares,
     };
     const criterio = comparar[orden];
     return criterio ? [...filtrados].sort(criterio) : filtrados;
@@ -219,9 +311,22 @@ export function Catalogo() {
           <div className="titulo-pagina">
             <div>
               <h1>Catalogo</h1>
-              <p className="bajada">Encuentra lo que necesitas y agregalo a tu solicitud.</p>
+              <p className="bajada">
+                {empleado
+                  ? 'Repone ejemplares desde cada libro. Al cargar uno agotado, cada estudiante que pulso "Avisame" recibe un correo.'
+                  : 'Encuentra lo que necesitas y agregalo a tu solicitud.'}
+              </p>
             </div>
           </div>
+
+          {empleado && !cargando && (
+            <dl className="cifras-stock">
+              <div><dt>Titulos</dt><dd>{resultados.length}</dd></div>
+              <div><dt>Ejemplares en estante</dt><dd>{resultados.reduce((suma, l) => suma + l.ejemplares, 0)}</dd></div>
+              <div className="rojo"><dt>Agotados</dt><dd>{resultados.filter((l) => l.ejemplares === 0).length}</dd></div>
+              <div className="ambar"><dt>Con un ejemplar</dt><dd>{resultados.filter((l) => l.ejemplares === 1).length}</dd></div>
+            </dl>
+          )}
 
           <form role="search" className="buscador" onSubmit={enviar}>
             <label htmlFor="q" className="solo-lectores">Buscar por titulo, autor o ISBN</label>
@@ -235,7 +340,7 @@ export function Catalogo() {
         </div>
       </section>
 
-      <div className={panelAbierto ? 'contenedor catalogo' : 'contenedor catalogo sin-filtros'}>
+      <div className={['contenedor catalogo', !panelAbierto && 'sin-filtros', empleado && 'sin-resumen'].filter(Boolean).join(' ')}>
         {panelAbierto && (
           <aside id="panel-filtros" className="panel panel-filtros" aria-labelledby="titulo-filtros">
             <div className="cabeza">
@@ -317,7 +422,7 @@ export function Catalogo() {
             </p>
             <div className="ordenar">
               <label htmlFor="orden">Ordenar</label>
-              <Selector id="orden" valor={orden} opciones={ORDENES} alCambiar={setOrden} />
+              <Selector id="orden" valor={orden} opciones={empleado ? ORDENES_EMPLEADO : ORDENES} alCambiar={setOrden} />
             </div>
           </div>
 
@@ -334,6 +439,7 @@ export function Catalogo() {
             </ul>
           )}
 
+          {exito && <p className="exito" role="status">{exito}</p>}
           {error && <p className="fallo">{error}</p>}
 
           {cargando && resultados.length === 0 && <Esqueleto />}
@@ -359,7 +465,20 @@ export function Catalogo() {
               </div>
 
               <div className="accion">
-                {libro.disponible ? (
+                {empleado ? (
+                  <>
+                    {libro.ejemplares === 0 ? <span className="etiqueta no">Agotado</span>
+                      : libro.ejemplares === 1 ? <span className="etiqueta bajo">1 ejemplar</span>
+                        : <span className="etiqueta si">{libro.ejemplares} en estante</span>}
+                    <form className="cargar" onSubmit={(e) => cargarStock(e, libro)}>
+                      <label htmlFor={`cantidad-${libro.id}`} className="solo-lectores">Ejemplares a cargar de {libro.titulo}</label>
+                      <input id={`cantidad-${libro.id}`} name={`cantidad-${libro.id}`} type="number" min={1} max={100}
+                             value={cantidades[libro.id] ?? 1}
+                             onChange={(e) => setCantidades({ ...cantidades, [libro.id]: e.target.valueAsNumber })} />
+                      <button type="submit"><IconoMas />Cargar</button>
+                    </form>
+                  </>
+                ) : libro.disponible ? (
                   <>
                     <span className="etiqueta si">{libro.ejemplares} disponible(s)</span>
                     {seleccion.contiene(libro.id) ? (
@@ -396,6 +515,7 @@ export function Catalogo() {
           ))}
         </section>
 
+        {!empleado && (
         <aside className="lateral panel resumen" aria-labelledby="tu-solicitud">
           <div className="cabeza">
             <h2 id="tu-solicitud">Tu solicitud</h2>
@@ -424,6 +544,7 @@ export function Catalogo() {
             </>
           )}
         </aside>
+        )}
       </div>
     </>
   );

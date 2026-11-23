@@ -63,21 +63,40 @@ runtime:
           });
         }
 
-        // El id creado queda disponible para la peticion "get" de esta misma
-        // carpeta. Si no se pudo crear, se deja un id de relleno: en los
-        // entornos de rechazo el gateway responde antes de mirar la ruta.
-        bru.setVar(
-          "solicitudCreada",
-          res.getStatus() === 201 ? res.getBody().id : "SOL-0001"
-        );
+        // El id creado queda disponible para "get" y para la carpeta gestion.
+        //   * 201: el recien creado.
+        //   * 403: el portador es empleado (backoffice) y no puede crear; se
+        //     toma la RECIBIDA mas reciente de su bandeja, con el mismo token,
+        //     para que approve y return tengan algo que resolver. La deja
+        //     "bru run --env aws", que se corre antes.
+        //   * otro: un id de relleno; en los entornos de rechazo el gateway
+        //     responde antes de mirar la ruta.
+        let id = "SOL-0001";
+        if (res.getStatus() === 201) {
+          id = res.getBody().id;
+        } else if (res.getStatus() === 403) {
+          const bandeja = await bru.sendRequest({
+            method: "GET",
+            url: bru.getEnvVar("BASE_URL") + "/api/gestion/solicitudes?estado=RECIBIDA",
+            headers: { Authorization: "Bearer " + bru.getEnvVar("ACCESS_TOKEN") },
+          });
+          const pendientes = bandeja.status === 200 ? bandeja.data : [];
+          if (pendientes.length > 0) {
+            id = pendientes[0].id;
+          }
+        }
+        bru.setVar("solicitudCreada", id);
 
 docs: |
   # Crear una solicitud de prestamo
 
-  `POST /api/solicitudes`. Es el **unico endpoint que escribe**, y por eso el
-  que mejor demuestra la cadena completa: el token pasa el authorizer de API
-  Gateway, lo vuelve a validar Spring Security y ademas lo **lee** el
-  controlador para saber quien solicita.
+  `POST /api/solicitudes`. Es el endpoint que mejor demuestra la cadena
+  completa: el token pasa el authorizer de API Gateway, lo vuelve a validar
+  Spring Security y ademas lo **lee** el controlador para saber quien solicita.
+
+  **Solo estudiantes.** Un empleado (persona del grupo `empleados` o el
+  backoffice) gestiona las solicitudes, no las crea: Spring responde **403**
+  aunque el token sea valido y de esta API.
 
   ## Cuerpo
 
@@ -95,6 +114,7 @@ docs: |
   | 409 | el libro existe pero no tiene ejemplares | cuerpo de *Otros cuerpos* |
   | 401 | token invalido, caducado o id token | entornos `aws-token-invalido` / `aws-id-token` |
   | 401 | token valido sin el scope: el authorizer no distingue | entorno `aws-usuario-sin-scope` |
+  | 403 | el portador es empleado (RBAC de Spring) | entorno `aws-backoffice` |
 
   El 400 llega con el detalle campo a campo, que es lo que lo hace util:
 
@@ -180,6 +200,11 @@ examples:
               "dias": "el prestamo maximo es de 30 dias"
             }
           }
+  - name: 403 empleado
+    description: El backoffice (o una persona del grupo empleados) no crea solicitudes. Lo rechaza Spring, por eso el cuerpo es el de Spring y no el del gateway.
+    response:
+      status: 403
+      statusText: Forbidden
   - name: 409 sin ejemplares
     description: El libro existe en el catalogo, pero tiene ejemplares 0.
     response:

@@ -1,6 +1,11 @@
 import { redirect } from 'react-router';
 
-import { refrescar } from './sesion';
+import { refrescar, type EstadoSesion } from './sesion';
+
+/** La vista con la que entra cada rol: el empleado trabaja en la bandeja. */
+export function inicioDe(estado: EstadoSesion): string {
+  return estado.empleado ? '/gestion/solicitudes' : '/catalogo';
+}
 
 /**
  * Impide abrir las rutas privadas sin sesion y redirige al inicio. Se usa
@@ -38,6 +43,23 @@ export async function requiereEmpleado(): Promise<null> {
   }
   if (!estado.empleado) {
     throw redirect('/catalogo');
+  }
+  return null;
+}
+
+/**
+ * Las vistas de pedir libros (Mi solicitud, Mis solicitudes): solo
+ * estudiantes. Un empleado gestiona las solicitudes, no las crea; si llega
+ * aqui, va a su bandeja. Comodidad otra vez: si se la saltara, Spring le
+ * responderia 403 al enviar (SecurityConfig).
+ */
+export async function requiereEstudiante(): Promise<null> {
+  const estado = await refrescar();
+  if (!estado.autenticado) {
+    throw redirect('/inicio');
+  }
+  if (estado.empleado) {
+    throw redirect(inicioDe(estado));
   }
   return null;
 }

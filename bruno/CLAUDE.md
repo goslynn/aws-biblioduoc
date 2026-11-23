@@ -6,7 +6,8 @@ Antes de tocar esta carpeta, invoca el skill `bruno-collections`.
 
 ```sh
 cd bruno && bru run --env aws                   # estudiante: 200/201, y 403 en /gestion (RBAC)
-bru run --env aws-backoffice                    # empleado (M2M scope gestion): 200 en /gestion
+bru run --env aws-backoffice                    # empleado (M2M scope gestion): 200 en /gestion, 403 al crear
+                                                #  (correr antes --env aws: deja la RECIBIDA que aprueba)
 bru run --env aws-usuario-sin-scope             # 401
 bru run --env aws-id-token                      # 401
 bru run --env aws-token-invalido                # 401

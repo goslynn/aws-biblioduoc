@@ -60,7 +60,7 @@ CLI v2**, sobre una cuenta de **AWS Academy Learner Lab**.
 | H3 | estudiante | un **recordatorio** antes del vencimiento | devolver a tiempo |
 | H4 | empleado | **registrar la devolucion** | reponer el stock |
 | H5 | estudiante | **"avisame cuando vuelva"** en un libro agotado | no revisar el catalogo todos los dias |
-| H6 | empleado | **cargar stock** | reponer ejemplares; quienes esperaban reciben un correo |
+| H6 | empleado | **cargar stock** desde el catalogo | reponer ejemplares; quienes esperaban reciben un correo |
 | H7 | empleado | una **bitacora** de quien hizo que | auditar aprobaciones, rechazos y cargas |
 | H8 | estudiante | ver el **stock del catalogo cambiar sin recargar** | no pedir un libro que se acaba de agotar (Kafka) |
 | H9 | empleado | que las **solicitudes nuevas aparezcan solas** en la bandeja, con el contador por sede | atenderlas apenas llegan (Kafka) |
@@ -92,7 +92,7 @@ El plazo de devolucion cuenta desde la aprobacion.
 | GET | `/api/libros/{id}` | todos | 200 · 404 |
 | GET | `/api/libros/avisame` | todos | 200 (libros que espero) |
 | POST · DELETE | `/api/libros/{id}/avisame` | todos | 201 / 204 · 404 · 409 (tiene stock) |
-| POST | `/api/solicitudes` | todos | 201 · 400 · 404 · 409 |
+| POST | `/api/solicitudes` | **estudiante** | 201 · 400 · 403 (empleado) · 404 · 409 |
 | GET | `/api/solicitudes` | todos | 200, **solo las propias** |
 | GET | `/api/solicitudes/{id}` | dueno o empleado | 200 · 404 (tambien si es ajena) |
 | GET · PUT · DELETE | `/api/avisos/correo` | todos | 200 / 200 / 204 · 409 (sin email verificado) |
@@ -319,6 +319,7 @@ deducen del codigo y de los tests, y hay que confirmarlas y quitar la marca.
 | access token **con** el scope | **200** | **200** | nadie: pasa las dos capas |
 | estudiante en `/api/gestion/**` ⧗ | **403** | **403** | **Spring**, RBAC (`hasRole("EMPLEADO")`) |
 | empleado (grupo) o backoffice en `/api/gestion/**` ⧗ | **200** | **200** | nadie |
+| empleado (grupo) o backoffice en `POST /api/solicitudes` ⧗ | **403** | **403** | **Spring**, RBAC (scope de acceso **y no** `ROLE_EMPLEADO`) |
 | solicitud de OTRO estudiante ⧗ | **404** | **404** | **Spring**: no confirma que exista |
 | id inexistente, token valido | **404** | **404** | **Spring** |
 | formulario invalido | **400** | — | **Spring**, Bean Validation |
@@ -375,9 +376,9 @@ Auth 6. Detalle en [`front/README.md`](front/README.md).
 |---|---|---|
 | Configuracion de Amplify | `front/src/main.tsx` | Se configura **antes** de montar React |
 | Cliente HTTP | `front/src/app/auth/http.ts` | Unico punto que llama a la API; anade el `Bearer` a toda peticion |
-| Guardas | `front/src/app/auth/guardas.ts` | `loader` de las rutas: `requiereSesion` (privadas) y `requiereEmpleado` (gestion) |
+| Guardas | `front/src/app/auth/guardas.ts` | `loader` de las rutas: `requiereSesion` (privadas), `requiereEmpleado` (gestion) y `requiereEstudiante` (pedir libros) |
 | Servicios | `libros`, `solicitudes`, `avisos`, `gestion` | Encapsulan URL y llamadas; los componentes no saben de HTTP |
-| Gestion | `front/src/app/gestion/` | Bandeja (aprobar, rechazar, devolver) y carga de stock |
+| Gestion | `front/src/app/gestion/` | Bandeja (aprobar, rechazar, devolver); la carga de stock vive en las tarjetas del catalogo, solo para empleados |
 | Configuracion AWS | `aws-config.ts` | **Generada** por el pipeline; no se versiona |
 | Servidor | `front/Caddyfile` | HTTPS, cabeceras de seguridad, `/api` al gateway y rutas limpias (ver abajo) |
 | Vista de diagnostico | `diagnostico/` | **Opt-in**: solo se empaqueta con `DEBUG=true` (ver abajo) |
@@ -391,9 +392,12 @@ saltarselos con la consola abierta. Si las guardas desaparecieran, la API
 seguiria igual de protegida, porque quien protege son API Gateway y Spring
 Security.
 
-Lo mismo vale para `requiereEmpleado` y los enlaces *Bandeja* y *Stock*: se
-muestran segun el claim `cognito:groups` del access token, pero un estudiante
-que forzara la ruta solo veria errores 403 de Spring.
+Lo mismo vale para `requiereEmpleado`, `requiereEstudiante` y los enlaces de
+la cabecera: el empleado ve *Bandeja* y *Catalogo* (con la carga de stock),
+entra directo a la bandeja y no ve *Mi solicitud* ni *Mis solicitudes*; el
+estudiante ve las tres de siempre. Se decide segun el claim `cognito:groups`
+del access token, pero quien forzara una ruta ajena solo veria errores 403 de
+Spring: un estudiante en `/api/gestion/**`, un empleado al crear una solicitud.
 
 ### La vista de diagnostico: opt-in, y apagada por defecto
 

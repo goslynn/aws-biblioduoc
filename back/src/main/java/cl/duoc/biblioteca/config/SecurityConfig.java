@@ -8,6 +8,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
@@ -44,6 +46,7 @@ import cl.duoc.biblioteca.comun.seguridad.ValidacionJwt;
  *   2. token_use == "access"        -> validador propio de ValidacionJwt.
  *   3. El scope exigido             -> hasAuthority("SCOPE_<scope>").
  *   4. El rol, en /api/gestion/**    -> hasRole("EMPLEADO").
+ *   5. Crear una solicitud           -> scope de acceso Y NO ser empleado.
  *
  * Aqui quedan solo las reglas de RUTA de esta API y su CORS: el resto es
  * comun a los microservicios.
@@ -101,6 +104,15 @@ public class SecurityConfig {
                         // regla general: Spring usa la primera que encaja.
                         .requestMatchers("/api/gestion/**", "/v1/api/gestion/**")
                         .hasRole(Roles.EMPLEADO)
+
+                        // RBAC al reves: pedir libros es solo de ESTUDIANTES.
+                        // Un empleado (persona del grupo o backoffice) gestiona
+                        // las solicitudes, no las crea: 403. Tambien va antes
+                        // de la regla general, que si le dejaria pasar.
+                        .requestMatchers(HttpMethod.POST, "/api/solicitudes", "/v1/api/solicitudes")
+                        .access(AuthorizationManagers.allOf(
+                                AuthorityAuthorizationManager.hasAuthority(validacion.autoridadAcceso()),
+                                AuthorizationManagers.not(AuthorityAuthorizationManager.hasRole(Roles.EMPLEADO))))
 
                         // La regla estricta: no basta con estar autenticado,
                         // hay que traer el scope. Es lo que separa el 401 del

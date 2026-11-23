@@ -22,7 +22,7 @@
 #       no hay CORS ni preflight. El token viaja tal cual en Authorization; la
 #       validacion sigue siendo de API Gateway y de Spring.
 #    3. Todo lo demas -> el React compilado. Una ruta que no es un archivo
-#       (/catalogo, /gestion/stock) devuelve index.html y la resuelve React
+#       (/catalogo, /gestion/solicitudes) devuelve index.html y la resuelve React
 #       Router: por eso las rutas ya no necesitan "#".
 #    4. Cabeceras de seguridad en todas las respuestas.
 # ==============================================================================

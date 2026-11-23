@@ -19,7 +19,8 @@ import jakarta.validation.Valid;
 
 /**
  * Solicitudes de prestamo, vistas por el ESTUDIANTE: crear y consultar las
- * propias. Aprobar, rechazar y devolver es cosa de empleados y vive en
+ * propias. Crear es SOLO de estudiantes (un empleado recibe 403, regla en
+ * SecurityConfig). Aprobar, rechazar y devolver es cosa de empleados y vive en
  * {@link GestionSolicitudController}, bajo /api/gestion.
  *
  * El POST demuestra la cadena completa de seguridad: el token tiene que pasar
@@ -59,6 +60,9 @@ public class SolicitudController {
      *   403  token valido SIN el scope, pero
      *        solo llamando a la EC2 sin pasar
      *        por el gateway                     -> Spring Security (hasAuthority)
+     *   403  el portador es EMPLEADO (grupo
+     *        empleados o backoffice): los
+     *        empleados gestionan, no piden       -> Spring Security (SecurityConfig)
      *
      * EL SOLICITANTE NO VIENE DEL FORMULARIO. Sale de {@code Principal}, que
      * Spring rellena con el JWT ya validado (claim "sub" para un usuario,
