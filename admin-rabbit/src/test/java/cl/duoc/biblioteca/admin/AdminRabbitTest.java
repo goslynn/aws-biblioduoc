@@ -1,6 +1,7 @@
 package cl.duoc.biblioteca.admin;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -9,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.time.Duration;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
@@ -111,6 +113,11 @@ class AdminRabbitTest {
         String nombre = unico("pruebas.borrar");
         crearCola(nombre);
         rabbit.getRabbitTemplate().send("", nombre, MessageBuilder.withBody("hola".getBytes()).build());
+        // send() vuelve antes de que el broker cuente el mensaje en la cola: sin
+        // esperar, a veces la cola aun se ve vacia y el DELETE responde 204
+        // (fallo intermitente, visto en GitHub Actions).
+        await().atMost(Duration.ofSeconds(10))
+                .until(() -> rabbit.getQueueInfo(nombre).getMessageCount() == 1);
 
         mvc.perform(delete("/api/admin/colas/{nombre}", nombre).with(backoffice()))
                 .andExpect(status().isConflict())
